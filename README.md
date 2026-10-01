@@ -105,10 +105,11 @@ In a terminal, `kicode` opens a full-screen UI:
                  /models to choose a model · /help for commands
 
 ──────────────────────────────────────────────────────────────────────────
-  ▌
-  ▌ Ask anything…  "find the TODO in the parser"
-  ▌ Build · deepseek-v4-flash:free · default
-  ▌
+
+    [BUILD] Ask anything…  "find the TODO in the parser"        UPLOAD[+]
+
+
+    deepseek-v4-flash:free · default
  C:\dev\projects\kicode          ↓ 12 tools · 304.8K (29%)   ctrl+p commands
 ```
 
@@ -116,7 +117,8 @@ The bar across the top is your sessions for this directory, newest first. It is
 the **sidebar**, and it is a setting: `auto` — the default — keeps the row for
 the transcript while there is only one session and brings it back the moment
 there is something to switch to. The last three rows are the prompt, the current
-state — the mode, the model and the reasoning variant — and the footer: the
+state — the model and the reasoning variant, while the mode rides in the box's
+own pill — and the footer: the
 directory, what the session has cost, and the one key worth naming.
 `↓ 12 tools · 304.8K (29%)` is tool calls so far and the estimated size of the
 transcript against the window compaction keeps it inside. When the transcript is
@@ -157,11 +159,18 @@ gateway that does not know the field is asked again without it, once per process
 rather than failing the turn. Those same counts are what the session's token
 budget is spent against.
 
-The first word on the state row is the **mode**. `Shift+Tab`, or `/mode`,
-switches between `Build` and `Plan`; plan mode is drawn in the warning colour,
-because it changes what the session is allowed to do rather than merely what it
-is called. The change is announced on that row and not in the transcript — a
-line per keypress would bury the conversation it is meant to accompany.
+The box you type into carries two buttons: the **mode pill** on its left edge,
+and **`UPLOAD[+]`** on the right. The pill is the session's mode, and it is a
+button: `Shift+Tab`, `/mode`, or a click on the pill all switch between `Build`
+and `Plan`, and plan mode is drawn in the warning colour because it changes what
+the session is allowed to do rather than merely what it is called.
+`UPLOAD[+]` opens the platform's own file-selection window, so attaching is a
+click rather than a slash command to remember. The state row under the box is
+what is in play — the model and the reasoning variant — and it names the mode
+too on the few screens where there is no box to put a pill in, such as while a
+list or a permission prompt is up. A mode change is announced on that row and
+not in the transcript: a line per keypress would bury the conversation it is
+meant to accompany.
 
 Each tab carries its own `×`, the way a browser tab does: **click the body of a
 tab to switch to it, its `×` to close it**, click `+NEW` for a fresh
@@ -273,10 +282,10 @@ everything else applies — flags, then the project file, then the environment.
 
 Every theme fills the same slots, so a theme is a statement about colour and
 never about layout — the block behind your request, the rule down tool output,
-the emphasis inside a sentence, and the mode word on the state row are all
+the emphasis inside a sentence, and the mode word on the box's pill are all
 themeable, and a theme that got one wrong would not be a theme. Each one also
 declares whether it is a **dark** or a **light** theme, which is what the Color
-mode row steps through rather than guessing from the name.
+mode's word steps through rather than guessing from the name.
 
 ### Settings
 
@@ -347,7 +356,7 @@ The same settings can be written by hand — see
 | --- | --- |
 | `Enter` | Send the prompt, or run the highlighted command |
 | `Tab` | Switch to the next session for this directory |
-| `Shift+Tab` | Switch between build and plan mode |
+| `Shift+Tab` | Switch between build and plan mode — the pill in the prompt box does the same |
 | `↑` `↓` | Recall earlier prompts, scroll, or move the palette selection |
 | `PgUp` / `PgDn` | Scroll the transcript |
 | `←` `→` `Home` `End` | Move the caret |
@@ -820,16 +829,18 @@ exits: there is no turn controller in the plain prompt.
 
 ## Build and plan mode
 
-`Shift+Tab` switches the session between two modes, shown as the first word on
-the state row. `/mode` does the same from a command — with no argument it opens
-the picker, and `/mode plan` names one outright:
+`Shift+Tab` switches the session between two modes, shown on the pill at the
+left edge of the prompt box. `/mode` does the same from a command — with no
+argument it opens the picker, and `/mode plan` names one outright — and the pill
+is a button, so a click switches the mode as well:
 
 - **Build** — the ordinary mode. Changes and commands are gated as above.
 - **Plan** — read-only. The agent investigates, then tells you what it would do.
   Anything that changes a file or runs something is refused.
 
 ```
-  ▌ Plan · deepseek-v4-flash:free · default
+    [PLAN] Ask anything…                                       UPLOAD[+]
+    deepseek-v4-flash:free · default
 ```
 
 Plan mode is enforced in the agent, not drawn on it: a tool marked

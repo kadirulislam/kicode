@@ -332,13 +332,21 @@ describe("the transcript", () => {
 });
 
 describe("the bottom bar", () => {
-  it("names the mode, the model and the variant", () => {
+  it("names the mode in the pill, and the model and the variant on the state row", () => {
     const lines = draw({ model: "gpt-5.6-luna", variant: "high" }).plain;
-    const row = lines.findIndex((line) => line.includes("Build"));
+    // The last row naming the model: the transcript's header names it too, and
+    // the state row is the one under the box.
+    const row = lines.findLastIndex((line) => line.includes("gpt-5.6-luna"));
 
     // No bar in front of it: the row is inside the input box, and the box's own
-    // fill is what marks it out.
-    expect(lines[row]?.trimStart()).toBe("Build · gpt-5.6-luna · high");
+    // fill is what marks it out. The mode is not here — it is the pill in the
+    // box above, which is a button now, and a row that said it again would
+    // spend a line on a word the eye has already been given.
+    expect(lines[row]?.trimStart()).toBe("gpt-5.6-luna · high");
+    // The pill is on the row being typed into, at its left, where the words
+    // will start once there are some.
+    expect(lines[row - 3]).toContain("[BUILD]");
+    expect(lines[row - 3]).toContain(PLACEHOLDER);
   });
 
   it("shows a spinner while a turn is in flight", () => {
@@ -803,20 +811,35 @@ describe("the mention list", () => {
   });
 });
 
-describe("the mode row", () => {
-  it("names the mode, and warns once it is not the everyday one", () => {
-    expect(draw({ mode: "build" }).plain.join("\n")).toContain("Build");
+describe("the mode", () => {
+  it("names it in the pill, and warns once it is not the everyday one", () => {
+    const build = draw({ mode: "build" });
+    expect(build.plain.join("\n")).toContain("[BUILD]");
+    expect(build.frame.lines.join("\n")).toContain(styles.mode);
 
     const plan = draw({ mode: "plan" });
-    expect(plan.plain.join("\n")).toContain("Plan");
+    expect(plan.plain.join("\n")).toContain("[PLAN]");
     // The mode is a capability, not a label: plan mode is worth noticing.
     expect(plan.frame.lines.join("\n")).toContain(styles.warn);
   });
 
-  it("keeps the model and the mode on the same row", () => {
-    const row = draw({ mode: "plan" }).plain.find((line) => line.includes("Plan")) ?? "";
+  it("puts the pill and the prompt on the one row", () => {
+    const row = draw({ mode: "plan" }).plain.find((line) => line.includes("[PLAN]")) ?? "";
 
-    expect(row).toContain("deepseek-v4-flash:free");
+    // The pill is the row's own button, not a row of its own: it sits on the
+    // line being typed into, in the column the words would start in.
+    expect(row).toContain(PLACEHOLDER);
+    expect(row).not.toContain("deepseek-v4-flash:free");
+  });
+
+  it("names the mode on the state row when there is no box for a pill", () => {
+    // A card has the keyboard, so there is no box — and the row that stands in
+    // for it is the only place left to read which mode the session is in.
+    const picker = { title: "Select model", query: "", items: [{ label: "m1", value: "m1" }], selected: 0 };
+    const { plain } = draw({ mode: "plan", picker });
+
+    expect(plain.join("\n")).toContain("Plan · deepseek-v4-flash:free");
+    expect(plain.join("\n")).not.toContain("[PLAN]");
   });
 
   it("cycles between the two", () => {
@@ -1230,17 +1253,19 @@ describe("the blocks", () => {
     expect(transcriptOf(frame).join("\n")).not.toContain(block);
   });
 
-  it("fills the prompt box and its mode row as one surface", () => {
+  it("fills the prompt box and the state row under it as one surface", () => {
     const { frame, plain } = draw({});
 
     const prompt = frame.lines.find((line) => strip(line).includes(PLACEHOLDER));
-    const mode = frame.lines.find((line) => strip(line).includes("Build"));
+    // The last row that names the model: the transcript's own header names it
+    // too, and the state row is the one under the box.
+    const status = frame.lines.findLast((line) => strip(line).includes("deepseek-v4-flash:free"));
     // The box and the state row wear the theme's own input surface — a step off
     // the fill a user's turn wears, so the place being typed into reads as the
     // surface in front rather than one more line of transcript. The panel is
     // the tab bar and a card's own fill, not this.
     expect(prompt).toContain(fill);
-    expect(mode).toContain(fill);
+    expect(status).toContain(fill);
     expect(prompt).not.toContain(panel);
     expect(prompt).not.toContain(block);
     // Every row of the box carries the fill — the rows of air included — so it
@@ -1258,11 +1283,13 @@ describe("the blocks", () => {
     const { plain } = draw({});
     const lines = plain.map((line) => line.trimEnd());
     const editor = lines.findIndex((line) => line.includes(PLACEHOLDER));
-    const mode = lines.findIndex((line) => line.includes("Build"));
+    // The last row that names the model: the transcript's own header names it
+    // too, and the state row is the one under the box.
+    const status = lines.findLastIndex((line) => line.includes("deepseek-v4-flash:free"));
 
     // Enter puts two rows of the box's own fill between what is being typed and
     // where it will go: stacked flush, the two answers read as one run of text.
-    expect(mode - editor).toBe(3);
+    expect(status - editor).toBe(3);
     expect(lines[editor + 1]?.trim()).toBe("");
     expect(lines[editor + 2]?.trim()).toBe("");
   });
@@ -1351,9 +1378,11 @@ describe("the prompt that wraps", () => {
   it("grows the box instead of cutting the line at the edge", () => {
     const { frame, plain, shown } = typed("f".repeat(200));
 
-    // Every character is on screen, across three rows instead of one.
+    // Every character is on screen, across four rows instead of one — one more
+    // than the row count before the pill: the pill and the upload button take
+    // ten cells of the row's own budget.
     expect(shown.join("")).toBe("f".repeat(200));
-    expect(frame.prompt?.rows).toHaveLength(3);
+    expect(frame.prompt?.rows).toHaveLength(4);
     const box = plain.slice((frame.prompt?.top ?? 1) - 1, frame.prompt?.bottom);
     for (const line of box) expect(line).not.toContain("…");
   });
@@ -1408,6 +1437,39 @@ describe("the prompt that wraps", () => {
   });
 });
 
+describe("the box's own two buttons", () => {
+  it("reports the cells it drew each of them in", () => {
+    const editor = new LineEditor();
+    editor.setText("hi");
+    const { frame, plain } = draw({ editor });
+    const box = frame.prompt!;
+    const row = plain[box.modeButton.row - 1] ?? "";
+
+    // Both are presses, so the renderer says where they landed: the app presses
+    // these cells and nothing else. The pill is the mode's own word, so its
+    // width is not knowable from outside — this is the only copy of it.
+    expect(row.slice(box.modeButton.colStart - 1, box.modeButton.colEnd)).toBe("[BUILD]");
+    expect(row.slice(box.uploadButton.colStart - 1, box.uploadButton.colEnd)).toBe("UPLOAD[+]");
+    // Neither of them sits on the text: the pill ends before the words begin and
+    // the button starts after them.
+    expect(box.modeButton.colEnd).toBeLessThan(box.textLeft);
+    expect(box.uploadButton.colStart).toBeGreaterThan(box.textLeft);
+  });
+
+  it("keeps both on the row that is being typed into", () => {
+    const editor = new LineEditor();
+    editor.setText("f".repeat(200));
+    const { frame } = draw({ editor });
+    const box = frame.prompt!;
+
+    // One row each: a pill or a `UPLOAD[+]` beside every wrapped row would read
+    // as a column of buttons, and one press would have to say which it meant.
+    expect(box.rows.length).toBeGreaterThan(1);
+    expect(box.modeButton.row).toBe(box.rows[0]?.row);
+    expect(box.uploadButton.row).toBe(box.rows[0]?.row);
+  });
+});
+
 describe("the transcript column", () => {
   it("starts a request block at the column's edge, not the terminal's", () => {
     const { frame, plain } = draw({ entries: [{ kind: "user", text: "hi" }] }, { cols: 80, rows: 24 });
@@ -1439,7 +1501,7 @@ describe("the transcript column", () => {
     expect(textWidth(rows[0] ?? "")).toBe(76);
   });
 
-  it("puts the request bar, the tool rule and the prompt bar in one column", () => {
+  it("puts the request bar, the tool rule and the box's own edge in one column", () => {
     const entries: Entry[] = [
       { kind: "user", text: "hi" },
       { kind: "tool", name: "read", args: { file: "a.ts" } },
@@ -1457,9 +1519,13 @@ describe("the transcript column", () => {
       // too narrow to spare it.
       const request = columnOf("hi", "▌");
       expect(columnOf("→ read", "│")).toBe(request);
-      // The box carries no bar of its own, but its text starts where the
-      // request block's text does: the bar, its space, and the words.
-      expect(columnOf("Ask anything", "A")).toBe(request + 2);
+      // The box carries no bar of its own, but it opens where the request
+      // block opens: the bar, its space, then the pill. The words follow the
+      // pill, one gap behind it — the pill takes the column the request block's
+      // text begins in, because it is what says how that text will be read.
+      const edge = columnOf("Ask anything", "[");
+      expect(edge).toBe(request + 2);
+      expect(columnOf("Ask anything", "A")).toBe(edge + textWidth("[BUILD] "));
       expect(request).toBe(cols >= 50 ? 2 : 0);
     }
   });

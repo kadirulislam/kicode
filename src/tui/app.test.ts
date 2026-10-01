@@ -363,23 +363,25 @@ describe("runTui", () => {
     expect(await done).toBe(0);
   });
 
-  it("shows Goal as the mode head while a goal run executes", async () => {
+  it("shows Goal on the pill while a goal run executes", async () => {
     // A /goal run is not a session mode — shift+tab does not cycle through it —
-    // but while it is executing, the row that says what the session is doing
-    // has to say Goal, the way it says Plan.
+    // but while it is executing, the box's pill has to say Goal, the way it
+    // says Plan.
     const app = harness({}, { slow: 250 });
     const done = runTui(app.options);
     await tick();
 
     app.input.write("/goal ship it\r");
     await tick(60);
-    expect(app.screen()).toContain("Goal ·");
+    expect(app.screen()).toContain("[GOAL]");
 
-    // Transient: the run is over, so the head is the session's own mode again.
+    // Transient: the run is over, so the pill is the session's own mode again.
     await tick(400);
-    // The state row is the one above the footer; the goal card may still be in
-    // the transcript, but the row that reports the session's mode is not.
-    expect(app.lastFrame().split(/\r?\n/).at(-2) ?? "").not.toContain("Goal");
+    const lines = app.lastFrame().split(/\r?\n/);
+    // The goal card may still be in the transcript, so the check is on the box
+    // itself: the row under the transcript, which is the one the pill rides.
+    expect(lines.filter((line) => line.includes("[GOAL]")).length).toBe(0);
+    expect(lines.filter((line) => line.includes("[BUILD]")).length).toBe(1);
 
     app.input.write("\u0003");
     expect(await done).toBe(0);
@@ -1294,24 +1296,24 @@ describe("the slash commands", () => {
     // word on the status row.
     expect(app.settings.at(-1)?.mode).toBe("plan");
     expect(app.screen()).toContain("plan mode");
-    expect(app.lastFrame()).toContain("Plan");
+    expect(app.lastFrame()).toContain("[PLAN]");
 
     app.input.write("\u001b[Z");
     await tick(30);
 
     expect(app.settings.at(-1)?.mode).toBe("build");
-    expect(app.lastFrame()).toContain("Build");
+    expect(app.lastFrame()).toContain("[BUILD]");
 
     await finish(app, done);
   });
 
-  it("switches mode from /mode, naming it on the status row", async () => {
+  it("switches mode from /mode, naming it in the pill", async () => {
     const { app, done } = await drive(["/mode plan"]);
     await tick(20);
 
     expect(app.settings.at(-1)?.mode).toBe("plan");
-    // The word is on the state row, where the mode lives…
-    expect(app.lastFrame()).toContain("Plan");
+    // The word is in the pill, where the mode lives while there is a box…
+    expect(app.lastFrame()).toContain("[PLAN]");
     // …and the announcement is transient: a line per keypress would bury the
     // conversation it is meant to accompany.
     expect(app.saves).toHaveLength(0);
@@ -1745,6 +1747,28 @@ describe("the slash commands", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("cycles the mode from the pill in the prompt box", async () => {
+    const { app, done } = await drive([]);
+    await tick(30);
+
+    // The pill is a button, so the mode is not the keyboard's alone.
+    expect(app.lastFrame()).toContain("[BUILD]");
+    clickOn(app, "[BUILD]");
+    await tick(40);
+
+    expect(app.settings.at(-1)?.mode).toBe("plan");
+    expect(app.lastFrame()).toContain("[PLAN]");
+
+    // And back: it is a cycle, not a one-way switch.
+    clickOn(app, "[PLAN]");
+    await tick(40);
+
+    expect(app.settings.at(-1)?.mode).toBe("build");
+    expect(app.lastFrame()).toContain("[BUILD]");
+
+    await finish(app, done);
   });
 
   it("leaves the prompt untouched when the file picker is cancelled", async () => {
@@ -2933,15 +2957,16 @@ describe("clicking a wrapped prompt", () => {
   /**
    * The rows the prompt's own text fills, read off the frame.
    *
-   * Found by the bar and the text rather than by a row number: the banner and
-   * the mode row are on the same screen, and only the prompt rows are a bar
-   * followed by the wall of text this test typed.
+   * Found by the text rather than by a row number: the first of them opens with
+   * the mode pill and the last is a bare wall of it, and the run of the typed
+   * character is what they have in common. Nothing else on screen carries five
+   * of it in a row.
    */
   const textRows = (frame: string): { index: number; line: string }[] =>
     frame
       .split(/\r?\n/)
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => /^\s*f/.test(line));
+      .filter(({ line }) => line.includes("fffff"));
 
   it("puts the caret on the row that was clicked, not at the start of the prompt", async () => {
     const { app, done } = await drive([]);
@@ -2987,10 +3012,15 @@ describe("clicking a wrapped prompt", () => {
 
     const rows = textRows(app.lastFrame());
     expect(rows).toHaveLength(3);
+    const first = rows[0]!;
     const second = rows[1]!;
     const third = rows[2]!;
+    // The first row holds the pill, the gap and the upload button around its
+    // share of the text, so how much a row carries is counted off the row
+    // rather than worked out here: the budget is the renderer's to say.
+    const perRow = first.line.match(/f+/)?.[0]?.length ?? 0;
     // From the first cell of the second row to the cell after the last one on
-    // the third: 79 of the 150 characters.
+    // the third: everything past the first row.
     const to = third.line.trimEnd().length + 1;
     app.input.write(
       `\u001b[<0;${second.line.indexOf("f") + 1};${second.index + 1}M` +
@@ -3001,7 +3031,7 @@ describe("clicking a wrapped prompt", () => {
     // span the drag covered. Poll rather than sleep once: a loaded runner
     // stalls a tick.
     for (let i = 0; i < 30 && copied.length === 0; i++) await tick(40);
-    expect(copied).toEqual(["f".repeat(150 - 71)]);
+    expect(copied).toEqual(["f".repeat(150 - perRow)]);
 
     await finish(app, done);
   });

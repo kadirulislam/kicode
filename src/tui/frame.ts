@@ -254,7 +254,7 @@ export type TuiState = {
   variant: string;
   /** Build or plan; what the agent is currently allowed to do. */
   mode: SessionMode;
-  /** True while a `/goal` run is executing — shows "Goal" in the mode row. */
+  /** True while a `/goal` run is executing — shows "Goal" in the mode pill. */
   goalActive?: boolean;
   /** What the session has cost so far, for the footer. */
   usage: { tokens: number; budget: number; tools: number };
@@ -277,7 +277,7 @@ export type SessionMode = "build" | "plan";
 
 export const MODES: readonly SessionMode[] = ["build", "plan"];
 
-/** The word drawn on the mode row. */
+/** The word drawn in the mode pill, and on the state row while there is no box. */
 export const MODE_LABELS: Record<SessionMode, string> = { build: "Build", plan: "Plan" };
 
 /** The mode `shift+tab` moves to, cycling through them all. */
@@ -313,6 +313,16 @@ export type PromptBox = {
   textLeft: number;
   /** One entry per text row: its screen row, and the text it shows. */
   rows: { row: number; start: number; end: number }[];
+  /**
+   * The mode pill on the box's left edge, in the columns it was drawn in.
+   *
+   * The pill is the mode's own word, so its width is not knowable from
+   * outside the renderer — the caller presses it by these numbers instead of
+   * working the arithmetic out a second time.
+   */
+  modeButton: { row: number; colStart: number; colEnd: number };
+  /** The upload button at the box's right edge, in the columns it was drawn in. */
+  uploadButton: { row: number; colStart: number; colEnd: number };
 };
 
 export type RenderedFrame = {
@@ -566,10 +576,11 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
       ? null
       : {
           row: 1 + tabRowCount + bodyRows + bottom.caretRow,
-          // `caretCol` counts the cells before the caret, and the text starts
-          // one cell after the bar's space — so the caret is that many cells
-          // past where the row's text begins, not one short of it.
-          col: Math.min(margin + 3 + bottom.caretCol, usable - 1),
+          // `caretCol` counts the cells before the caret *inside the box's own
+          // text*, and where that starts is the box's to say: the gutter, the
+          // mode pill and the badges all sit in front of it. Asking the box is
+          // also what keeps a press and a caret landing in the same column.
+          col: Math.min((bottom.prompt?.textLeft ?? margin + 3) + bottom.caretCol, usable - 1),
         };
 
   // Two blocks, two offsets: the body starts under the tab bar, the bottom block
@@ -598,6 +609,9 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
         top: bottom.prompt.top + tabRowCount + bodyRows + 1,
         bottom: bottom.prompt.bottom + tabRowCount + bodyRows + 1,
         rows: bottom.prompt.rows.map((row) => ({ ...row, row: row.row + tabRowCount + bodyRows + 1 })),
+        // The box's two buttons ride the same shift as its rows.
+        modeButton: { ...bottom.prompt.modeButton, row: bottom.prompt.modeButton.row + tabRowCount + bodyRows + 1 },
+        uploadButton: { ...bottom.prompt.uploadButton, row: bottom.prompt.uploadButton.row + tabRowCount + bodyRows + 1 },
       }
     : null;
 
@@ -1931,11 +1945,13 @@ function renderBottom(
   // words it will become. `panel` (the tab bar, a card) sat one step off the
   // page and read as one more line of transcript.
   const boxBg = theme.input;
-  if (state.modal || state.picker || state.menu || (state.ask && !state.askTyping)) {
-    // A list or a panel is on screen and the keys belong to it. An input line
-    // that cannot be typed into would only invite typing that goes nowhere —
-    // and a menu's own search field already says where typing goes.
-  } else {
+  // A list or a panel is on screen and the keys belong to it. An input line
+  // that cannot be typed into would only invite typing that goes nowhere —
+  // and a menu's own search field already says where typing goes. The box
+  // being on screen is also what decides whether the mode row under it has to
+  // name the mode: the box's own pill says it whenever the box is there.
+  const boxShown = !state.modal && !state.picker && !state.menu && !(state.ask && !state.askTyping);
+  if (boxShown) {
     const attachedCount = state.attachedImages ?? 0;
     const badges: Span[] = [];
     let badgeWidth = 0;
@@ -1953,33 +1969,59 @@ function renderBottom(
       badgeWidth += text.length + 1;
     }
 
-    // Right controls: [+] — plain text, no emoji. The [+] is the attach button:
-    // it opens the platform's file-selection window, so attaching is a click
-    // and not a slash command to remember. Send has no button of its own: a
-    // filled arrow was the loudest thing on a quiet screen for the one action
-    // the keyboard already has (enter), so the row keeps only the control that
-    // is actually pressed while typing. The variant is changed with `/effort`,
-    // which needs no button either.
-    const attachText = "[+]";
-    const attachLen = textWidth(attachText);
+    // Right controls: `UPLOAD[+]` — plain text, no emoji, and it is spelled out
+    // so the glyph is not a riddle. The button opens the platform's
+    // file-selection window, so attaching is a click and not a slash command to
+    // remember. Send has no button of its own: a filled arrow was the loudest
+    // thing on a quiet screen for the one action the keyboard already has
+    // (enter). The variant is changed with `/effort`, which needs no button
+    // either.
+    const uploadText = "UPLOAD[+]";
+    const uploadLen = textWidth(uploadText);
     // The trailing space is part of the controls, so the gap arithmetic matches
     // exactly what is drawn and the row never overflows.
-    const rightLen = attachLen + 1;
+    const rightLen = uploadLen + 1;
 
-    const availableWidth = Math.max(width - badgeWidth - rightLen, 10);
+    // The mode pill, on the box's own left edge.
+    //
+    // It is the word the state row below used to carry, drawn as the button it
+    // now is: a press on it cycles the mode the way shift+tab does. It leads the
+    // row because it answers the question the row is about — what this box will
+    // do with what is typed into it — and a button that changes the session
+    // belongs where the session's own writing starts.
+    const mode = modeWord(state, styles);
+    const modeWordText = mode.text.toUpperCase();
+    const pillText = `[${modeWordText}]`;
+    const pillWidth = textWidth(pillText);
+    // The pill's own trailing cell: one gap, so the words after it are not
+    // touching the button that changed the mode they will be read in.
+    const pillGap = 1;
+
+    const availableWidth = Math.max(width - pillWidth - pillGap - badgeWidth - rightLen, 10);
     const placeholder = attachedCount > 0 ? "" : (state.ask ? "Type your answer…" : PLACEHOLDER);
     const view = editorRows(state.editor, styles, availableWidth, placeholder);
 
-    const rightControls: Span[] = [];
-    rightControls.push(span(attachText, styles.thinkBadge), span(" "));
+    // Brackets, with the mode's own word between them: the shape of every other
+    // key the interface offers (`[esc]`, `[y]`), so a press is legible as one.
+    const pillSpans: Span[] = [
+      span("[", styles.pillBorder),
+      span(modeWordText, mode.style),
+      span("]", styles.pillBorder),
+    ];
+    const rightControls: Span[] = [
+      span("UPLOAD", styles.hintKey),
+      span("[+]", styles.plusButton),
+      span(" "),
+    ];
 
     // The box is fill and nothing else: no bar down its left edge, no border,
     // and two rows of its own fill above the text and two below. The fill is
     // what says "this is the typing area" — the bar was doing that job and
     // talking over the surface it was marking out.
     //
-    // `gutter` is the text column: the same two-cell inset a request block's
-    // text has, so what is typed and what was typed line up.
+    // `gutter` is the inset a request block's bar has, so the box opens in the
+    // same column as the conversation above it — and the pill takes the column
+    // that block's text would have begun in, one gap in from the gutter.
     const gutter = span(`${indent}  `);
     push([span(indent)], boxBg);
     const boxTop = rows.length - 1;
@@ -1988,14 +2030,20 @@ function renderBottom(
     // The rows under the first keep the same text column, so a wrapped prompt
     // stays one block of text rather than starting over at the gutter.
     const badgePad: Span[] = badgeWidth > 0 ? [span(" ".repeat(badgeWidth))] : [];
+    // The rows under the first pad the pill out instead of drawing it again:
+    // the pill is the row's button, and one button per wrapped line would read
+    // as a column of them. The pads keep every row's text in one column.
+    const pillPad = span(" ".repeat(pillWidth));
     view.rows.forEach((row, index) => {
-      // The controls ride the row being typed on. A `[+]` beside every wrapped
-      // row would read as one button per line.
+      // The controls ride the row being typed on, for the same reason.
       const trailing = index === 0 ? rightLen : 0;
-      const gap = Math.max(width - badgeWidth - spansWidth(row.spans) - trailing, 0);
+      const lead = pillWidth + pillGap;
+      const gap = Math.max(width - lead - badgeWidth - spansWidth(row.spans) - trailing, 0);
       push(
         [
           gutter,
+          ...(index === 0 ? pillSpans : [pillPad]),
+          span(" ".repeat(pillGap)),
           ...(index === 0 ? badges : badgePad),
           ...row.spans,
           span(" ".repeat(gap)),
@@ -2016,9 +2064,13 @@ function renderBottom(
       top: boxTop,
       bottom: rows.length - 1,
       // One-based, which is what a mouse reports: the gutter and its two cells,
-      // then whatever the badges take.
-      textLeft: margin + 3 + badgeWidth,
+      // the pill and its gap, then whatever the badges take.
+      textLeft: margin + 4 + pillWidth + badgeWidth,
       rows: view.rows.map((row, index) => ({ row: firstTextRow + index, start: row.start, end: row.end })),
+      // Both controls, in the columns they were drawn in — the boxes the app
+      // presses, so neither it nor a future change has to redo this arithmetic.
+      modeButton: { row: firstTextRow, colStart: margin + 3, colEnd: margin + 2 + pillWidth },
+      uploadButton: { row: firstTextRow, colStart: usable - uploadLen, colEnd: usable - 1 },
     };
   }
 
@@ -2028,12 +2080,18 @@ function renderBottom(
   // decision is up, the box when there is one to type into, and the page
   // otherwise — and it carries no bar of its own, because the fill under it
   // already says which box it belongs to.
+  //
+  // The mode leads the row only when the box is not on screen: with the box up,
+  // the pill inside it already says the mode, and a row that says the same thing
+  // twice spends its width on an answer the eye has already been given. One
+  // screen names the mode exactly once — the pill, or the row that stands in for
+  // it while a card has the keyboard.
   const stateRowBg = state.modal
     ? theme.panel
     : !state.picker && !state.ask && !state.menu
       ? boxBg
       : theme.bg;
-  push(modeSpans(state, styles, width, indent), stateRowBg);
+  push(modeSpans(state, styles, width, indent, !boxShown), stateRowBg);
   // The footer's own chips close whatever is open, so escape is a mouse action
   // here too. Its columns are read off the packed row, which is the only place
   // that knows where they landed.
@@ -2045,28 +2103,40 @@ function renderBottom(
 }
 
 /**
+ * What the session's mode is called, and in what colour.
+ *
+ * One function, because the pill inside the box and the state row that stands
+ * in for it both say it — and two places with their own copy of the words could
+ * disagree about which mode the session is in.
+ *
+ * The colour is the warn one whenever the mode is not the everyday one, so a
+ * session that has stopped writing files is noticeable at a glance.
+ */
+function modeWord(state: TuiState, styles: Styles): { text: string; style: string } {
+  const isPaused = Boolean(state.isPaused);
+  // A goal run is named while it lasts: it is the same "what is this session
+  // doing right now" question, and more specific than Build — the session is
+  // executing a goal, not taking edits one request at a time. It is transient,
+  // so it is not in the mode cycle.
+  const text = isPaused ? "paused" : state.goalActive ? "Goal" : MODE_LABELS[state.mode];
+  const style = isPaused || state.mode === "plan" ? styles.warn : styles.mode;
+  return { text, style };
+}
+
+/**
  * The mode row: what the session may do, then what is in play or happening.
  *
- * The mode word leads the row because it changes what the model is allowed to
- * do, and it is drawn in the warn colour when it is not the everyday one, so a
- * session that has stopped writing files is noticeable at a glance. The variant
- * is warn-coloured too, for the same reason: an unusual setting should catch
- * the eye.
+ * With no box on screen it leads with the mode, which is the only place left to
+ * read it; with the box up the leading word is dropped, because the box's own
+ * pill is already saying it. The variant is warn-coloured for the same reason
+ * the mode is: an unusual setting should catch the eye.
  */
-function modeSpans(state: TuiState, styles: Styles, width: number, indent: string): Span[] {
-  const isPaused = Boolean(state.isPaused);
-  // A goal run leads the row while it lasts: it is the same "what is this
-  // session doing right now" question the mode word answers, and it is more
-  // specific than Build — the session is executing a goal, not taking edits
-  // one request at a time. It is transient, so it is not in the mode cycle.
-  const goalActive = Boolean(state.goalActive) && !isPaused;
-  const headStyle = isPaused ? styles.warn : state.mode === "plan" ? styles.warn : styles.mode;
+function modeSpans(state: TuiState, styles: Styles, width: number, indent: string, showMode: boolean): Span[] {
+  const word = modeWord(state, styles);
   const head = [
     span(`${indent}  `),
-    span(isPaused ? "paused" : goalActive ? "Goal" : MODE_LABELS[state.mode], headStyle),
-    span(" · ", styles.faint),
+    ...(showMode ? [span(word.text, word.style), span(" · ", styles.faint)] : []),
   ];
-
   if (state.busy !== null) {
     const glyph = SPINNER[state.spinnerFrame % SPINNER.length] ?? "⠋";
     const queueNote = state.queuedCount && state.queuedCount > 0 ? ` · ${state.queuedCount} queued` : "";

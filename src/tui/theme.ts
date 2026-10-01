@@ -465,7 +465,7 @@ export type Styles = {
   emphasis: string;
   /** The thin left rule that ties a run of tool output together. */
   rule: string;
-  /** The build/plan word on the mode row. */
+  /** The build/plan word in the mode pill on the prompt box. */
   mode: string;
   /** The name of a group of rows in a list, e.g. a date in the session picker. */
   heading: string;

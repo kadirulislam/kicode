@@ -1761,7 +1761,7 @@ class TuiApp {
   private async attachFile(argument: string): Promise<void> {
     const filePath = argument.trim().replace(/^["']|["']$/g, "");
     if (!filePath) {
-      this.note("no file given — use the [+] button beside the prompt");
+      this.note("no file given — use UPLOAD[+] beside the prompt");
       this.draw();
       return;
     }
@@ -4164,17 +4164,30 @@ class TuiApp {
       }
     }
 
-    // Clicking on the prompt's first text row: the row the badges and the
-    // `[+]` control are drawn on. A wrapped prompt's lower rows carry text and
-    // nothing else, so a press there is only ever a caret (handled below).
+    // Clicking on the prompt's first text row: the row the mode pill, the
+    // badges and the upload button are drawn on. A wrapped prompt's lower rows
+    // carry text and nothing else, so a press there is only ever a caret
+    // (handled below).
+    //
+    // Where the two buttons *are* comes from the box itself: the pill is the
+    // mode's own word, so its width is not knowable from here — and a second
+    // copy of the arithmetic is a second thing to keep in step with the row.
     if (this.promptBox && this.promptBox.rows[0]?.row === event.y) {
-      const margin = this.output.columns && this.output.columns >= 50 ? 2 : 0;
-      const usable = (this.output.columns ?? 80) - 1;
-      const promptLeft = margin + 3;
+      const box = this.promptBox;
+      const presses = (control: { colStart: number; colEnd: number }): boolean =>
+        event.x >= control.colStart && event.x <= control.colEnd;
 
-      // 1. Check if clicking attached image badge
+      // 1. The mode pill on the row's left edge. The mode is a capability, so
+      // changing it is worth a button — shift+tab is no longer the only way.
+      if (presses(box.modeButton)) {
+        this.toggleMode();
+        return true;
+      }
+
+      // 2. An attached image's badge takes that image back off, drawn from
+      // where the box's own text starts.
       if (this.attached.length > 0) {
-        let badgeStart = promptLeft;
+        let badgeStart = box.textLeft;
         for (let i = 0; i < this.attached.length; i++) {
           const badgeLen = `[Image ${i + 1}] `.length;
           if (event.x >= badgeStart && event.x < badgeStart + badgeLen) {
@@ -4187,21 +4200,12 @@ class TuiApp {
         }
       }
 
-      // 2. Check [+] button click
-      if (this.editor.text.length === 0 && this.attached.length === 0 && event.x >= promptLeft && event.x <= promptLeft + 3) {
-        void this.openClipboardContextMenu();
-        return true;
-      }
-
-      // 3. Check [+] attach button click. It sits at the right edge of the
-      // prompt row — the only control the row carries, now that send has no
-      // button of its own (enter sends) and the variant has none either
-      // (`/effort` changes it). `event.x` is a 1-based column, and the glyph is
-      // the last three cells before the padding one — so its first cell is
-      // `usable - attachLen`, which is where the drawn `[+]` actually starts.
-      const attachLen = 3;
-      const attachStart = usable - attachLen;
-      if (event.x >= attachStart && event.x < attachStart + attachLen) {
+      // 3. `UPLOAD[+]` at the row's right edge: the platform's file-selection
+      // window. It is the only control the row carries — send has no button of
+      // its own (enter sends) and the variant has none either (`/effort`
+      // changes it). The clipboard menu it once shared this corner with is on
+      // the prompt's right-click.
+      if (presses(box.uploadButton)) {
         void this.attachFromPicker();
         return true;
       }
@@ -4360,7 +4364,7 @@ class TuiApp {
   }
 
   /**
-   * Opens clipboard options context menu in the chat input area on right click or [+] button click.
+   * Opens clipboard options context menu on a right click in the chat area.
    */
   private async openClipboardContextMenu(): Promise<void> {
     this.clipboardMenuOpening = true;
