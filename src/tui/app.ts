@@ -4095,7 +4095,7 @@ class TuiApp {
       }
     }
 
-    // Clicking inside the prompt row (image chips, [+] button, [Think], [send])
+    // Clicking inside the prompt row (image chips, [+] attach, [send])
     if (this.promptRow !== null && event.y === this.promptRow) {
       const margin = this.output.columns && this.output.columns >= 50 ? 2 : 0;
       const usable = (this.output.columns ?? 80) - 1;
@@ -4130,22 +4130,12 @@ class TuiApp {
         return true;
       }
 
-      // 4. Check [Think] button click
-      const showThink = usable - margin - 2 >= 50;
-      const thinkLen = 7;
-      if (showThink) {
-        const thinkStart = sendStart - thinkLen - 1;
-        if (event.x >= thinkStart && event.x < sendStart) {
-          this.chooseVariant("");
-          return true;
-        }
-      }
-
-      // 5. Check [+] attach button click — opens the platform's file-picker
+      // 4. Check [+] attach button click — opens the platform's file-picker
       // window and attaches whatever is chosen, the click-driven replacement
-      // for the old /attach command.
+      // for the old /attach command. The variant has no button of its own;
+      // `/effort` changes it.
       const attachLen = 3;
-      const attachStart = sendStart - (showThink ? thinkLen + 1 : 0) - attachLen - 1;
+      const attachStart = sendStart - attachLen - 1;
       if (event.x >= attachStart && event.x < attachStart + attachLen) {
         void this.attachFromPicker();
         return true;

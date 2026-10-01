@@ -1682,21 +1682,18 @@ function renderBottom(
       badgeWidth += text.length + 1;
     }
 
-    // Right controls: [+] [Think] [send] — plain text, no emoji. The [+] is
-    // the attach button: it opens the platform's file-selection window, so
-    // attaching is a click and not a slash command to remember. The [Think]
-    // button is drawn when the row is wide enough to fit it beside [+] and
-    // [send] without squeezing the editor.
+    // Right controls: [+] [send] — plain text, no emoji. The [+] is the attach
+    // button: it opens the platform's file-selection window, so attaching is a
+    // click and not a slash command to remember. The variant is changed with
+    // `/effort`; the row keeps only the two controls that are pressed while
+    // typing, so nothing squeezes the editor on a narrow terminal.
     const attachText = "[+]";
     const attachLen = textWidth(attachText);
-    const showThink = width >= 50;
-    const thinkText = "[Think]";
-    const thinkLen = textWidth(thinkText);
     const sendSpan = span(" \u2191 ", styles.sendButton);
     const sendLen = 3;
     // The trailing space after the send button is part of the controls, so the
     // gap arithmetic matches exactly what is drawn and the row never overflows.
-    const rightLen = (showThink ? thinkLen + 1 : 0) + attachLen + 1 + sendLen + 1;
+    const rightLen = attachLen + 1 + sendLen + 1;
 
     const availableWidth = Math.max(width - badgeWidth - rightLen, 10);
     const placeholder = attachedCount > 0 ? "" : (state.ask ? "Type your answer…" : PLACEHOLDER);
@@ -1708,9 +1705,6 @@ function renderBottom(
 
     const rightControls: Span[] = [];
     rightControls.push(span(attachText, styles.thinkBadge), span(" "));
-    if (showThink) {
-      rightControls.push(span(thinkText, state.variant !== DEFAULT_VARIANT ? styles.accentBold : styles.thinkBadge), span(" "));
-    }
     rightControls.push(sendSpan, span(" "));
 
     // The box is a bar, not a frame: one accent edge down the left, padding

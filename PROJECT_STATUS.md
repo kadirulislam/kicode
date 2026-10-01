@@ -33,7 +33,7 @@
   - `Ask anything...` placeholder, no emoji.
   - Interactive `+` button to open the Clipboard & Attachment Options menu.
   - Attached image chips `[Image i]` with click-to-remove.
-  - `[Think]` pill with variant switcher (`default`, `low`, `medium`, `high`).
+  - `[+]` attach button and `↑` send button on the prompt row; the variant is changed with `/effort` (the `[Think]` pill was removed at the owner's request).
   - `↑` Send button (clickable and keyboard responsive) in a blue square.
 - **Interactive Mouse Controls & Scrollbar**:
   - Drag-to-select text in the transcript without auto-copying or auto-pasting.

@@ -1032,6 +1032,18 @@ describe("the blocks", () => {
     expect(joined).toContain("[spec.txt]");
   });
 
+  it("keeps only the attach button and send on the prompt row", () => {
+    const { plain } = draw({});
+    const prompt = plain.find((line) => line.includes("Ask anything")) ?? "";
+
+    // The row carries the two controls that are pressed while typing. The
+    // variant pill was removed at the owner's request — `/effort` changes it
+    // — and nothing on the row may stand in for it.
+    expect(prompt).toContain("[+]");
+    expect(prompt).toContain("\u2191");
+    expect(prompt).not.toContain("[Think]");
+  });
+
   it("keeps the bar and the fill together on a wrapped turn", () => {
     const { frame, plain } = draw({ entries: [{ kind: "user", text: "x".repeat(200) }] }, { cols: 40, rows: 20 });
 
