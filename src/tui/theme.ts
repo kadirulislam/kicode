@@ -10,10 +10,12 @@ import { BOLD, DIM, ITALIC, UNDERLINE, bg, fg, style } from "./ansi";
  *
  * The slots beyond text/background are the ones the blocks need:
  *
- * - `panel` fills the bars and the prompt box — a surface that is *above* the
+ * - `panel` fills the bars and a card — a surface that is *above* the
  *   background without being loud;
- * - `block` is the fill behind a user turn, so a request reads as a block of
- *   its own rather than a line that happens to be bold;
+ * - `block` is the fill behind a user turn **and behind the input box**, so a
+ *   request reads as a block of its own rather than a line that happens to be
+ *   bold, and the place being typed into is visibly the same material as the
+ *   words it will become;
  * - `rule` is the thin left rule on tool output, which is what ties a run of
  *   actions together as one piece of work;
  * - `highlight` is emphasis inside prose — the one word in a sentence that
