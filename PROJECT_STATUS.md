@@ -1,9 +1,9 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 955 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 961 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~457 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~461 KB) via `npm run build`
 
 ---
 
@@ -21,6 +21,12 @@
 - **Modals and pickers are cards over the transcript, not instead of it**: `/models`, `/settings` and the full-screen menus render the conversation behind them and fade it (one faint style on the page background, chip fills included), so the only thing at full strength is the card being answered.
 - **The card sits at the foot of the page**, directly above the rule and the prompt — where the eye already is while typing — instead of being centred in the transcript. The permission modal gets the same fade behind it, and the mode row and footer keep their colour because they carry the keys the card is asking for.
 - **While a card is up it owns the clicks**: the faded page contributes no click targets, so an unclear row cannot be pressed by accident.
+
+### 0d. The Card Answers to a Mouse, and Escape Is a Chip (ADR-019)
+- **The permission and recovery cards sit at the foot of the page**, their last row the last row of the conversation — directly above the rule and the prompt, where a picker already lands — instead of floating in the middle of the screen.
+- **Every answer on a card is a chip**: `[y] yes · [a] always · [n] no` on a permission prompt, `[r] retry · [m] choose model · [×] dismiss` on a failed turn. A click names the key and the same handler a keypress reaches answers it, so a mouse answer cannot drift from a typed one — `[m]` still opens the model picker with the failed turn set aside.
+- **`esc` is drawn as a clickable `[×]` everywhere it is offered**: the session footer's hints, a picker's title row, a menu's title and footer, the clipboard menu, and a card's own decision row. Each target is found by walking the row the chip was drawn in, so it cannot drift from the glyph.
+- **While a card is up it is the only thing clickable** (plus the footer, whose `[×]` is the permission card's way out) — and two bugs were fixed on the way: a multi-line gateway message printed as one run-on row on the recovery card, and the `[+]` attach hit box sat one column left of its glyph.
 
 ### 0c. The Input Box Reads as a Typing Area, and the Todo List Goes Live (ADR-018)
 - **The send arrow is gone**: the blue `↑` button was the loudest thing on a quiet row for the one action the keyboard already has (enter). The `[+]` attach button stays, anchored to the right edge; its click hit box was re-derived to match, since the drawn glyph and the hit box are computed from the same arithmetic in two files.

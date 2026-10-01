@@ -429,7 +429,8 @@ describe("runTui", () => {
     // naming the gateway's message, since that is usually the diagnosis.
     expect(app.screen()).toContain("Provider rate-limited the request (HTTP 429)");
     expect(app.lastFrame()).toContain("Rate limited — what now?");
-    expect(app.lastFrame()).toContain("r retry · m choose model · esc dismiss");
+    // The three answers are chips, so a mouse can pick any of them.
+    expect(app.lastFrame()).toContain("[r] retry · [m] choose model · [×] dismiss");
 
     // Esc keeps the error and drops the question: the prompt takes typing again.
     // A lone Esc is held briefly as a possible escape sequence, so this waits
@@ -437,6 +438,86 @@ describe("runTui", () => {
     app.input.write("\u001b");
     await tick(80);
     expect(app.lastFrame()).not.toContain("Rate limited — what now?");
+    expect(app.screen()).toContain("Provider rate-limited the request (HTTP 429)");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("gives every line of the gateway's message its own row", async () => {
+    const app = harness(
+      {},
+      {
+        failWith: new Error(
+          "Provider returned HTTP 402 for\nhttps://opencode.ai/zen/v1/chat/completions: Upstream request failed:\nInsufficient account funds",
+        ),
+      },
+    );
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("try me\r");
+    await tick(30);
+    const rows = app.lastFrame().split(/\r?\n/);
+
+    // The message is a paragraph written as lines. A row's spans are glued
+    // together, so a body that forgot the newline in front of each line after
+    // the first printed the whole diagnosis as one run-on row.
+    expect(rows.some((line) => line.includes("Provider returned HTTP 402 for"))).toBe(true);
+    expect(rows.some((line) => line.includes("Insufficient account funds"))).toBe(true);
+    expect(rows.some((line) => line.includes("402 forhttps"))).toBe(false);
+
+    // The card owns every key while it is up, so quit from under it — which is
+    // also the one thing the card deliberately does not claim.
+    app.input.write("\u0003");
+    expect(await done).toBe(0);
+  });
+
+  it("answers the card with the mouse: [m] opens the picker, its chip closes it", async () => {
+    const app = harness(
+      {
+        listProviders: async () => [{ label: "TestGW", value: "https://api.example/v1" }],
+        listModels: async () => [{ id: "m2", free: true }],
+      },
+      { failWith: new Error("Provider rate-limited the request (HTTP 429)") },
+    );
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("try me\r");
+    await tick(30);
+    expect(app.lastFrame()).toContain("[r] retry · [m] choose model · [×] dismiss");
+
+    // A click on `[m]` is the `m` key — the same handler runs — so the picker
+    // opens with the failed turn still set aside for whatever it lands on.
+    clickOn(app, "[m] choose model");
+    await tick(60);
+    expect(app.lastFrame()).toContain("Select model");
+    expect(app.lastFrame()).not.toContain("Rate limited — what now?");
+
+    // And the picker's own way out is a chip in its footer.
+    clickOn(app, "[×] close");
+    await tick(60);
+    expect(app.lastFrame()).not.toContain("Select model");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("lets the error go when the card's own close chip is clicked", async () => {
+    const app = harness({}, { failWith: new Error("Provider rate-limited the request (HTTP 429)") });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("try me\r");
+    await tick(30);
+    expect(app.lastFrame()).toContain("[×] dismiss");
+
+    clickOn(app, "[×] dismiss");
+    await tick(60);
+
+    expect(app.lastFrame()).not.toContain("Rate limited — what now?");
+    // Dismissing the question is not forgetting the failure: the error stays.
     expect(app.screen()).toContain("Provider rate-limited the request (HTTP 429)");
 
     app.input.write("\u0015/exit\r");
@@ -905,7 +986,7 @@ describe("the question panel", () => {
     app.input.write("3");
     await tick(20);
     expect(app.lastFrame()).toContain("Type your answer…");
-    expect(app.lastFrame()).toContain("esc cancel");
+    expect(app.lastFrame()).toContain("[×] cancel");
 
     app.input.write("Inter, with a mono accent");
     await tick(20);
@@ -2667,6 +2748,21 @@ describe("/connect", () => {
 /** A left click, in SGR encoding, at a 1-based column and a 1-based row. */
 const clickAt = (row: number, column = 6): string => `\u001b[<0;${column};${row}M`;
 
+/**
+ * A left click on the first cell of a piece of text, read off the frame.
+ *
+ * Deliberately not a hardcoded row and column: what these tests are for is that
+ * a click lands where the thing looks like it is, and numbers typed in here
+ * would agree with a broken layout just as happily as with a working one.
+ */
+const clickOn = (app: Harness, text: string): void => {
+  const lines = app.lastFrame().split(/\r?\n/);
+  const row = lines.findIndex((line) => line.includes(text));
+  const column = (lines[row] ?? "").indexOf(text) + 1;
+  if (row < 0 || column < 1) throw new Error(`no "${text}" on screen`);
+  app.input.write(clickAt(row + 1, column));
+};
+
 describe("clicking a row", () => {
   /**
    * The screen row a piece of text was drawn on, read back off the frame.
@@ -2724,7 +2820,7 @@ describe("clicking a row", () => {
     await finish(app, done);
   });
 
-  it("never answers a permission prompt, wherever it is clicked", async () => {
+  it("never answers a permission prompt when the click is not on a chip", async () => {
     const app = harness({}, { approve: true });
     const done = runTui(app.options);
     await tick();
@@ -2746,6 +2842,47 @@ describe("clicking a row", () => {
     await done;
 
     expect(app.decisions).toEqual(["deny"]);
+  });
+
+  it("answers the prompt from the chip the mouse clicks", async () => {
+    const app = harness({}, { approve: true });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("run the tests\r");
+    await tick(20);
+    expect(app.lastFrame()).toContain("[y] yes · [a] always · [n] no");
+    expect(app.decisions).toEqual([]);
+
+    clickOn(app, "[a] always");
+    await tick(30);
+
+    // The chip *is* the key, so the answer the agent receives is the same one
+    // pressing `a` would have produced.
+    expect(app.decisions).toEqual(["always"]);
+    expect(app.screen()).toContain("echo: run the tests");
+
+    app.input.write("/exit\r");
+    await done;
+  });
+
+  it("denies from the close chip, exactly as escape does", async () => {
+    const app = harness({}, { approve: true });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("run the tests\r");
+    await tick(20);
+    expect(app.lastFrame()).toContain("[×] deny");
+
+    clickOn(app, "[×] deny");
+    await tick(30);
+
+    // Closing a prompt must never mean yes, from the keyboard or from the mouse.
+    expect(app.decisions).toEqual(["deny"]);
+
+    app.input.write("/exit\r");
+    await done;
   });
 });
 

@@ -396,6 +396,17 @@ const FREE_TEXT = "Type your own answer";
 /** Reasoning efforts worth offering; anything else the endpoint handles itself. */
 const VARIANTS = [DEFAULT_VARIANT, "low", "medium", "high"];
 
+/**
+ * The key a card's chip names, in the shape a keypress arrives in.
+ *
+ * A click on a chip is not a second implementation of what the chip does: it is
+ * that key, handed to the same handler the keyboard reaches, so the two can
+ * never disagree about what `m` or escape means on this screen.
+ */
+function chipKey(key: string): Key {
+  return key === "esc" ? { type: "escape" } : { type: "text", text: key };
+}
+
 function clamp(val: number, min: number, max: number): number {
   return Math.min(Math.max(val, min), max);
 }
@@ -558,6 +569,8 @@ class TuiApp {
   private scroll = 0;
   private notice: Span | null = null;
   private modal: Modal | null = null;
+  /** The key a click on a card named, to be answered as if it had been typed. */
+  private clickedKey: Key | null = null;
   /** What the screen shows. Changed by `/settings`, kept by the caller. */
   private view: ViewSettings;
   /**
@@ -757,7 +770,8 @@ class TuiApp {
   }
 
   private async handleKeys(keys: readonly Key[]): Promise<void> {
-    for (const key of keys) {
+    for (const typed of keys) {
+      let key = typed;
       // The clipboard, above every panel, so it works wherever the cursor is —
       // the prompt, a picker's search field, a settings row. Two keys because
       // one is not enough: Windows Terminal and iTerm both bind Ctrl+V to their
@@ -795,7 +809,14 @@ class TuiApp {
         // Redraw only when the mouse action produced a visual change
         // (hover row changed, clicked, scrolled, selection changed).
         if (this.click(key)) this.draw();
-        continue;
+        // A click on a chip is the key that chip names — a `[×]` is escape, a
+        // card's `[m]` is `m` — and it is answered by the handlers below, which
+        // are the ones a keypress reaches. Falling through rather than handling
+        // it here is what keeps one implementation of "what does this key do".
+        const chosen = this.clickedKey;
+        this.clickedKey = null;
+        if (!chosen) continue;
+        key = chosen;
       }
       if (this.recovery) {
         const answer = await this.answerRecovery(key);
@@ -1090,8 +1111,15 @@ class TuiApp {
   private recoveryModal(failed: { title: string; body: string }): Modal {
     return {
       title: failed.title,
-      body: failed.body.split("\n").map((line) => span(line, this.styles.dim)),
-      options: "r retry · m choose model · esc dismiss",
+      // One span per line, with the newline in front of every line but the
+      // first: a row's spans are glued together, so a gateway message that was
+      // written as four lines would otherwise be printed as one run-on row.
+      body: failed.body.split("\n").map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.dim)),
+      choices: [
+        { key: "r", label: "retry" },
+        { key: "m", label: "choose model" },
+        { key: "esc", label: "dismiss" },
+      ],
     };
   }
 
@@ -4125,10 +4153,11 @@ class TuiApp {
       // 3. Check [+] attach button click. It sits at the right edge of the
       // prompt row — the only control the row carries, now that send has no
       // button of its own (enter sends) and the variant has none either
-      // (`/effort` changes it). The cell after `[+]` is padding, so the hit
-      // box stops one short of the rim, exactly where the glyph is drawn.
+      // (`/effort` changes it). `event.x` is a 1-based column, and the glyph is
+      // the last three cells before the padding one — so its first cell is
+      // `usable - attachLen`, which is where the drawn `[+]` actually starts.
       const attachLen = 3;
-      const attachStart = usable - attachLen - 1;
+      const attachStart = usable - attachLen;
       if (event.x >= attachStart && event.x < attachStart + attachLen) {
         void this.attachFromPicker();
         return true;
@@ -4156,6 +4185,27 @@ class TuiApp {
           return true;
         }
       }
+    }
+
+    // A chip is an answer, not a selection: it names the key that does the work
+    // and the loop above runs it, so it never goes through `clickRow`. A row can
+    // carry several of them, so the column decides which one was pressed.
+    const chip = this.panelRows.find(
+      (candidate) =>
+        (candidate.kind === "close" || candidate.kind === "modal_choice") &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart && event.x <= candidate.colEnd)),
+    );
+    if (chip?.kind === "close") {
+      this.clickedKey = { type: "escape" };
+      return true;
+    }
+    if (chip?.kind === "modal_choice") {
+      const choice = this.modal?.choices[chip.index];
+      if (choice) this.clickedKey = chipKey(choice.key);
+      return true;
     }
 
     const row = this.panelRows.find((candidate) => candidate.row === event.y);
@@ -4713,7 +4763,22 @@ class TuiApp {
     return (request) =>
       new Promise<ApprovalDecision>((resolve) => {
         this.pending = { request, resolve };
-        this.modal = { title: `${request.name} wants to run`, body: this.modalBody(request), options: "allow?  y yes · a always · n no" };
+        this.modal = {
+          title: `${request.name} wants to run`,
+          body: this.modalBody(request),
+          question: "allow?",
+          choices: [
+            { key: "y", label: "yes" },
+            { key: "a", label: "always" },
+            { key: "n", label: "no" },
+          ],
+          // Escape and Ctrl+C are the ones the card does not name: both mean no,
+          // but only Ctrl+C also stops the turn behind the prompt.
+          footer: [
+            ["esc", "deny"],
+            ["ctrl+c", "deny + stop"],
+          ],
+        };
         this.draw();
       });
   }

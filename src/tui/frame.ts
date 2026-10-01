@@ -44,11 +44,27 @@ export type TabHit = {
   end: number;
 };
 
+/** One thing a card offers, and the key that offers it. */
+export type ModalChoice = {
+  /** The key that answers with this choice. `esc` is drawn as the close chip. */
+  key: string;
+  /** What it does, printed beside the chip. */
+  label: string;
+};
+
 export type Modal = {
   /** e.g. `bash wants to run` */
   title: string;
   body: Span[];
-  options: string;
+  /** The question the choices answer, when there is one — `allow?`. */
+  question?: string;
+  /** The keys the card offers, in the order they are drawn. */
+  choices: readonly ModalChoice[];
+  /**
+   * The keys the card does *not* name, for the session's footer. Between them
+   * the two name every key exactly once, and `esc` is a chip in both places.
+   */
+  footer?: readonly (readonly [string, string])[];
 };
 
 /** The slash-command list, floating above the prompt. */
@@ -315,7 +331,18 @@ export type Cell = { row: number; col: number };
 export type Selection = { from: Cell; to: Cell };
 
 /** Which panel a clickable row belongs to. */
-export type PanelKind = "picker" | "menu" | "palette" | "ask" | "picker_tab" | "jump_bottom" | "clipboard_menu";
+export type PanelKind =
+  | "picker"
+  | "menu"
+  | "palette"
+  | "ask"
+  | "picker_tab"
+  | "jump_bottom"
+  | "clipboard_menu"
+  /** A `[×]` chip: the escape key, somewhere a mouse can reach it. */
+  | "close"
+  /** One of a card's own decision chips, by its place in `Modal.choices`. */
+  | "modal_choice";
 
 export type ClipboardMenuState = {
   items: readonly PickItem[];
@@ -466,20 +493,23 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
   while (lines.length > rows) lines.pop();
   while (lines.length < rows) lines.push(paint([], theme.bg, usable));
 
-  // A permission prompt floats centered over the transcript rather than
-  // sitting where the prompt was: it is the one thing on screen that needs an
-  // answer, and the middle of the screen is where the eye already is. The tab
-  // bar and the footer stay visible around it, and a click still cannot answer
-  // it — the box carries no click targets, by design.
+  // A card — a permission request, or the question a failed turn asks — floats
+  // at the foot of the page rather than in the middle of it: it lands directly
+  // above the rule and the prompt, where the eye already is while typing, which
+  // is where a picker lands too. The tab bar and the footer stay visible around
+  // it, and its own decision chips are click targets.
+  const modalRows: PanelRow[] = [];
   if (state.modal) {
     const boxWidth = Math.min(Math.max(usable - 6, 20), MODAL_BOX_WIDTH);
-    // Title + body + options must fit between the tab bar and the footer, so
-    // the body is the part that gives: it is the only part with a boundary
-    // to cut at, and the decision row below it is not negotiable.
+    // Title + body + decision row must fit between the tab bar and the footer,
+    // so the body is the part that gives: it is the only part with a boundary
+    // to cut at, and the row that says how to answer is not negotiable.
     const bodyBudget = clamp(rows - 4, 1, MODAL_BODY_LINES);
-    const box = modalBoxLines(state.modal, styles, boxWidth, bodyBudget);
+    const card = modalCard(state.modal, styles, boxWidth, bodyBudget);
+    const box = card.box;
     const left = Math.max(Math.floor((usable - boxWidth) / 2), 0);
-    const start = Math.max(Math.floor((rows - box.length) / 2), 0);
+    // The card's last row is the last row of the conversation.
+    const start = Math.max(pageRows - box.length, 0);
     // The card is the only thing on screen that has to be read, so the page
     // under it steps back — the same treatment a picker's card gets.
     for (let row = 0; row < Math.min(pageRows, lines.length); row++) {
@@ -495,6 +525,18 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
       const highlighted = state.selection ? selectRow(boxSpans, screenRow, state.selection, styles) : boxSpans;
       lines[row] = paint(highlighted, theme.panel, usable, theme.bg);
     });
+    // One target per chip, in the columns it was drawn in: the card's own rows
+    // are already in screen coordinates, so they need no offset.
+    const decisionRow = start + box.length - 1 + 1;
+    for (const chip of card.chips) {
+      modalRows.push({
+        kind: "modal_choice",
+        row: decisionRow,
+        index: chip.index,
+        colStart: left + chip.start + 1,
+        colEnd: left + chip.end + 1,
+      });
+    }
   }
 
   const caret =
@@ -508,12 +550,20 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
   // Two blocks, two offsets: the body starts under the tab bar, the bottom block
   // under the body. Both are in rows the mouse actually reports, so a caller can
   // compare a click against them without knowing the layout at all.
-  const panelRows: PanelRow[] = [
-    // While a card is up it owns the clicks: the page behind it is scenery, and
-    // a row you cannot see clearly is not a row you should be able to press.
-    ...(card ? card.hits : body.hits).map((hit) => ({ ...hit, row: hit.row + tabRowCount + 1 })),
-    ...bottom.hits.map((hit) => ({ ...hit, row: hit.row + tabRowCount + bodyRows + 1 })),
-  ];
+  // A card owns the clicks while it is up — the page behind it is scenery, and a
+  // row you cannot see clearly is not a row you should be able to press — and so
+  // does a modal, which is the one thing that must not be answered by accident.
+  const panelRows: PanelRow[] = state.modal
+    ? [
+        ...modalRows,
+        // The card's own chips, and the footer's — while the card is up, the
+        // footer's close box is the only other thing a mouse may press.
+        ...bottom.hits.map((hit) => ({ ...hit, row: hit.row + tabRowCount + bodyRows + 1 })),
+      ]
+    : [
+        ...(card ? card.hits : body.hits).map((hit) => ({ ...hit, row: hit.row + tabRowCount + 1 })),
+        ...bottom.hits.map((hit) => ({ ...hit, row: hit.row + tabRowCount + bodyRows + 1 })),
+      ];
 
   const scrollbar: ScrollbarInfo | null =
     body.scrollbarMax && body.scrollbarMax > 0
@@ -1230,7 +1280,7 @@ function renderMenu(
   }
   band.push([]);
   if (showDescription)  band.push([span(indent), ...truncateSpans([span(menu.description ?? "", styles.faint)], width)]);
-  band.push([span(indent), span(menu.footer, styles.hint)]);
+  band.push([span(indent), ...hintLine(menu.footer, styles)]);
 
   // The band sits low on the page, just above the rule, for the same reason the
   // picker does: a menu is answered from the keyboard while the eye is down by
@@ -1239,6 +1289,10 @@ function renderMenu(
   // that pushes the whole band down.
   const padTop = Math.max(height - (band.length + 2), 0);
   for (const hit of hits) hit.row += padTop;
+  // The two ways out of the band: the chip in its title row and the one in its
+  // footer, in the rows those land on once the band is pushed down.
+  hits.push(...closeChipHits(padTop + 2, band[1] ?? [], 0));
+  hits.push(...closeChipHits(padTop + band.length, band.at(-1) ?? [], 0));
   const out: BodyLine[] = [];
   for (let i = 0; i < padTop; i++) out.push({ spans: [], background: theme.bg });
   out.push({ spans: [], background: theme.bg });
@@ -1248,10 +1302,10 @@ function renderMenu(
   return { lines: out.slice(0, height), hits };
 }
 
-/** `Title` left, `esc` right, inside the band. */
+/** `Title` left, the close chip right, inside the band. */
 function menuTitleRow(title: string, inner: number, styles: Styles): Span[] {
   const head = truncateSpans([span(title, styles.bold)], Math.max(inner - 6, 4));
-  return [...head, span(" ".repeat(Math.max(inner - spansWidth(head) - 3, 1))), span("esc", styles.hint)];
+  return [...head, span(" ".repeat(Math.max(inner - spansWidth(head) - 3, 1))), span(CLOSE_CHIP, styles.hintKey)];
 }
 
 /**
@@ -1314,10 +1368,12 @@ function renderPicker(
   };
   const row = (content: Span[]): void => put([span("│", styles.faint), ...content, span("│", styles.faint)]);
 
-  put([span(`┌${"─".repeat(inside)}┐`, styles.faint)]);
-  row(panelTitle(picker.title, "esc", inside, styles));
-  if (hasSearch) row(searchRow(picker.query, inside, styles, picker.placeholder ?? "Search"));
   const hits: Hit[] = [];
+  put([span(`┌${"─".repeat(inside)}┐`, styles.faint)]);
+  const titleRow = out.length;
+  row(panelTitle(picker.title, CLOSE_CHIP, inside, styles));
+  hits.push(...closeChipHits(titleRow, out[titleRow] ?? [], 0));
+  if (hasSearch) row(searchRow(picker.query, inside, styles, picker.placeholder ?? "Search"));
   if (picker.tabs) {
     const tabRowIdx = out.length;
     row(padSpans(tabSpans(picker.tabs, styles), inside));
@@ -1541,6 +1597,24 @@ function renderFlatPicker(
   return { lines: out, hits };
 }
 
+/**
+ * The escape key as a chip: the glyph a tab closes with.
+ *
+ * Escape is the one key every card offers and the one a mouse had no way to
+ * press, so it is drawn as a chip rather than printed as a word — and a click on
+ * that chip *is* that key.
+ */
+export const CLOSE_CHIP = "[×]";
+
+/**
+ * What a card's every row is drawn behind: the bar and the space after it.
+ *
+ * Named because the decision row's chips are placed in the columns a click
+ * reports, and those columns are measured from the card's left edge — not from
+ * the first chip.
+ */
+const DECISION_PREFIX = 2;
+
 /** A permission prompt is a card, not a full-width surface: narrow enough to read as floating. */
 const MODAL_BOX_WIDTH = 72;
 
@@ -1552,7 +1626,12 @@ const MODAL_BOX_WIDTH = 72;
  * not fit says how much was cut — approving a diff the prompt cut in half
  * without knowing it did is the mistake the prompt exists to prevent.
  */
-function modalBoxLines(modal: Modal, styles: Styles, boxWidth: number, bodyBudget: number): Span[][] {
+function modalCard(
+  modal: Modal,
+  styles: Styles,
+  boxWidth: number,
+  bodyBudget: number,
+): { box: Span[][]; chips: { index: number; start: number; end: number }[] } {
   const inner = Math.max(boxWidth - 2, 8);
   const out: Span[][] = [];
   out.push([span(`${BAR} `, styles.warn), ...truncateSpans([span(modal.title, styles.bold)], inner)]);
@@ -1567,8 +1646,35 @@ function modalBoxLines(modal: Modal, styles: Styles, boxWidth: number, bodyBudge
     out.push([span(`${BAR} `, styles.warn), span(`… ${tail}`, styles.faint)]);
   }
 
-  out.push([span(`${BAR} `, styles.warn), ...truncateSpans([span(modal.options, styles.dim)], inner)]);
-  return out;
+  // The decision row: one chip per key, so everything the card offers is also
+  // something a mouse can press. `esc` is the close chip, as it is everywhere
+  // else, and a chip the row's right edge would cut is not offered at all — a
+  // target for something that is not on screen is worse than no target.
+  const chips: { index: number; start: number; end: number }[] = [];
+  const decisions: Span[] = [];
+  let column = 0;
+  if (modal.question) {
+    decisions.push(span(`${modal.question}  `, styles.dim));
+    column += modal.question.length + 2;
+  }
+  modal.choices.forEach((choice, index) => {
+    if (index > 0) {
+      decisions.push(span(" · ", styles.faint));
+      column += 3;
+    }
+    const text = choice.key === "esc" ? CLOSE_CHIP : `[${choice.key}]`;
+    const width = textWidth(text);
+    // The chip's offsets are measured from the card's left edge, so they carry
+    // the `▌ ` the decision row is drawn behind — `inner` is the room the spans
+    // get, which is why the fit test uses the column without it.
+    if (column + width <= inner) chips.push({ index, start: column + DECISION_PREFIX, end: column + width - 1 + DECISION_PREFIX });
+    decisions.push(span(text, styles.accentBold));
+    column += width;
+    decisions.push(span(` ${choice.label}`, styles.dim));
+    column += choice.label.length + 1;
+  });
+  out.push([span(`${BAR} `, styles.warn), ...truncateSpans(decisions, inner)]);
+  return { box: out, chips };
 }
 
 type Bottom = { lines: string[]; rows: BodyLine[]; caretRow: number | null; caretCol: number; hits: Hit[] };
@@ -1648,16 +1754,18 @@ function renderBottom(
     };
 
     const titlePrefix = " Clipboard & Attachment Options ";
-    const escSuffix = " esc ";
-    const fillerTop = Math.max(inside - textWidth(titlePrefix) - textWidth(escSuffix), 0);
+    const closeSuffix = ` ${CLOSE_CHIP} `;
+    const fillerTop = Math.max(inside - textWidth(titlePrefix) - textWidth(closeSuffix), 0);
+    const titleRow = rows.length;
     push([
       leftPad,
       span("┌─", borderStyle),
       span("Clipboard & Attachment Options ", styles.bold),
       span("─".repeat(fillerTop), borderStyle),
-      span(" esc", styles.hint),
+      span(` ${CLOSE_CHIP}`, styles.hintKey),
       span(" ┐", borderStyle),
     ], theme.bg);
+    hits.push(...closeChipHits(titleRow, rows[titleRow]?.spans ?? [], 0));
 
     // Preview area: Real image grid or text grid
     if (cm.preview) {
@@ -1703,15 +1811,18 @@ function renderBottom(
       row(itemSpans);
     }
 
-    const footerText = " esc close · ↑↓ select · enter choose ";
+    const footerText = ` ${CLOSE_CHIP} close · ↑↓ select · enter choose `;
     const fillerBottom = Math.max(inside - textWidth(footerText), 0);
+    const footerRow = rows.length;
     push([
       leftPad,
       span("└─", borderStyle),
-      span(footerText.slice(1, -1), styles.hint),
+      span(CLOSE_CHIP, styles.hintKey),
+      span(" close · ↑↓ select · enter choose", styles.hint),
       span(` ${"─".repeat(fillerBottom)}`, borderStyle),
       span("┘", borderStyle),
     ], theme.bg);
+    hits.push(...closeChipHits(footerRow, rows[footerRow]?.spans ?? [], 0));
   }
 
   // A permission prompt is not drawn here: it floats centered over the
@@ -1809,7 +1920,12 @@ function renderBottom(
       ? boxBg
       : theme.bg;
   push(modeSpans(state, styles, width, indent, state.modal ? styles.warn : undefined), stateRowBg);
-  push(footerSpans(state, styles, usable), theme.bg);
+  // The footer's own chips close whatever is open, so escape is a mouse action
+  // here too. Its columns are read off the packed row, which is the only place
+  // that knows where they landed.
+  const footer = footerSpans(state, styles, usable);
+  hits.push(...closeChipHits(rows.length, footer, 0));
+  push(footer, theme.bg);
 
   return { lines: rows.map((row) => paint(row.spans, row.background, usable)), rows, caretRow, caretCol, hits };
 }
@@ -1944,7 +2060,10 @@ function footerHints(styles: Styles, state: TuiState): Span[] {
   // Its body already lists y/a/n. Escape and Ctrl+C are the ones it does not
   // name: both mean no, but Ctrl+C also stops the turn, and that difference is
   // the whole reason to press it here instead of Escape.
-  if (state.modal) return hintPairs([["esc", "deny"], ["ctrl+c", "deny + stop"]], styles);
+  // The card names its own answers and the footer names the rest, so between
+  // them every key is written down exactly once. The recovery card names all
+  // three of its keys and adds nothing here.
+  if (state.modal) return state.modal.footer ? hintPairs(state.modal.footer, styles) : [];
   if (state.clipboardMenu) return hintPairs([["esc", "close"], ["↑↓", "select"], ["enter", "choose"]], styles);
   if (state.ask) return askHints(styles, state.askTyping);
   if (state.picker) return hintPairs([["↑↓", "select"], ["enter", "confirm"], ["esc", "close"]], styles);
@@ -1970,9 +2089,43 @@ function tabSpans(tabs: { labels: readonly string[]; active: number }, styles: S
 function hintPairs(pairs: readonly (readonly [string, string])[], styles: Styles): Span[] {
   return pairs.flatMap(([key, label], index) => [
     ...(index > 0 ? [span("  ", styles.hint)] : []),
-    span(key, styles.hintKey),
+    span(key === "esc" ? CLOSE_CHIP : key, styles.hintKey),
     span(` ${label}`, styles.hint),
   ]);
+}
+
+/**
+ * A footer written as prose by its caller, with `esc` drawn as the close chip.
+ *
+ * A menu names its own keys in a sentence (`‹/› change · ↑↓ move · esc close`),
+ * so the chip is found by splitting on the word: every panel then offers a mouse
+ * the same way out, without the caller having to know about either.
+ */
+function hintLine(text: string, styles: Styles): Span[] {
+  return text.split("esc").flatMap((part, index) => [
+    ...(index > 0 ? [span(CLOSE_CHIP, styles.hintKey)] : []),
+    ...(part ? [span(part, styles.hint)] : []),
+  ]);
+}
+
+/**
+ * One click target per close chip in a finished row.
+ *
+ * The chip is found by walking the row it was drawn in, so a target can never
+ * drift from where the glyph landed — however the row was packed, padded or
+ * truncated, and whatever sits to its left.
+ */
+function closeChipHits(row: number, spans: readonly Span[], origin: number): Hit[] {
+  const width = textWidth(CLOSE_CHIP);
+  const hits: Hit[] = [];
+  let column = origin;
+  for (const item of spans) {
+    if (item.text === CLOSE_CHIP) {
+      hits.push({ kind: "close", row, index: 0, colStart: column + 1, colEnd: column + width });
+    }
+    column += textWidth(item.text);
+  }
+  return hits;
 }
 
 /**

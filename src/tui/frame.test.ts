@@ -71,6 +71,28 @@ const conversation: Entry[] = [
   { kind: "assistant", text: "Because **src/config.ts** is missing a default." },
 ];
 
+/**
+ * A permission card, whole.
+ *
+ * The card names its own three answers; escape and ctrl+c stay in the footer,
+ * which is the part of the decision it does not offer as a chip.
+ */
+const permission = (over: Partial<ApprovalModal> = {}): ApprovalModal => ({
+  title: "bash wants to run",
+  body: [],
+  question: "allow?",
+  choices: [
+    { key: "y", label: "yes" },
+    { key: "a", label: "always" },
+    { key: "n", label: "no" },
+  ],
+  footer: [
+    ["esc", "deny"],
+    ["ctrl+c", "deny + stop"],
+  ],
+  ...over,
+});
+
 describe("frame geometry", () => {
   it("fills exactly the rows it is given", () => {
     for (const rows of [24, 12, 8, 6]) {
@@ -81,7 +103,7 @@ describe("frame geometry", () => {
   it("never draws into the last column", () => {
     // Writing the final cell can make the terminal wrap and scroll, which would
     // shift the whole UI by a row.
-    const { plain } = draw({ modal: { title: "x".repeat(200), body: [], options: "y".repeat(200) } });
+    const { plain } = draw({ modal: permission({ title: "x".repeat(200), choices: [{ key: "y", label: "y".repeat(200) }] }) });
 
     for (const line of plain) expect(textWidth(line)).toBeLessThanOrEqual(79);
   });
@@ -93,11 +115,10 @@ describe("frame geometry", () => {
     // in a permission prompt is a file's contents, so it is the text least
     // under KiCode's control.
     const { frame, plain } = draw({
-      modal: {
+      modal: permission({
         title: "edit wants to run",
         body: [{ text: "edit src/a.ts" }, { text: "\n-\tconst a = 1;\u001b[2J\u001b[H" }],
-        options: "allow?  y yes · a always · n no",
-      },
+      }),
     });
 
     for (const line of plain) {
@@ -158,7 +179,7 @@ describe("frame geometry", () => {
   });
 
   it("hides the caret while a modal owns the keyboard", () => {
-    const { frame } = draw({ modal: { title: "bash wants to run", body: [], options: "allow?" } });
+    const { frame } = draw({ modal: permission() });
 
     expect(frame.caret).toBeNull();
   });
@@ -587,7 +608,7 @@ describe("the picker", () => {
 
     expect(text).toContain("↑↓ select");
     expect(text).toContain("enter confirm");
-    expect(text).toContain("esc close");
+    expect(text).toContain("[×] close");
     expect(text).not.toContain("ctrl+p");
   });
 
@@ -704,9 +725,13 @@ describe("the picker", () => {
 
   it("stops the page behind it answering clicks", () => {
     // A row you cannot see clearly is not a row you should be able to press, so
-    // only the card contributes click targets while it is up.
+    // only the card — and the close box in the footer, which is the way out —
+    // contributes click targets while it is up.
     const { frame } = draw({ entries: conversation, picker });
-    expect(frame.rows.every((row) => row.kind === "picker" || row.kind === "picker_tab")).toBe(true);
+    expect(frame.rows.every((row) => row.kind === "picker" || row.kind === "picker_tab" || row.kind === "close")).toBe(
+      true,
+    );
+    expect(frame.rows.some((row) => row.kind === "close")).toBe(true);
   });
 });
 
@@ -860,7 +885,7 @@ describe("the question panel", () => {
     expect(text).toContain("tab");
     expect(text).toContain("↑↓ select");
     expect(text).toContain("enter confirm");
-    expect(text).toContain("esc dismiss");
+    expect(text).toContain("[×] dismiss");
     expect(text).not.toContain("ctrl+p");
   });
 
@@ -868,7 +893,7 @@ describe("the question panel", () => {
     const options = panel().plain;
     // No prompt row: the keys belong to the panel, and the footer says so.
     expect(options.join("\n")).not.toContain(PLACEHOLDER);
-    expect(options.at(-1)).toContain("esc dismiss");
+    expect(options.at(-1)).toContain("[×] dismiss");
 
     const editor = new LineEditor();
     editor.insert("Inter");
@@ -876,7 +901,7 @@ describe("the question panel", () => {
     const typing = plain.join("\n");
 
     expect(typing).toContain("▌ Inter");
-    expect(typing).toContain("esc cancel");
+    expect(typing).toContain("[×] cancel");
     // Leaving the caret in the input row is what makes it typeable.
     expect(frame.caret).not.toBeNull();
   });
@@ -916,16 +941,12 @@ describe("the question panel", () => {
     // The trailing newline keeps "11. option 11" from matching as well.
     expect(text).not.toContain("1. option 1\n");
     // Whatever was scrolled away, the footer is still the footer.
-    expect(plain.at(-1)).toContain("esc dismiss");
+    expect(plain.at(-1)).toContain("[×] dismiss");
   });
 });
 
 describe("the approval modal", () => {
-  const modal = {
-    title: "bash wants to run",
-    body: [{ text: "+ npm test" }],
-    options: "allow?  y yes · a always · n no",
-  };
+  const modal = permission({ body: [{ text: "+ npm test" }] });
 
   it("replaces the prompt with the request", () => {
     const text = draw({ modal }).plain.join("\n");
@@ -939,10 +960,14 @@ describe("the approval modal", () => {
   it("names the keys the request does not: escape and ctrl+c", () => {
     const text = draw({ modal }).plain.join("\n");
 
-    expect(text).toContain("esc deny");
+    expect(text).toContain("[×] deny");
     // Escape only denies; ctrl+c denies and stops the turn, which is the one
     // difference that makes it worth pressing here, so the hint names it.
     expect(text).toContain("ctrl+c deny + stop");
+    // The card's own answers are chips too, so a mouse can pick any of them.
+    expect(text).toContain("[y] yes");
+    expect(text).toContain("[a] always");
+    expect(text).toContain("[n] no");
   });
 
   it("lets the request win the footer, because it owns every key", () => {
@@ -956,56 +981,80 @@ describe("the approval modal", () => {
     };
     const footer = draw({ modal, ask }).plain.at(-1) ?? "";
 
-    expect(footer).toContain("esc deny");
+    expect(footer).toContain("[×] deny");
     expect(footer).toContain("ctrl+c deny + stop");
-    expect(footer).not.toContain("esc dismiss");
+    expect(footer).not.toContain("[×] dismiss");
   });
 
   it("keeps the decision row and its hint on a terminal too short for the preview", () => {
     // The body is the only part that may be cut: losing the `allow?` row or the
     // hint would leave a prompt that does not say how to answer it.
-    const long: ApprovalModal = {
+    const long: ApprovalModal = permission({
       title: "edit wants to run",
       body: Array.from({ length: 40 }, (_, i) => ({ text: `${i === 0 ? "" : "\n"}${i % 2 === 0 ? "-" : "+"} line ${i}` })),
-      options: "allow?  y yes · a always · n no",
-    };
+    });
 
     for (let rows = 6; rows <= 30; rows++) {
-      const { frame, plain } = draw({ modal: long }, { cols: 80, rows });        expect(frame.lines).toHaveLength(rows);
-        expect(plain.at(-1)).toContain("esc deny");
-        expect(plain.at(-1)).toContain("ctrl+c deny + stop");
-        expect(plain.join("\n")).toContain("allow?");
+      const { frame, plain } = draw({ modal: long }, { cols: 80, rows });
+      expect(frame.lines).toHaveLength(rows);
+      expect(plain.at(-1)).toContain("[×] deny");
+      expect(plain.at(-1)).toContain("ctrl+c deny + stop");
+      expect(plain.join("\n")).toContain("allow?");
       expect(plain.join("\n")).toContain("edit wants to run");
     }
   });
 
   it("says how much of a preview it had to cut", () => {
-    const long: ApprovalModal = {
+    const long: ApprovalModal = permission({
       title: "edit wants to run",
       body: Array.from({ length: 40 }, (_, i) => ({ text: `${i === 0 ? "" : "\n"}+ line ${i}` })),
-      options: "allow?  y yes · a always · n no",
-    };
+    });
     const text = draw({ modal: long }).plain.join("\n");
 
     // Five lines of the six-row body, and the sixth counts the remainder.
     expect(text).toContain("… 35 more lines");
   });
 
-  it("floats centered instead of sitting where the prompt was", () => {
+  it("sits at the foot of the page, one row above the rule", () => {
     const { plain } = draw({ modal });
 
-    // Three card rows (title, one body line, options) on a 24-row screen.
-    const row = plain.findIndex((line) => line.includes("bash wants to run"));
-    expect(row).toBe(Math.floor((24 - 3) / 2));
+    // The card's last row is the last row of the conversation, so it lands
+    // directly above the rule and the prompt — where the eye already is while
+    // typing, and where a picker lands too.
+    const rule = plain.findIndex((line) => line.trimStart().startsWith("─"));
+    const last = plain.findLastIndex((line) => line.includes("[n] no"));
+    expect(last).toBe(rule - 1);
     // Narrower than the screen, with air on the left: a card, not a band.
-    expect(plain[row]?.startsWith("   ▌")).toBe(true);
+    const card = plain.find((line) => line.includes("bash wants to run")) ?? "";
+    expect(card.startsWith("   ▌")).toBe(true);
+  });
+
+  it("makes the card's chips and the footer's close box click targets", () => {
+    const { frame } = draw({ modal });
+
+    // Three answers on the card and the footer's way out, each with the columns
+    // it was drawn in — and nothing else on screen is clickable while the card
+    // owns the keys.
+    expect(frame.rows.map((row) => row.kind)).toEqual([
+      "modal_choice",
+      "modal_choice",
+      "modal_choice",
+      "close",
+    ]);
+    const starts = frame.rows.map((row) => row.colStart ?? 0);
+    expect([...starts].sort((a, b) => a - b)).toEqual(starts);
+    // Every target sits inside the card: right of its bar and inside the frame.
+    for (const row of frame.rows) {
+      expect(row.colStart ?? 0).toBeGreaterThan(3);
+      expect(row.colEnd ?? 0).toBeLessThan(80);
+    }
   });
 
   it("keeps the tab bar and the footer visible around the card", () => {
     const { plain } = draw({ modal });
 
     expect(plain[0]).toContain(NEW_TAB);
-    expect(plain.at(-1)).toContain("esc deny");
+    expect(plain.at(-1)).toContain("[×] deny");
   });
 
   it("stays quiet when the preview fits", () => {
@@ -1018,13 +1067,12 @@ describe("the approval modal", () => {
   it("counts the marker itself among the lines it hid", () => {
     // Six rows of body: five from the diff and one to say what was cut, so the
     // seven-line preview leaves two lines unshown rather than one.
-    const justOver: ApprovalModal = {
+    const justOver: ApprovalModal = permission({
       title: "edit wants to run",
       body: [{ text: "edit src/a.ts" }].concat(
         Array.from({ length: 6 }, (_, i) => ({ text: `\n+ line ${i}` })),
       ),
-      options: "allow?",
-    };
+    });
 
     expect(draw({ modal: justOver }).plain.join("\n")).toContain("… 2 more lines");
   });
@@ -1192,9 +1240,7 @@ describe("the blocks", () => {
   });
 
   it("fills an ask and the state row as one box, edged in the ask's colour", () => {
-    const { frame } = draw({
-      modal: { title: "bash wants to run", body: [{ text: "run: ls -la" }], options: "allow?  y yes · a always · n no" },
-    });
+    const { frame } = draw({ modal: permission({ body: [{ text: "run: ls -la" }] }) });
 
     // The tab bar is on the same surface, so the box is what comes after it.
     const box = frame.lines.slice(1).filter((line) => line.includes(panel));
@@ -1378,11 +1424,12 @@ describe("the rows a click can land on", () => {
     expect(frame.rows.filter((row) => row.kind === "ask").map((row) => row.index)).toEqual([0, 0, 1]);
   });
 
-  it("says nothing is clickable when only the transcript is on screen", () => {
+  it("reports only the transcript's own targets, and the card's when one is up", () => {
     expect(draw({ entries: conversation }).frame.rows).toEqual([]);
-    expect(draw({ entries: conversation, modal: { title: "bash wants to run", body: [], options: "allow?" } }).frame.rows).toEqual(
-      [],
-    );
+    // A card owns the screen: its own chips and the footer's close box are the
+    // only things left to press.
+    const card = draw({ entries: conversation, modal: permission() }).frame.rows;
+    expect(card.map((row) => row.kind)).toEqual(["modal_choice", "modal_choice", "modal_choice", "close"]);
   });
 });
 
@@ -1406,9 +1453,11 @@ describe("the menu panel", () => {
 
     const body = plain.join("\n");
     expect(body).toContain("Settings");
-    expect(body).toContain("esc");
+    // The title row and the footer both carry the way out, as a chip a mouse
+    // can press rather than the word `esc`.
+    expect(body).toContain("[×]");
     expect(body).toContain("Search");
-    expect(body).toContain("‹/› change · esc close");
+    expect(body).toContain("‹/› change · [×] close");
     // The description of the highlighted row, so a value is never a mystery.
     expect(body).toContain("Colours for the whole screen.");
   });
