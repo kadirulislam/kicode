@@ -1,5 +1,6 @@
 # KiCode Task & Roadmap Tracking
 
+- [x] Fixed `[x]` / `[×]` close chip mouse hit detection on modal pickers (`/models`, `/sessions`, `/skills`): corrected `titleRow` calculation in `renderPicker` and enhanced `closeChipHits` to robustly detect trimmed and embedded `[x]` chips, ensuring clicking the `[x]` chip instantly dismisses the panel.
 - [x] Distinct animations for Agent thinking vs mode status: Replaced duplicate bottom "Agent is Thinking..." with a dynamic 5-block glowing pulse square blocks animation (`■ ■ □ □ □`) that explains mode execution (`Working in Build mode...`), keeping "Agent is Thinking..." exclusively in the transcript above the input box.
 - [x] Enhanced Clipboard UI with vivid 24×6 true-color half-block (`▀`) thumbnail image preview directly inside the modal before pasting, persistent last-5 copied history (`~/.kicode/clipboard_history.json`), dynamic arrow/hover preview switching across entries, and 1-5 number / mouse click selection for instant pasting or image attachment.
 - [x] Removed unused `ctrl+p commands` text from the bottom-right footer, keeping the footer minimal and focused on directory and usage metrics.

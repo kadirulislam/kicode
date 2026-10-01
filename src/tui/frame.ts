@@ -1501,7 +1501,7 @@ function renderPicker(
 
   const hits: Hit[] = [];
   row([]);
-  const titleRow = card.length - 1;
+  const titleRow = card.length;
   row(panelTitle(picker.title, CLOSE_CHIP, inner, styles));
   // The chip is found by walking the row it was drawn in — the row's own spans,
   // coordinates and all — so a target cannot drift from the glyph.
@@ -2425,12 +2425,35 @@ function hintLine(text: string, styles: Styles): Span[] {
  * truncated, and whatever sits to its left.
  */
 function closeChipHits(row: number, spans: readonly Span[], origin: number): Hit[] {
-  const width = textWidth(CLOSE_CHIP);
   const hits: Hit[] = [];
   let column = origin;
   for (const item of spans) {
-    if (item.text === CLOSE_CHIP) {
-      hits.push({ kind: "close", row, index: 0, colStart: column + 1, colEnd: column + width });
+    const raw = item.text.trim();
+    if (raw === CLOSE_CHIP || raw === "[x]" || raw === "[×]" || raw === "×" || raw === "x") {
+      const leadSpaces = item.text.length - item.text.trimStart().length;
+      const chipStart = column + leadSpaces + 1;
+      const chipWidth = textWidth(raw);
+      hits.push({
+        kind: "close",
+        row,
+        index: 0,
+        colStart: chipStart,
+        colEnd: chipStart + chipWidth - 1,
+      });
+    } else {
+      const match = /\[[×x]\]/g;
+      let m: RegExpExecArray | null;
+      while ((m = match.exec(item.text)) !== null) {
+        const chipStart = column + m.index + 1;
+        const chipWidth = textWidth(m[0]);
+        hits.push({
+          kind: "close",
+          row,
+          index: 0,
+          colStart: chipStart,
+          colEnd: chipStart + chipWidth - 1,
+        });
+      }
     }
     column += textWidth(item.text);
   }

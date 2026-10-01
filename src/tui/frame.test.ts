@@ -14,6 +14,7 @@ import {
   type Modal as ApprovalModal,
   type Size,
   type TuiState,
+  type Picker,
 } from "./frame";
 import { defaultViewSettings, type Spacing } from "./settings";
 import { buildStyles, darkTheme } from "./theme";
@@ -1844,5 +1845,23 @@ describe("the settings that change the display", () => {
     for (let i = 0; i < 40; i++) long.push({ kind: "assistant", text: `line ${i}` });
     expect(draw({ entries: long, settings: view() }).plain.join("\n")).toContain("█");
     expect(draw({ entries: long, settings: view({ scrollbar: "off" }) }).plain.join("\n")).not.toContain("█");
+  });
+});
+
+describe("picker close chip", () => {
+  it("generates a close chip hit target on the picker title row", () => {
+    const p: Picker = {
+      title: "Models",
+      all: [{ label: "Model A", value: "a" }],
+      items: [{ label: "Model A", value: "a" }],
+      query: "",
+      selected: 0,
+      pick: () => {},
+    };
+    const { frame } = draw({ picker: p });
+    const closeHit = frame.rows.find((r) => r.kind === "close");
+    expect(closeHit).toBeDefined();
+    expect(closeHit?.colStart).toBeGreaterThan(0);
+    expect(closeHit?.colEnd).toBeGreaterThan(closeHit?.colStart!);
   });
 });
