@@ -482,6 +482,14 @@ class TuiApp {
   private attached: PastedImage[] = [];
   /** Documents attached with `/attach`, read into the next turn as context. */
   private attachedDocs: AttachedDoc[] = [];
+  /**
+   * A turn that failed and is waiting on the user: retry it, move to another
+   * model, or let it go. The message and its attachments are kept so `r` can
+   * run the exact request again.
+   */
+  private recovery: { title: string; body: string; prompt: string; images: PastedImage[] } | null = null;
+  /** The failed turn `m` set aside, re-run the moment a picked model lands. */
+  private pendingRetry: { prompt: string; images: PastedImage[] } | null = null;
   private cwd: string;
   private variant = DEFAULT_VARIANT;
   /** Shift+Tab switches it; the agent is rebuilt because the mode is read then. */
@@ -782,6 +790,13 @@ class TuiApp {
         if (this.click(key)) this.draw();
         continue;
       }
+      if (this.recovery) {
+        const answer = await this.answerRecovery(key);
+        if (answer === "quit") return;
+        if (answer === "handled") continue;
+        // Anything this modal does not own falls through to the normal keys —
+        // Ctrl+C has to keep meaning what it means everywhere else.
+      }
       if (this.modal && this.pending) {
         if (this.answerModal(key) === "quit") return;
         continue;
@@ -982,6 +997,95 @@ class TuiApp {
 
     this.draw();
     return "handled";
+  }
+
+  /**
+   * The keys a failed turn answers to.
+   *
+   * `r` runs the exact request again — same words, same attachments, same
+   * model — because a rate limit is usually about *when*, not *what*. `m`
+   * opens the model picker and remembers the turn, so the model the user
+   * picks is the one the retry lands on. Esc keeps the error in the
+   * transcript and lets the user move on; Ctrl+C is deliberately not owned by
+   * this modal, so quit means quit.
+   */
+  private async answerRecovery(key: Key): Promise<"handled" | "quit" | "unhandled"> {
+    if (!this.recovery) return "handled";
+
+    if (key.type === "ctrl" && key.key === "c") return "unhandled";
+
+    const pressed = key.type === "text" ? key.text.toLowerCase() : key.type === "ctrl" ? key.key : "";
+
+    if (key.type === "escape" || pressed === "n") {
+      this.dismissRecovery();
+      this.draw();
+      this.releaseHeldQueue();
+      return "handled";
+    }
+
+    if (pressed === "r" || key.type === "enter") {
+      const failed = this.recovery;
+      this.dismissRecovery();
+      this.note("retrying the failed message", "dim");
+      void this.runTurn(failed.prompt, failed.images);
+      return "handled";
+    }
+
+    if (pressed === "m") {
+      const failed = this.recovery;
+      this.dismissRecovery();
+      // The turn waits for a model: `setModel` consumes this the moment a
+      // choice lands, whether it moved or the user re-confirmed the current
+      // one — both are an answer to "what now?".
+      this.pendingRetry = { prompt: failed.prompt, images: failed.images };
+      await this.chooseModel();
+      if (this.picker) {
+        // Picking is the retry; closing the picker without one cancels it.
+        this.picker.onClose = (committed) => {
+          if (!committed) this.pendingRetry = null;
+        };
+      } else {
+        // The picker never opened (no list available, nothing to choose):
+        // hand the decision back instead of silently dropping the turn.
+        this.pendingRetry = null;
+        this.recovery = failed;
+        this.modal = this.recoveryModal(failed);
+      }
+      this.draw();
+      return "handled";
+    }
+
+    // Every other key is held by the modal: typing into the prompt behind a
+    // question the user has not answered would look like the answer worked.
+    return "handled";
+  }
+
+  private dismissRecovery(): void {
+    this.recovery = null;
+    this.modal = null;
+    this.pendingRetry = null;
+  }
+
+  /** The queue held behind the recovery modal moves once the question is gone. */
+  private releaseHeldQueue(): void {
+    if (this.busy || this.queuedPrompts.length === 0) return;
+    const next = this.queuedPrompts.shift();
+    if (next) void this.runTurn(next.prompt, next.images);
+  }
+
+  /**
+   * The recovery card, as the renderer wants it.
+   *
+   * The error is shown in full — wrapped, then cut with a `… N more lines`
+   * marker by the modal itself — because a gateway's message is usually the
+   * whole diagnosis (which model, which quota, how long to wait).
+   */
+  private recoveryModal(failed: { title: string; body: string }): Modal {
+    return {
+      title: failed.title,
+      body: failed.body.split("\n").map((line) => span(line, this.styles.dim)),
+      options: "r retry · m choose model · esc dismiss",
+    };
   }
 
   private resolveModal(decision: ApprovalDecision): void {
@@ -1700,12 +1804,30 @@ class TuiApp {
         cancelled ? "warn" : "error",
         !cancelled,
       );
+      // A dead turn is worth a decision, not just a red line: the transcript
+      // keeps the error, and the modal offers the three things that can
+      // actually happen next — run it again, move to another model, or let it
+      // go. Goal runs stay autonomous: a modal nobody is watching would stall
+      // the run, so they only get the note.
+      if (!cancelled && !this.goalRun) {
+        const limited = /rate.limit|429/i.test(failure.message);
+        this.recovery = {
+          title: limited ? "Rate limited — what now?" : "The turn failed — what now?",
+          body: failure.message,
+          prompt,
+          images: [...images],
+        };
+        this.modal = this.recoveryModal(this.recovery);
+      }
     } finally {
       this.stopBusy();
       this.goalRun = false;
       await this.save().catch(() => undefined);
       this.draw();
-      if (!this.isPaused && this.queuedPrompts.length > 0) {
+      // A failed turn holding the recovery modal also holds the queue: a turn
+      // running behind the question would be a second thing deciding what the
+      // screen is doing. The queue moves when the question is answered.
+      if (!this.isPaused && !this.recovery && this.queuedPrompts.length > 0) {
         const next = this.queuedPrompts.shift();
         if (next) {
           void this.runTurn(next.prompt, next.images);
@@ -3081,8 +3203,12 @@ class TuiApp {
   }
 
   private async setModel(id: string, baseUrl: string = this.baseUrl): Promise<void> {
+    const retry = this.pendingRetry;
+    this.pendingRetry = null;
+
     if (id === this.model && baseUrl === this.baseUrl) {
       this.note(`already using ${id}`);
+      if (retry) void this.runTurn(retry.prompt, retry.images);
       this.draw();
       return;
     }
@@ -3104,6 +3230,9 @@ class TuiApp {
     void this.options.saveModel?.(id, baseUrl);
     await this.save().catch(() => undefined);
     this.draw();
+    // A model chosen from the recovery modal is the answer to "what now?":
+    // the failed message runs again, on the model that was just picked.
+    if (retry) void this.runTurn(retry.prompt, retry.images);
   }
 
   private chooseVariant(argument: string): void {

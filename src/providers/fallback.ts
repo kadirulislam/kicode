@@ -182,17 +182,6 @@ export class FallbackProvider implements Provider {
         this.report(hop.route, { ok: false, ...failureFields(error, reading) });
         if (started || !isRetryable(error)) throw error;
 
-        // A rate limit is worth waiting out before touching the next route —
-        // a short backoff here keeps one busy gateway from churning the whole
-        // chain. The gateway's own `Retry-After` wins when it gave one, capped
-        // so a "come back tomorrow" parks nothing; without it, a brief pause
-        // that grows with each hop. The wait is cancellable mid-sleep.
-        if (error instanceof ProviderError && error.status === 429) {
-          const wait = Math.min(reading?.retryAfterMs ?? RETRY_PAUSE_MS * (index + 1), RETRY_AFTER_CEILING_MS);
-          yield { type: "route-wait", ms: wait, from: hop.route.label, reason: fallbackReason(error) };
-          await this.wait(wait, request.signal);
-        }
-
         failures.push(`${hop.route.label} (${fallbackReason(error)})`);
         // Out of declared chain: ask for the implicit backups once, before
         // giving up, so a free route that has just run dry can still be
@@ -202,6 +191,19 @@ export class FallbackProvider implements Provider {
         if (!next) {
           if (single) throw error;
           break;
+        }
+
+        // A rate limit is worth waiting out before touching the next route —
+        // a short backoff here keeps one busy gateway from churning the whole
+        // chain. The gateway's own `Retry-After` wins when it gave one, capped
+        // so a "come back tomorrow" parks nothing; without it, a brief pause
+        // that grows with each hop. The wait is cancellable mid-sleep, and it
+        // is only taken when a route is actually next: with nowhere to go the
+        // pause would only delay the error the user has to act on.
+        if (error instanceof ProviderError && error.status === 429) {
+          const wait = Math.min(reading?.retryAfterMs ?? RETRY_PAUSE_MS * (index + 1), RETRY_AFTER_CEILING_MS);
+          yield { type: "route-wait", ms: wait, from: hop.route.label, reason: fallbackReason(error) };
+          await this.wait(wait, request.signal);
         }
         yield { type: "route", from: hop.route.label, to: next.route.label, reason: fallbackReason(error) };
       }

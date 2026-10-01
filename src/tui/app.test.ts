@@ -418,6 +418,80 @@ describe("runTui", () => {
     await done;
   });
 
+  it("offers a failed turn back as a modal — retry, another model, or let it go", async () => {
+    const app = harness({}, { failWith: new Error("Provider rate-limited the request (HTTP 429)") });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("try me\r");
+    await tick(30);
+    // The error stays in the transcript, and the modal asks what to do —
+    // naming the gateway's message, since that is usually the diagnosis.
+    expect(app.screen()).toContain("Provider rate-limited the request (HTTP 429)");
+    expect(app.lastFrame()).toContain("Rate limited — what now?");
+    expect(app.lastFrame()).toContain("r retry · m choose model · esc dismiss");
+
+    // Esc keeps the error and drops the question: the prompt takes typing again.
+    // A lone Esc is held briefly as a possible escape sequence, so this waits
+    // past that flush before reading the frame.
+    app.input.write("\u001b");
+    await tick(80);
+    expect(app.lastFrame()).not.toContain("Rate limited — what now?");
+    expect(app.screen()).toContain("Provider rate-limited the request (HTTP 429)");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("retries the exact failed message on r — words, attachments and model", async () => {
+    const app = harness({}, { failWith: new Error("Provider rate-limited the request (HTTP 429)") });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("try me\r");
+    await tick(30);
+    expect(app.sentPrompts).toEqual(["try me"]);
+
+    app.input.write("r");
+    await tick(40);
+    // The same request ran again — and since it failed the same way, the
+    // question is back rather than the error being the end.
+    expect(app.sentPrompts).toEqual(["try me", "try me"]);
+    expect(app.lastFrame()).toContain("Rate limited — what now?");
+
+    app.input.write("\u0003");
+    expect(await done).toBe(0);
+  }, 15000);
+
+  it("retries the failed message on whatever model the modal's picker lands on", async () => {
+    const app = harness(
+      {
+        listProviders: async () => [{ label: "TestGW", value: "https://api.example/v1" }],
+        listModels: async () => [{ id: "m2", free: true }],
+      },
+      { failWith: new Error("Provider rate-limited the request (HTTP 429)") },
+    );
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("try me\r");
+    await tick(30);
+    expect(app.sentPrompts).toEqual(["try me"]);
+
+    app.input.write("m");
+    await tick(120);
+    expect(app.lastFrame()).toContain("Select model");
+
+    // Enter takes the highlighted row; the model move and the retry are one act.
+    app.input.write("\r");
+    await tick(60);
+    expect(app.settings.at(-1)?.model).toBe("m2");
+    expect(app.sentPrompts).toEqual(["try me", "try me"]);
+
+    app.input.write("\u0003");
+    expect(await done).toBe(0);
+  }, 15000);
+
   it("folds repeated failures into one note that admits the count", async () => {
     // A gateway that rate-limits every turn used to stack identical error
     // blocks down the transcript — one row that says "×3" says the same thing
@@ -429,6 +503,10 @@ describe("runTui", () => {
     for (const prompt of ["first", "second", "third"]) {
       app.input.write(`${prompt}\r`);
       await tick(30);
+      // Every failure asks what to do next; the question is dismissed so the
+      // next message can be typed. The notes still fold.
+      app.input.write("\u001b");
+      await tick(80);
     }
 
     expect(app.screen()).toContain("Provider rate-limited the request (HTTP 429) ×3");

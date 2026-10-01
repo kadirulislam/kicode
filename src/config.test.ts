@@ -270,13 +270,13 @@ describe("fallback routes", () => {
     expect(loadConfig({ KICODE_API_KEY: "k" }, {}).fallback).toEqual([]);
   });
 
-  it("defaults the auto free chain on, and honours both kill switches", () => {
-    expect(loadConfig({ KICODE_API_KEY: "k" }, {}).fallbackAuto).toBe(true);
-    expect(loadConfig({ KICODE_API_KEY: "k" }, { fallbackAuto: false }).fallbackAuto).toBe(false);
-    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "off" }, {}).fallbackAuto).toBe(false);
-    // An unset-but-present variable, or any other word, leaves it on.
-    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "" }, {}).fallbackAuto).toBe(true);
+  it("defaults the auto free chain off — recovery is a decision, not a route — and honours both switches", () => {
+    expect(loadConfig({ KICODE_API_KEY: "k" }, {}).fallbackAuto).toBe(false);
+    expect(loadConfig({ KICODE_API_KEY: "k" }, { fallbackAuto: true }).fallbackAuto).toBe(true);
     expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "on" }, {}).fallbackAuto).toBe(true);
+    // An unset-but-present variable, or any other word, leaves it off.
+    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "" }, {}).fallbackAuto).toBe(false);
+    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "off" }, {}).fallbackAuto).toBe(false);
   });
 });
 

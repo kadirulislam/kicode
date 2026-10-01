@@ -78,8 +78,9 @@ export type Config = {
   fallback: FallbackRoute[];
   /**
    * Whether a free model implicitly falls back to the endpoint's other free
-   * models when it fails. Explicit `fallback` routes always come first; this
-   * only ever adds free routes, never a paid one.
+   * models when it fails, instead of the turn failing into the recovery modal.
+   * Explicit `fallback` routes always come first; this only ever adds free
+   * routes, never a paid one. Off unless asked for.
    */
   fallbackAuto: boolean;
   /** Session token ceiling. 0 means no ceiling. */
@@ -219,17 +220,17 @@ function readFallback(
 /**
  * Whether a free model may pick up the endpoint's other free models on its own.
  *
- * On by default, because the failure it answers is the common one: a free
- * route hits its limit and the session stops for want of a second one nobody
- * configured. `"fallbackAuto": false` in `kicode.json`, or
- * `KICODE_FALLBACK_AUTO=off`, turns it off for anyone who wants a failure to be
- * the end of the matter. Only free models are ever added, whatever this says.
+ * Off by default: a failed turn is a decision the user makes — the recovery
+ * modal offers retry and another model — not something the router settles
+ * alone. `"fallbackAuto": true` in `kicode.json`, or `KICODE_FALLBACK_AUTO=on`,
+ * hands it back to the router. Only free models are ever added, whatever this
+ * says; explicitly declared `fallback` routes are unaffected and always tried.
  */
 function readFallbackAuto(env: NodeJS.ProcessEnv, file: FileSettings): boolean {
   const declared = env.KICODE_FALLBACK_AUTO?.trim().toLowerCase();
-  if (declared === "off" || declared === "false" || declared === "0" || declared === "no") return false;
-  if (declared !== undefined && declared !== "") return true;
-  return file.fallbackAuto !== false;
+  if (declared === "on" || declared === "true" || declared === "1" || declared === "yes") return true;
+  if (declared !== undefined && declared !== "") return false;
+  return file.fallbackAuto === true;
 }
 
 /** Identifies a route for de-duplication: an endpoint plus a model. */
