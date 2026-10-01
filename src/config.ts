@@ -5,6 +5,7 @@
  * never a credential, so there is no on-disk secret to leak or commit.
  */
 
+import { COMPACT_TARGET_PERCENT } from "./agent/compaction";
 import type { FileSettings } from "./settings-file";
 import { DEFAULT_THEME } from "./tui/theme";
 import { type ViewSettings, viewFrom } from "./tui/settings";
@@ -14,15 +15,22 @@ export const DEFAULT_MODEL = "deepseek-v4-flash";
 export const DEFAULT_MAX_TURNS = 12;
 export const DEFAULT_CONTEXT_TOKENS = 128_000;
 export const DEFAULT_RESERVE_TOKENS = 8_000;
-export const DEFAULT_KEEP_TURNS = 6;
 /** The estimate at which a session is compacted, even inside a larger window. */
 export const DEFAULT_COMPACT_AT_TOKENS = 100_000;
+/**
+ * Where a compacted session is left sitting in its window, as a percentage.
+ *
+ * The same number `compaction.ts` defaults to, re-exported so `--init` and the
+ * config file can name it rather than each carrying their own copy.
+ */
+export const DEFAULT_COMPACT_TARGET_PERCENT = COMPACT_TARGET_PERCENT;
 
 export type CompactionSettings = {
   enabled: boolean;
   contextTokens: number;
   reserveTokens: number;
-  keepRecentTurns: number;
+  /** Where a compacted session sits in the window. Clamped to the 30–50 band. */
+  targetPercent: number;
   compactAt: number;
 };
 
@@ -157,7 +165,7 @@ export function loadConfig(
       enabled: overrides.compact === false ? false : compaction.enabled !== false,
       contextTokens: compaction.contextTokens ?? intFrom(env.KICODE_CONTEXT_TOKENS, DEFAULT_CONTEXT_TOKENS),
       reserveTokens: compaction.reserveTokens ?? intFrom(env.KICODE_RESERVE_TOKENS, DEFAULT_RESERVE_TOKENS),
-      keepRecentTurns: compaction.keepRecentTurns ?? intFrom(env.KICODE_KEEP_TURNS, DEFAULT_KEEP_TURNS),
+      targetPercent: compaction.targetPercent ?? intFrom(env.KICODE_COMPACT_TARGET, DEFAULT_COMPACT_TARGET_PERCENT),
       compactAt: compaction.compactAt ?? intFrom(env.KICODE_COMPACT_AT, DEFAULT_COMPACT_AT_TOKENS),
     },
   };

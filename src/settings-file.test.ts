@@ -29,14 +29,14 @@ describe("fileSettingsFromEntries", () => {
       entry({
         model: "deepseek-v4-flash:free",
         baseUrl: "https://gateway.example.com/v1",
-        compaction: { contextTokens: 200_000, reserveTokens: 16_000, keepRecentTurns: 8, compactAt: 50_000 },
+        compaction: { contextTokens: 200_000, reserveTokens: 16_000, targetPercent: 35, compactAt: 50_000 },
       }),
     ]);
 
     expect(result.settings).toEqual({
       model: "deepseek-v4-flash:free",
       baseUrl: "https://gateway.example.com/v1",
-      compaction: { contextTokens: 200_000, reserveTokens: 16_000, keepRecentTurns: 8, compactAt: 50_000 },
+      compaction: { contextTokens: 200_000, reserveTokens: 16_000, targetPercent: 35, compactAt: 50_000 },
     });
     expect(result.warnings).toEqual([]);
   });
@@ -54,11 +54,20 @@ describe("fileSettingsFromEntries", () => {
 
   it("merges compaction across files rather than replacing the block", () => {
     const result = fileSettingsFromEntries([
-      entry({ compaction: { contextTokens: 100_000, keepRecentTurns: 10 } }, "global"),
-      entry({ compaction: { keepRecentTurns: 2 } }, "project"),
+      entry({ compaction: { contextTokens: 100_000, targetPercent: 35 } }, "global"),
+      entry({ compaction: { targetPercent: 45 } }, "project"),
     ]);
 
-    expect(result.settings.compaction).toEqual({ contextTokens: 100_000, keepRecentTurns: 2 });
+    expect(result.settings.compaction).toEqual({ contextTokens: 100_000, targetPercent: 45 });
+  });
+
+  it("names the turn count it no longer takes, instead of dropping it in silence", () => {
+    const result = fileSettingsFromEntries([entry({ compaction: { keepRecentTurns: 8 } })]);
+
+    // A knob that does nothing is worse than one that says it does nothing.
+    expect(Object.keys(result.settings.compaction ?? {})).toEqual([]);
+    expect(result.warnings.join("\n")).toContain("keepRecentTurns");
+    expect(result.warnings.join("\n")).toContain("targetPercent");
   });
 
   it("accepts the mock shorthand", () => {

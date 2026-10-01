@@ -114,7 +114,7 @@ describe("compaction settings", () => {
 
     expect(config.compaction.contextTokens).toBe(128_000);
     expect(config.compaction.reserveTokens).toBe(8_000);
-    expect(config.compaction.keepRecentTurns).toBe(6);
+    expect(config.compaction.targetPercent).toBe(40);
     expect(config.compaction.compactAt).toBe(100_000);
   });
 
@@ -125,10 +125,10 @@ describe("compaction settings", () => {
   });
 
   it("reads the environment", () => {
-    const config = loadConfig({ KICODE_CONTEXT_TOKENS: "32000", KICODE_KEEP_TURNS: "3" }, {});
+    const config = loadConfig({ KICODE_CONTEXT_TOKENS: "32000", KICODE_COMPACT_TARGET: "35" }, {});
 
     expect(config.compaction.contextTokens).toBe(32_000);
-    expect(config.compaction.keepRecentTurns).toBe(3);
+    expect(config.compaction.targetPercent).toBe(35);
   });
 
   it("lets the config file override the environment", () => {

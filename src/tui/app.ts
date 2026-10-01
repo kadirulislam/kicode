@@ -3453,9 +3453,12 @@ class TuiApp {
     }
 
     const result = await this.agent.compactNow();
+    // The target is named as well as the result: what a session is compacted
+    // to is the setting now, and a notice that only said how far it fell would
+    // leave the number nobody could check.
     this.note(
       result
-        ? `compacted ${result.summarized} earlier messages · ~${formatTokens(result.before)} → ~${formatTokens(result.after)} tokens`
+        ? `compacted ${result.summarized} earlier messages · ~${formatTokens(result.before)} → ~${formatTokens(result.after)} tokens (target ~${formatTokens(result.target)})`
         : "nothing to compact yet, or the summariser failed",
     );
   }

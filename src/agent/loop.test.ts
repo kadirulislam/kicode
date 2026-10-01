@@ -721,7 +721,10 @@ describe("cancelling a turn", () => {
 class ProseProvider implements Provider {
   readonly requests: ChatRequest[] = [];
 
-  constructor(private readonly failSummary = false) {}
+  constructor(
+    private readonly failSummary = false,
+    private readonly answer = "answer",
+  ) {}
 
   async *stream(request: ChatRequest): AsyncGenerator<StreamEvent, void, void> {
     this.requests.push(request);
@@ -738,8 +741,8 @@ class ProseProvider implements Provider {
       return;
     }
 
-    yield { type: "text", delta: "answer" };
-    yield { type: "finish", message: { role: "assistant", content: "answer" }, finishReason: "stop" };
+    yield { type: "text", delta: this.answer };
+    yield { type: "finish", message: { role: "assistant", content: this.answer }, finishReason: "stop" };
   }
 }
 
@@ -879,22 +882,41 @@ describe("Agent.send and the question channel", () => {
 });
 
 describe("Agent.send compaction", () => {
-  // Small enough that the budget is passed after a couple of short turns.
-  const compaction = { contextTokens: 200, reserveTokens: 100, keepRecentTurns: 1 };
+  // A 3,000-token window — small, but a window rather than a toy: compaction
+  // aims at 40% of it, so what it keeps and what it cuts are both readable.
+  const compaction = { contextTokens: 3_000, reserveTokens: 0 };
+  /** ~500 tokens a turn, so eight of them pass the window. */
+  const talkative = (): ProseProvider => new ProseProvider(false, `answer ${"x".repeat(2_000)}`);
 
-  it("summarises older turns once the budget is exceeded", async () => {
-    const provider = new ProseProvider();
+  it("summarises older turns once the budget is exceeded, and lands at the target", async () => {
+    const provider = talkative();
     const agent = new Agent({ provider, tools: new ToolRegistry(), model: "m", cwd: process.cwd(), compaction });
 
-    await collect(agent, "first question");
-    const events = await collect(agent, "second question");
+    // Run until it compacts, and keep the turn it happened in: which turn that
+    // is depends on how big a turn turns out to be.
+    const events: AgentEvent[] = [];
+    let inTurn = 0;
+    for (let index = 1; index <= 12 && inTurn === 0; index++) {
+      const turn = await collect(agent, `question ${index}`);
+      events.push(...turn);
+      if (turn.some((event) => event.type === "compacted")) inTurn = index;
+    }
 
-    expect(events.some((event) => event.type === "compacted")).toBe(true);
+    const compacted = events.find((event) => event.type === "compacted");
+    expect(inTurn).toBeGreaterThan(0);
+    if (compacted?.type !== "compacted") throw new Error("no compaction");
+    // A 3,000-token window is aimed at 40% of it, and the session lands inside
+    // that rather than a token under the window it just passed.
+    expect(compacted.target).toBe(1_200);
+    expect(compacted.before).toBeGreaterThan(compacted.target);
+    expect(compacted.after).toBeLessThanOrEqual(compacted.target);
 
     const latest = JSON.stringify(provider.requests.at(-1)?.messages);
     expect(latest).toContain("Earlier conversation, summarised");
     expect(latest).toContain("the user asked about files");
-    expect(latest).toContain("second question");
+    // The turn being worked on is kept word for word, which is what the tail is
+    // for and what a count of turns could not promise.
+    expect(latest).toContain(`question ${inTurn}`);
   });
 
   it("carries on over budget when the summariser fails", async () => {

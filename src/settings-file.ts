@@ -12,7 +12,7 @@ import { MAX_SPACING, SETTING_KEYS, SPACING_KEYS, settingOptions, type Spacing, 
  *     "tokenharbor": { "baseUrl": "https://tokenharbor.ai/v1", "apiKeyEnv": "TOKENHARBOR_API_KEY" },
  *     "local": { "baseUrl": "http://localhost:11434/v1", "models": ["qwen3:8b"] }
  *   },
- *   "compaction": { "contextTokens": 200000, "keepRecentTurns": 8 },
+ *   "compaction": { "contextTokens": 200000, "targetPercent": 40 },
  *   "thinking": "hide",
  *   "spacing": { "block": 1, "entry": 1, "turn": 2 },
  *   "mcp": { … }
@@ -29,7 +29,7 @@ export type FileCompactionSettings = {
   enabled?: boolean;
   contextTokens?: number;
   reserveTokens?: number;
-  keepRecentTurns?: number;
+  targetPercent?: number;
   compactAt?: number;
 };
 
@@ -190,11 +190,20 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
         const source = block as Record<string, unknown>;
         const next: FileCompactionSettings = { ...settings.compaction };
 
-        for (const key of ["contextTokens", "reserveTokens", "keepRecentTurns", "compactAt"] as const) {
+        for (const key of ["contextTokens", "reserveTokens", "targetPercent", "compactAt"] as const) {
           if (source[key] === undefined) continue;
           const value = positiveInt(source[key]);
           if (value === null) warnings.push(`Ignoring "compaction.${key}" in ${entry.file}: expected a positive number.`);
           else next[key] = value;
+        }
+
+        // Named rather than silently dropped: a session compacted by a turn
+        // count is not what this file is asking for any more, and a knob that
+        // does nothing is worse than one that says it does nothing.
+        if (source.keepRecentTurns !== undefined) {
+          warnings.push(
+            `Ignoring "compaction.keepRecentTurns" in ${entry.file}: the cut is chosen by size now — use "compaction.targetPercent".`,
+          );
         }
 
         if (source.enabled !== undefined) {

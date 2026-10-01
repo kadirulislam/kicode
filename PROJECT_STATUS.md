@@ -1,9 +1,9 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 982 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 993 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~468 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~472 KB) via `npm run build`
 
 ---
 
@@ -27,6 +27,13 @@
 - **Every answer on a card is a chip**: `[y] yes · [a] always · [n] no` on a permission prompt, `[r] retry · [m] choose model · [×] dismiss` on a failed turn. A click names the key and the same handler a keypress reaches answers it, so a mouse answer cannot drift from a typed one — `[m]` still opens the model picker with the failed turn set aside.
 - **`esc` is drawn as a clickable `[×]` everywhere it is offered**: the session footer's hints, a picker's title row, a menu's title and footer, the clipboard menu, and a card's own decision row. Each target is found by walking the row the chip was drawn in, so it cannot drift from the glyph.
 - **While a card is up it is the only thing clickable** (plus the footer, whose `[×]` is the permission card's way out) — and two bugs were fixed on the way: a multi-line gateway message printed as one run-on row on the recovery card, and the `[+]` attach hit box sat one column left of its glyph.
+
+### 0i. Compaction Aims at a Size, Not at a Count of Turns (ADR-024)
+- **A compacted session is left at `targetPercent` of its window** — 40% by default, clamped to a 30–50% band — instead of at "the last six turns". Two turns can be two thousand tokens or ninety thousand, so a count kept far too little in a tool-heavy session and left far too much in a quiet one; a size is the thing that can be aimed at.
+- **The tail is the longest run of recent turns that fits**, so the session lands *at* the target and keeps as much verbatim history as the target allows. A session already at its target is left alone — `/compact` says there is nothing to do rather than spending a model call to make it bigger.
+- **The cut prefers a request** (a tail that opens on the words that prompted the work), and moves inside a turn only when one enormous turn leaves no request cut that fits — the case that used to refuse to compact at all, so a long autonomous run could grow until the window broke it. A tool result is never orphaned: the cut is moved back to the call behind it.
+- **The briefing has a budget too** — a fifth of the target, reserved before the cut is chosen and said out loud in the summariser's instructions — because a summary that runs long is what pushed sessions back over their target.
+- **`keepRecentTurns` is gone** (a turn count was the bug); a config that still sets it is told so and ignored. The notices now name the aim: `compacted 12 earlier messages · ~100.0K → ~43.0K tokens (target ~51.2K)`.
 
 ### 0h. The Mode Is a Button on the Box's Left Edge, and Upload Is Spelled Out (ADR-023)
 - **The mode rides the box's left edge as a pill** — `[BUILD]` / `[PLAN]` / `[PAUSED]` / `[GOAL]`, the mode's own word inside brackets (the shape `[esc]` and `[y]` already have), in the mode's colour, warning-coloured when the mode is not the everyday one. It is a **button**: a click cycles the mode exactly as `shift+tab` does, because the mode is a capability and it is worth the same reach from a mouse as from a key. It leads the row because it answers the question the row is about — what this box will do with what is typed into it.

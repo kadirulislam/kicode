@@ -30,7 +30,7 @@ function config(overrides: Partial<Config> = {}): Config {
     fallback: [],
     fallbackAuto: true,
     maxTokens: 0,
-    compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, keepRecentTurns: 6, compactAt: 100_000 },
+    compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 100_000 },
     ...overrides,
   };
 }
@@ -73,17 +73,17 @@ describe("--init creating a file", () => {
 
   it("records compaction only when it differs from the defaults", async () => {
     const tuning = config({
-      compaction: { enabled: true, contextTokens: 200_000, reserveTokens: 8_000, keepRecentTurns: 3, compactAt: 100_000 },
+      compaction: { enabled: true, contextTokens: 200_000, reserveTokens: 8_000, targetPercent: 35, compactAt: 100_000 },
     });
 
     await writeProjectConfig(dir, tuning);
 
-    expect(await readJson()).toEqual({ model: DEFAULT_MODEL, compaction: { contextTokens: 200_000, keepRecentTurns: 3 } });
+    expect(await readJson()).toEqual({ model: DEFAULT_MODEL, compaction: { contextTokens: 200_000, targetPercent: 35 } });
   });
 
   it("records a non-default compactAt", async () => {
     const tuning = config({
-      compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, keepRecentTurns: 6, compactAt: 50_000 },
+      compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 50_000 },
     });
 
     await writeProjectConfig(dir, tuning);
@@ -92,7 +92,7 @@ describe("--init creating a file", () => {
   });
 
   it("records compaction being switched off", async () => {
-    await writeProjectConfig(dir, config({ compaction: { enabled: false, contextTokens: 128_000, reserveTokens: 8_000, keepRecentTurns: 6, compactAt: 100_000 } }));
+    await writeProjectConfig(dir, config({ compaction: { enabled: false, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 100_000 } }));
 
     expect((await readJson()).compaction).toEqual({ enabled: false });
   });
@@ -112,19 +112,19 @@ describe("--init merging into an existing file", () => {
   it("keeps unknown keys at the top level and inside compaction", async () => {
     await writeFile(
       file(),
-      JSON.stringify({ model: "old", future: true, compaction: { keepRecentTurns: 4, futureKnob: 1 } }),
+      JSON.stringify({ model: "old", future: true, compaction: { targetPercent: 35, futureKnob: 1 } }),
       "utf8",
     );
 
     await writeProjectConfig(
       dir,
-      config({ compaction: { enabled: true, contextTokens: 256_000, reserveTokens: 8_000, keepRecentTurns: 4, compactAt: 100_000 } }),
+      config({ compaction: { enabled: true, contextTokens: 256_000, reserveTokens: 8_000, targetPercent: 35, compactAt: 100_000 } }),
     );
 
     expect(await readJson()).toEqual({
       model: DEFAULT_MODEL,
       future: true,
-      compaction: { keepRecentTurns: 4, futureKnob: 1, contextTokens: 256_000 },
+      compaction: { targetPercent: 35, futureKnob: 1, contextTokens: 256_000 },
     });
   });
 

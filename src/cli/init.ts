@@ -3,8 +3,8 @@ import path from "node:path";
 import {
   DEFAULT_BASE_URL,
   DEFAULT_COMPACT_AT_TOKENS,
+  DEFAULT_COMPACT_TARGET_PERCENT,
   DEFAULT_CONTEXT_TOKENS,
-  DEFAULT_KEEP_TURNS,
   DEFAULT_RESERVE_TOKENS,
   MOCK_BASE_URL,
   type Config,
@@ -107,8 +107,8 @@ function project(config: Config): Record<string, unknown> {
   if (config.compaction.reserveTokens !== DEFAULT_RESERVE_TOKENS) {
     compaction.reserveTokens = config.compaction.reserveTokens;
   }
-  if (config.compaction.keepRecentTurns !== DEFAULT_KEEP_TURNS) {
-    compaction.keepRecentTurns = config.compaction.keepRecentTurns;
+  if (config.compaction.targetPercent !== DEFAULT_COMPACT_TARGET_PERCENT) {
+    compaction.targetPercent = config.compaction.targetPercent;
   }
   if (config.compaction.compactAt !== DEFAULT_COMPACT_AT_TOKENS) {
     compaction.compactAt = config.compaction.compactAt;

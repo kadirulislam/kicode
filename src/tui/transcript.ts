@@ -244,7 +244,7 @@ export function applyEvent(
     case "compacted":
       entries.push({
         kind: "note",
-        text: `compacted ${event.summarized} earlier messages · ~${event.before} → ~${event.after} tokens`,
+        text: `compacted ${event.summarized} earlier messages · ~${event.before} → ~${event.after} tokens (target ~${event.target})`,
         tone: "dim",
       });
       return;

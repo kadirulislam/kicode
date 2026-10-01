@@ -214,6 +214,16 @@ describe("the line under an answer", () => {
     expect(feed(answered, off).some((entry) => entry.kind === "meta")).toBe(false);
   });
 
+  it("says what a compaction aimed at, not only how far it fell", () => {
+    const entries = feed([{ type: "compacted", before: 108_400, after: 43_100, summarized: 12, target: 51_200 }]);
+
+    expect(entries.at(-1)).toEqual({
+      kind: "note",
+      text: "compacted 12 earlier messages · ~108400 → ~43100 tokens (target ~51200)",
+      tone: "dim",
+    });
+  });
+
   it("does not repeat the budget note it comes after", () => {
     const entries = feed([
       { type: "budget", spent: 10, limit: 10 },

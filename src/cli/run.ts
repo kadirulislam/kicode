@@ -216,7 +216,8 @@ const USAGE = [
   "                   keep the Windows commands)",
   "  KICODE_CONTEXT_TOKENS  model context window used for compaction (default 128000)",
   "  KICODE_COMPACT_AT      compact once the estimate passes this many tokens (default 100000)",
-  "  KICODE_KEEP_TURNS      recent user turns kept verbatim when compacting (default 6)",
+  "  KICODE_COMPACT_TARGET where a compacted session should sit, as a percentage",
+  "                   of the window (default 40; clamped to 30-50)",
 ].join("\n");
 
 // Printed in both PowerShell and bash, so it cannot assume either syntax. The
@@ -1101,7 +1102,7 @@ async function render(events: AsyncGenerator<AgentEvent, void, void>, io: Io): P
         break;
       case "compacted":
         io.writeLine(
-          `\u001b[2m[compacted ${event.summarized} earlier messages: ~${event.before} → ~${event.after} tokens]\u001b[0m`,
+          `\u001b[2m[compacted ${event.summarized} earlier messages: ~${event.before} → ~${event.after} tokens, target ~${event.target}]\u001b[0m`,
         );
         break;
       case "done":

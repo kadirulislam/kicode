@@ -977,18 +977,38 @@ each turn KiCode estimates the transcript size and, once it passes
 model-written summary:
 
 ```
-> [compacted 8 earlier messages: ~1501 → ~486 tokens]
+> [compacted 12 earlier messages: ~108400 → ~43100 tokens, target ~51200]
 ```
 
-The cut always lands on a **user** message. That is deliberate: a `tool` message
-without the `assistant.tool_calls` that produced it is a hard API error, so
-splitting anywhere else would eventually cut a tool sequence in half. The recent
-turns are kept verbatim, and the system prompt is never summarised.
+**The aim is a size, not a count of turns.** A compacted session is left sitting
+at `targetPercent` of its window — 40% by default, kept inside a band of 30–50%
+— and the tail that stays word-for-word is the longest run of recent turns that
+fits inside that target. A turn count cannot do this job: two turns can be two
+thousand tokens or ninety thousand, so a fixed count keeps far too little in a
+tool-heavy session and leaves far too much in a quiet one. The target is what
+makes room to keep working; the cut is what fills it. A session already at its
+target is left alone, so `/compact` says there is nothing to do rather than
+spending a model call to make the session bigger.
 
-Tune it in `kicode.json` (`compaction.contextTokens`, `keepRecentTurns`,
-`reserveTokens`) or with the `KICODE_CONTEXT_TOKENS` (default 128000 — set it to
-your model's real window), `KICODE_KEEP_TURNS` (default 6), and
+The cut prefers a **request**: a tail that opens on the words that prompted the
+work reads as a conversation, and it is the boundary every provider is happiest
+with. When one enormous turn leaves no request cut that fits — a hundred tool
+calls under a single question — the cut moves inside that turn, to an assistant
+message that owns its own calls. What it never does is orphan a tool result: a
+`tool` message without the `assistant.tool_calls` that produced it is a hard API
+error, so the cut is moved back to the call rather than left there. The system
+prompt is never summarised.
+
+The briefing is asked to stay inside a fifth of the target, because a summary
+that runs long is what pushes a session back over its target after compacting.
+Tune it in `kicode.json` (`compaction.contextTokens`, `targetPercent`,
+`reserveTokens`, `compactAt`) or with the `KICODE_CONTEXT_TOKENS` (default
+128000 — set it to your model's real window), `KICODE_COMPACT_TARGET` (default
+40, in percent), `KICODE_COMPACT_AT` (default 100000) and
 `KICODE_RESERVE_TOKENS` (default 8000) variables. `--no-compact` turns it off.
+
+`keepRecentTurns` is gone. It was a turn count, and a turn is not a size; a
+config that still sets it is told so and ignored.
 
 The size estimate is ~4 characters per token rather than a real tokeniser —
 close enough to decide *when* to compact. Compaction costs one extra model call;
@@ -1021,7 +1041,7 @@ key, so a project can be set up before you have a credential to hand.
 {
   "model": "deepseek-v4-flash:free",
   "baseUrl": "https://openrouter.ai/api/v1",
-  "compaction": { "contextTokens": 200000, "keepRecentTurns": 8 },
+  "compaction": { "contextTokens": 200000, "targetPercent": 40 },
   "thinking": "hide",
   "verbosity": "low",
   "spacing": { "block": 1, "entry": 1, "turn": 2 },
@@ -1078,7 +1098,8 @@ through named values.
 | `mock` | `KICODE_BASE_URL=http://localhost:8787/v1` |
 | `compaction.contextTokens` | `KICODE_CONTEXT_TOKENS` |
 | `compaction.reserveTokens` | `KICODE_RESERVE_TOKENS` |
-| `compaction.keepRecentTurns` | `KICODE_KEEP_TURNS` |
+| `compaction.targetPercent` | `KICODE_COMPACT_TARGET` |
+| `compaction.compactAt` | `KICODE_COMPACT_AT` |
 | `compaction.enabled` | `--no-compact` disables it |
 | `mcp` | — (see [MCP servers](#mcp-servers)) |
 

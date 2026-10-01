@@ -32,7 +32,7 @@ export type AgentEvent =
   | { type: "text"; delta: string }
   | { type: "tool-start"; id: string; name: string; args: unknown }
   | { type: "tool-result"; id: string; name: string; content: string; isError: boolean }
-  | { type: "compacted"; before: number; after: number; summarized: number }
+  | { type: "compacted"; before: number; after: number; summarized: number; target: number }
   /** The request moved to a backup route, before any of it was seen. */
   | { type: "route"; from: string; to: string; reason: string }
   /** The router is pausing before its next attempt, waiting out a rate limit. */
@@ -253,11 +253,11 @@ export class Agent {
    * asked for rather than only waited for. Returns null when there is nothing
    * to summarise or the summariser failed.
    */
-  async compactNow(): Promise<{ before: number; after: number; summarized: number } | null> {
+  async compactNow(): Promise<{ before: number; after: number; summarized: number; target: number } | null> {
     const before = estimateTokens(this.messages);
     const result = await this.summarise();
     if (!result) return null;
-    return { before, after: estimateTokens(this.messages), summarized: result.summarized };
+    return { before, after: estimateTokens(this.messages), summarized: result.summarized, target: result.target };
   }
 
   /**
@@ -571,7 +571,7 @@ export class Agent {
     const result = await this.summarise();
     if (!result) return;
 
-    yield { type: "compacted", before, after: estimateTokens(this.messages), summarized: result.summarized };
+    yield { type: "compacted", before, after: estimateTokens(this.messages), summarized: result.summarized, target: result.target };
   }
 
   /**
@@ -580,14 +580,14 @@ export class Agent {
    * A failed summary is not fatal: going over budget is better than losing the
    * conversation, so the caller carries on either way.
    */
-  private async summarise(): Promise<{ summarized: number } | null> {
+  private async summarise(): Promise<{ summarized: number; target: number } | null> {
     if (!this.compaction) return null;
 
     try {
       const result = await compactMessages(this.provider, this.model, this.messages, this.compaction);
       if (!result) return null;
       this.messages.splice(0, this.messages.length, ...result.messages);
-      return { summarized: result.summarized };
+      return { summarized: result.summarized, target: result.target };
     } catch {
       return null;
     }
