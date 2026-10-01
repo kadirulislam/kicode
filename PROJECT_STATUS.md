@@ -1,9 +1,9 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 948 Tests Passing (49 test suites, two consecutive green runs)  
+**Build Status:** Stable, All 952 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~456 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~457 KB) via `npm run build`
 
 ---
 
@@ -16,6 +16,11 @@
 - **Caret row off-by-one fixed** (found by the attach-button tests, ADR-016): the caret row omitted the tab bar's row, so with the sidebar visible the terminal caret and every prompt-row click sat one row too high; the selection-start guard also now refuses the chrome under the rule, so a drag there cannot copy `Ask anything...` as conversation text.
 - **Plan-mode false refusals fixed**: the read-only classifier now permits `2>/dev/null`, `2>&1` and `1>/dev/null` — the stderr-quieting idioms models reach for constantly while exploring — while any redirect to a real path stays refused.
 - **Request block chips**: the user message's fill hugs its text (widest row + 2 cells) rather than stretching to the column, so short messages no longer read as a background cut off mid-row.
+
+### 0b. Panels Float Over a Faded Page (ADR-017)
+- **Modals and pickers are cards over the transcript, not instead of it**: `/models`, `/settings` and the full-screen menus render the conversation behind them and fade it (one faint style on the page background, chip fills included), so the only thing at full strength is the card being answered.
+- **The card sits at the foot of the page**, directly above the rule and the prompt — where the eye already is while typing — instead of being centred in the transcript. The permission modal gets the same fade behind it, and the mode row and footer keep their colour because they carry the keys the card is asking for.
+- **While a card is up it owns the clicks**: the faded page contributes no click targets, so an unclear row cannot be pressed by accident.
 
 ### 0b. Reading-Level Transcript Discipline (ADR-012)
 - **Accent selection fill** instead of inverse video (`Styles.selection` + parameterized `markCells`) — visible on terminals where `ESC[7m` renders as nothing; the centered permission modal is selectable like every other row. Root-cause fix: `TuiApp.state()` now passes the live selection to the renderer (previously the tested highlight code never ran on screen); pinned by a raw-bytes mouse-drag regression test.

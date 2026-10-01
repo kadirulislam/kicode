@@ -654,6 +654,59 @@ describe("the picker", () => {
     expect(text).toContain("ctrl+f");
     expect(text).toContain("favorite");
   });
+
+  it("sits at the foot of the page, just above the input area", () => {
+    const { plain } = draw({
+      entries: conversation,
+      picker: { ...picker, items: picker.items.slice(0, 1), selected: 0 },
+    });
+
+    // The card's bottom border is drawn, and the rule that opens the input area
+    // is the next row after it — a picker is answered from the keyboard, so it
+    // belongs where the eye already is. (The card's lower edge is the `└` row.)
+    const bottomEdge = plain.findIndex((line) => line.includes("└"));
+    const rule = plain.findIndex((line) => /^─{20,}$/.test(line));
+    expect(bottomEdge).toBeGreaterThan(0);
+    expect(rule - bottomEdge).toBe(1);
+  });
+
+  it("leaves the conversation on screen behind it, faded", () => {
+    // A page with something on it: the transcript follows the tail, so a short
+    // conversation sits exactly where the card lands and there is nothing above
+    // to fade.
+    const long: Entry[] = Array.from({ length: 12 }, (_, i) => ({ kind: "user", text: `message number ${i}` }));
+    const { frame, plain } = draw({ entries: long, picker });
+
+    // The transcript is still there — the screen is not wiped — but its rows
+    // are faint, so only the card is at full strength.
+    const behind = frame.lines.filter((line) => strip(line).includes("message number"));
+    expect(behind.length).toBeGreaterThan(0);
+    for (const line of behind) {
+      expect(line).toContain(styles.faint);
+      // The page goes back to the page's own background: a chip fill left at
+      // full strength behind a card reads as a second panel.
+      expect(line).not.toContain(bg(theme.panel));
+    }
+
+    // And the card keeps its own colours, so it is still the readable thing on
+    // screen: the title is bold, and the list rows are not faint.
+    const title = frame.lines.filter((line) => strip(line).includes("Select model"));
+    expect(title.length).toBe(1);
+    expect(title[0]).toContain(styles.bold);
+    // The selected row is still drawn in the accent — the fade is a single
+    // faint style, so the accent appearing at all proves the card is not it.
+    const rows = frame.lines.filter((line) => strip(line).includes("glm-5.3"));
+    expect(rows.length).toBe(1);
+    expect(rows[0]).toContain(styles.accentBold);
+    expect(plain.some((line) => line.includes("glm-5.3"))).toBe(true);
+  });
+
+  it("stops the page behind it answering clicks", () => {
+    // A row you cannot see clearly is not a row you should be able to press, so
+    // only the card contributes click targets while it is up.
+    const { frame } = draw({ entries: conversation, picker });
+    expect(frame.rows.every((row) => row.kind === "picker" || row.kind === "picker_tab")).toBe(true);
+  });
 });
 
 describe("the mention list", () => {

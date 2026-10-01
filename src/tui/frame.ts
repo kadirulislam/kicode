@@ -406,19 +406,49 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
   const tabRow = showTabs ? renderTabs(state, styles, usable) : { spans: [] as Span[], hits: [] };
 
   const bodyRows = Math.max(rows - (showTabs ? 1 : 0) - bottom.lines.length, 0);
-  const body = renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin);
+  // A picker or a menu is a card laid **over** the page, not instead of it: the
+  // conversation stays where it was and steps back, so opening `/models` does
+  // not wipe the screen the user was reading. The page behind is drawn from the
+  // same state with the panel taken out, and every row the card does not cover
+  // is faded — the card is the only thing at full strength.
+  const overlay = Boolean(state.picker || state.menu);
+  const page = overlay ? renderBody({ ...state, picker: null, menu: null }, styles, theme, usable - margin, bodyRows, usable, margin) : null;
+  const body = page ?? renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin);
+  const card = overlay ? renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin) : null;
 
   const tabRowCount = showTabs ? 1 : 0;
   const allRows: BodyLine[] = [];
+  /** Rows the card covers, which keep their own colour while the rest fades. */
+  const cardRows = new Set<number>();
   if (showTabs) {
     allRows.push({ spans: tabRow.spans, background: theme.panel });
   }
   for (let i = 0; i < bodyRows; i++) {
+    const cardLine = card?.lines[i];
     const line = body.lines[i];
-    allRows.push({ spans: line?.spans ?? [], background: line?.background ?? theme.bg });
+    // A card row carrying text covers the page; the card's own blank padding
+    // rows let the faded page show through around it.
+    if (cardLine && cardLine.spans.length > 0) {
+      allRows.push({ spans: cardLine.spans, background: cardLine.background ?? theme.panel });
+      cardRows.add(allRows.length - 1);
+    } else {
+      allRows.push({ spans: line?.spans ?? [], background: line?.background ?? theme.bg });
+    }
   }
   for (const bRow of bottom.rows) {
     allRows.push(bRow);
+  }
+
+  // Only the page behind fades — the tab bar and the transcript. The rows under
+  // the rule are the input area's own chrome (the mode row and the footer), and
+  // they keep their colour: they are what the card is standing on, and the
+  // permission card is deliberately one box with the state row under it.
+  const pageRows = tabRowCount + bodyRows;
+  if (overlay) {
+    for (const [index, row] of allRows.entries()) {
+      if (index >= pageRows || cardRows.has(index)) continue;
+      allRows[index] = fadeRow(row, styles, theme);
+    }
   }
 
   const lines: string[] = [];
@@ -450,6 +480,13 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     const box = modalBoxLines(state.modal, styles, boxWidth, bodyBudget);
     const left = Math.max(Math.floor((usable - boxWidth) / 2), 0);
     const start = Math.max(Math.floor((rows - box.length) / 2), 0);
+    // The card is the only thing on screen that has to be read, so the page
+    // under it steps back — the same treatment a picker's card gets.
+    for (let row = 0; row < Math.min(pageRows, lines.length); row++) {
+      if (row >= start && row < start + box.length) continue;
+      const source = allRows[row];
+      if (source && source.spans.length > 0) lines[row] = paint(fadeRow(source, styles, theme).spans, theme.bg, usable, theme.bg);
+    }
     box.forEach((spans, offset) => {
       const row = start + offset;
       if (row < 0 || row >= lines.length) return;
@@ -472,7 +509,9 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
   // under the body. Both are in rows the mouse actually reports, so a caller can
   // compare a click against them without knowing the layout at all.
   const panelRows: PanelRow[] = [
-    ...body.hits.map((hit) => ({ ...hit, row: hit.row + tabRowCount + 1 })),
+    // While a card is up it owns the clicks: the page behind it is scenery, and
+    // a row you cannot see clearly is not a row you should be able to press.
+    ...(card ? card.hits : body.hits).map((hit) => ({ ...hit, row: hit.row + tabRowCount + 1 })),
     ...bottom.hits.map((hit) => ({ ...hit, row: hit.row + tabRowCount + bodyRows + 1 })),
   ];
 
@@ -612,6 +651,18 @@ type BodyLine = { spans: Span[]; background: string };
 /** Rows of a plain list, all on the background. */
 function plain(rows: readonly Span[][], background: string): BodyLine[] {
   return rows.map((spans) => ({ spans, background }));
+}
+
+/**
+ * A row the card is covering, folded back into the page.
+ *
+ * The card owns the eye, so everything behind it drops to the faint colour on
+ * the page background — still legible enough to keep your place in the
+ * conversation, plainly not the thing being answered. Chip fills go too: a
+ * block of colour left at full strength behind a modal reads as another panel.
+ */
+function fadeRow(row: BodyLine, styles: Styles, theme: Theme): BodyLine {
+  return { spans: row.spans.map((s) => ({ ...s, style: styles.faint })), background: theme.bg };
 }
 
 /**
@@ -1181,9 +1232,16 @@ function renderMenu(
   if (showDescription)  band.push([span(indent), ...truncateSpans([span(menu.description ?? "", styles.faint)], width)]);
   band.push([span(indent), span(menu.footer, styles.hint)]);
 
-  // `band` is drawn one row down, inside the blank row that gives the surface
-  // its top edge — so every hit moves with it.
-  const out: BodyLine[] = [{ spans: [], background: theme.bg }];
+  // The band sits low on the page, just above the rule, for the same reason the
+  // picker does: a menu is answered from the keyboard while the eye is down by
+  // the prompt. `band` is drawn one row down, inside the blank row that gives
+  // the surface its top edge — so every hit moves with it, and with the padding
+  // that pushes the whole band down.
+  const padTop = Math.max(height - (band.length + 2), 0);
+  for (const hit of hits) hit.row += padTop;
+  const out: BodyLine[] = [];
+  for (let i = 0; i < padTop; i++) out.push({ spans: [], background: theme.bg });
+  out.push({ spans: [], background: theme.bg });
   for (const spans of band) out.push({ spans, background: theme.panel });
   out.push({ spans: [], background: theme.bg });
   while (out.length < height) out.push({ spans: [], background: theme.bg });
@@ -1342,7 +1400,11 @@ function renderPicker(
 
   put([span(`└${"─".repeat(inside)}┘`, styles.faint)]);
 
-  const topPad = isTop ? 0 : Math.max(Math.floor((height - out.length) / 2), 0);
+  // The panel sits at the foot of the page, directly above the rule and the
+  // prompt: a picker is answered with the keyboard while the eye is already
+  // down by the input, so the choice belongs there rather than in the middle
+  // of a transcript the user is not looking at.
+  const topPad = isTop ? 0 : Math.max(height - out.length, 0);
   const filled: Span[][] = [];
   for (let i = 0; i < topPad; i++) filled.push([]);
   for (const line of out) filled.push(line);

@@ -70,7 +70,7 @@
 - [ ] **Owner's issues list (received 2026-10-01, not yet started)** — ten items, in the owner's order:
   1. **Bash error in plan mode** — a bash command that should pass the read-only classifier is still refused (or vice versa); reproduce and fix.
   2. **Bash permission should be a modal** — the approval prompt for a bash command should appear as the centered permission modal, not inline.
-  3. **All modals/pickers dim the background** — `/models`, `/settings`, menus and dialogs should float over a greyed/faded transcript instead of the transcript staying fully bright.
+  3. ~~**All modals/pickers dim the background**~~ — **done (ADR-017)**: `/models` and `/settings` (and the permission modal) now float as a card *over* the conversation, which stays on screen but faded; the card sits at the foot of the page, just above the input area, and it owns the clicks while it is up. The question panel (`ask`) still replaces the page by design.
   4. **Sessions grouped by date** — `/sessions` should group rows under `Today`, `29-09-2026`, … instead of one flat list.
   5. **Text wrapping everywhere** — long lines must wrap in the transcript, chat area, modals and small terminals rather than being clipped or hidden.
   6. **Compact to 30–50% while keeping task context** — compaction currently cuts too little/too much; target 30–50% of the window with all task-relevant context preserved.
