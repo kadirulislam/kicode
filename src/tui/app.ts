@@ -310,6 +310,13 @@ export type TuiOptions = {
    */
   readClipboard?: () => Promise<ClipboardRead>;
   /**
+   * Opens the platform's file-selection window for the attach button and
+   * resolves the chosen path — or null for a cancelled dialog. Injected for
+   * the same reason `readClipboard` is: a test has no dialog to open, and
+   * absent means the click falls back to typing a path into the prompt.
+   */
+  pickFile?: () => Promise<{ path: string } | null>;
+  /**
    * Models kept to hand, offered as their own group at the top of the model
    * list. Absent means favourites are not offered at all.
    */
@@ -1677,7 +1684,44 @@ class TuiApp {
   }
 
   /**
-   * `/attach <path>` — a file that rides the next message.
+   * Attaching a file from the attach button — the click-driven replacement
+   * for the old `/attach` command.
+   *
+   * The platform's file-selection window is opened by the injected `pickFile`
+   * option; when it is not available the user is asked to type or paste a
+   * path into the prompt instead. Either way the chosen file lands in the
+   * same machinery `/attach` fed: an image joins `attached` (the paste path),
+   * everything else is read now and held as a document. Reading at attach
+   * time rather than send time is the point: a bad path is a message on
+   * screen while the user can still pick again, not an error buried in the
+   * middle of a running turn.
+   */
+  private async attachFromPicker(): Promise<void> {
+    if (this.options.pickFile) {
+      const picked = await this.options.pickFile().catch(() => null);
+      if (!picked) {
+        // A closed dialog means "never mind" — not an error to announce.
+        this.draw();
+        return;
+      }
+      await this.attachFile(picked.path);
+      return;
+    }
+    // No file-picker on this platform: ask for a path in the terminal, the
+    // same way an API key is asked for.
+    this.promptInput("Attach a file", "/path/to/file — or paste one", async (value) => {
+      const filePath = value.trim();
+      if (!filePath) {
+        this.note("no file given");
+        this.draw();
+        return;
+      }
+      await this.attachFile(filePath);
+    });
+  }
+
+  /**
+   * Attaches one file by path — the attach button's landing place.
    *
    * An image joins `attached` (the paste path), everything else is read now and
    * held as a document. Reading at attach time rather than send time is the
@@ -1687,7 +1731,7 @@ class TuiApp {
   private async attachFile(argument: string): Promise<void> {
     const filePath = argument.trim().replace(/^["']|["']$/g, "");
     if (!filePath) {
-      this.note("usage: /attach <file path> — images ride the message; documents become its context");
+      this.note("no file given — use the [+] button beside the prompt");
       this.draw();
       return;
     }
@@ -2080,9 +2124,6 @@ class TuiApp {
         break;
       case "paste":
         await this.pasteFromClipboard();
-        break;
-      case "attach":
-        await this.attachFile(argument);
         break;
       case "themes":
         await this.chooseTheme(argument);
@@ -4090,14 +4131,24 @@ class TuiApp {
       }
 
       // 4. Check [Think] button click
-      const showThink = usable - margin - 2 >= 45;
+      const showThink = usable - margin - 2 >= 50;
+      const thinkLen = 7;
       if (showThink) {
-        const thinkLen = 7;
         const thinkStart = sendStart - thinkLen - 1;
         if (event.x >= thinkStart && event.x < sendStart) {
           this.chooseVariant("");
           return true;
         }
+      }
+
+      // 5. Check [+] attach button click — opens the platform's file-picker
+      // window and attaches whatever is chosen, the click-driven replacement
+      // for the old /attach command.
+      const attachLen = 3;
+      const attachStart = sendStart - (showThink ? thinkLen + 1 : 0) - attachLen - 1;
+      if (event.x >= attachStart && event.x < attachStart + attachLen) {
+        void this.attachFromPicker();
+        return true;
       }
     }
 
@@ -4136,9 +4187,12 @@ class TuiApp {
       return true;
     }
 
-    // If not clicking an interactive control, begin text selection anywhere on screen
+    // If not clicking an interactive control, begin text selection anywhere on
+    // screen — except the chrome under the rule: the prompt box, the state row
+    // and the footer are not text anyone would paste as the conversation.
     const maxRow = this.frameText.length || (this.selectable ? this.selectable.bottom : 50);
-    if (event.y >= 1 && event.y <= maxRow) {
+    const chromeTop = this.promptRow !== null ? this.promptRow - 2 : Number.POSITIVE_INFINITY;
+    if (event.y >= 1 && event.y <= maxRow && event.y < chromeTop) {
       this.selection = { from: { row: event.y, col: event.x }, to: { row: event.y, col: event.x } };
       this.editor.clearSelection();
       this.dragging = true;

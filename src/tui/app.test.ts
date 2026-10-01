@@ -614,9 +614,8 @@ describe("runTui", () => {
 
     app.input.write("/");
     await tick(20);
-    // The list opens on /attach, so two steps down land on /budget.
-    app.input.write("\u001b[B");
-    await tick(20);
+    // /agents cannot run, so the list opens on /btw — one step down lands on
+    // /budget, the command this test runs.
     app.input.write("\u001b[B");
     await tick(20);
 
@@ -1582,14 +1581,29 @@ describe("the slash commands", () => {
     }
   });
 
-  it("attaches a document with /attach and sends it as context", async () => {
+  it("attaches a document through the [+] button's file picker and sends it as context", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "kicode-attach-"));
-    await writeFile(path.join(dir, "notes.md"), "# Notes\nthe fixture body\n");
+    const notes = path.join(dir, "notes.md");
+    await writeFile(notes, "# Notes\nthe fixture body\n");
     try {
-      const { app, done } = await drive([], { cwd: dir });
+      const { app, done } = await drive([], {
+        cwd: dir,
+        // The platform's file-selection window, faked: the click on [+] opens
+        // it, and "choosing" notes.md is what this test's dialog returns.
+        pickFile: async () => { return { path: notes }; },
+      });
 
-      app.input.write("/attach notes.md\r");
       await tick(60);
+      const frame = app.lastFrame();
+      const promptRow = frame.split(/\r?\n/).findIndex((line) => line.includes("[+]")) + 1;
+      const plusCol = (frame.split(/\r?\n/)[promptRow - 1] ?? "").indexOf("[+]") + 2;
+      app.input.write(clickAt(promptRow, plusCol));
+      // Poll rather than a fixed sleep: suite load stalls a single tick.
+      let attached = false;
+      for (let i = 0; i < 30 && !attached; i++) {
+        await tick(40);
+        attached = app.lastFrame().includes("[notes.md]");
+      }
       // The badge says what is waiting to be sent.
       expect(app.lastFrame()).toContain("[notes.md]");
 
@@ -1609,13 +1623,83 @@ describe("the slash commands", () => {
     }
   });
 
-  it("reports a bad attach path instead of swallowing it", async () => {
+  it("leaves the prompt untouched when the file picker is cancelled", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "kicode-attach-"));
+    try {
+      const { app, done } = await drive([], { cwd: dir, pickFile: async () => null });
+
+      await tick(60);
+      const frame = app.lastFrame();
+      const promptRow = frame.split(/\r?\n/).findIndex((line) => line.includes("[+]")) + 1;
+      const plusCol = (frame.split(/\r?\n/)[promptRow - 1] ?? "").indexOf("[+]") + 2;
+      app.input.write(clickAt(promptRow, plusCol));
+      await tick(60);
+      // A closed dialog is not an error: nothing attached, nothing announced.
+      expect(app.lastFrame()).not.toContain("[notes.md]");
+      expect(app.lastFrame()).not.toContain("could not attach");
+
+      app.input.write("\u0015/exit\r");
+      await done;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("asks for a path in the prompt when no file picker is available", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "kicode-attach-"));
+    await writeFile(path.join(dir, "notes.md"), "# Notes\nthe fixture body\n");
     try {
       const { app, done } = await drive([], { cwd: dir });
 
-      app.input.write("/attach nope.txt\r");
       await tick(60);
+      const frame = app.lastFrame();
+      const promptRow = frame.split(/\r?\n/).findIndex((line) => line.includes("[+]")) + 1;
+      const plusCol = (frame.split(/\r?\n/)[promptRow - 1] ?? "").indexOf("[+]") + 2;
+      app.input.write(clickAt(promptRow, plusCol));
+      // Poll rather than a fixed sleep: suite load stalls a single tick.
+      let opened = false;
+      for (let i = 0; i < 30 && !opened; i++) {
+        await tick(40);
+        opened = app.lastFrame().includes("Attach a file");
+      }
+      // The fallback is the prompt-input box, not a dead click.
+      expect(app.lastFrame()).toContain("Attach a file");
+
+      app.input.write(`notes.md\r`);
+      // Poll rather than a fixed sleep: suite load stalls a single tick.
+      let attached2 = false;
+      for (let i = 0; i < 30 && !attached2; i++) {
+        await tick(40);
+        attached2 = app.lastFrame().includes("[notes.md]");
+      }
+      expect(app.lastFrame()).toContain("[notes.md]");
+
+      app.input.write("\u0015\u0015/exit\r");
+      await done;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a bad attach path instead of swallowing it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "kicode-attach-"));
+    try {
+      const { app, done } = await drive([], {
+        cwd: dir,
+        pickFile: async () => ({ path: path.join(dir, "nope.txt") }),
+      });
+
+      await tick(60);
+      const frame = app.lastFrame();
+      const promptRow = frame.split(/\r?\n/).findIndex((line) => line.includes("[+]")) + 1;
+      const plusCol = (frame.split(/\r?\n/)[promptRow - 1] ?? "").indexOf("[+]") + 2;
+      app.input.write(clickAt(promptRow, plusCol));
+      // Poll rather than a fixed sleep: suite load stalls a single tick.
+      let reported = false;
+      for (let i = 0; i < 30 && !reported; i++) {
+        await tick(40);
+        reported = app.screen().includes("could not attach");
+      }
       expect(app.screen()).toContain("could not attach");
       expect(app.screen()).toContain("no file at");
 
@@ -2580,10 +2664,10 @@ describe("/connect", () => {
   });
 });
 
-describe("clicking a row", () => {
-  /** A left click, in SGR encoding, at a 1-based column and a 1-based row. */
-  const clickAt = (row: number, column = 6): string => `\u001b[<0;${column};${row}M`;
+/** A left click, in SGR encoding, at a 1-based column and a 1-based row. */
+const clickAt = (row: number, column = 6): string => `\u001b[<0;${column};${row}M`;
 
+describe("clicking a row", () => {
   /**
    * The screen row a piece of text was drawn on, read back off the frame.
    *

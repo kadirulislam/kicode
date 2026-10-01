@@ -1,18 +1,19 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 940 Tests Passing (48 test suites, two consecutive green runs)  
+**Build Status:** Stable, All 948 Tests Passing (49 test suites, two consecutive green runs)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~449 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~456 KB) via `npm run build`
 
 ---
 
 ## 🚀 Key Features Implemented
 
-### 0a. Rate-Limit Recovery & Attachments (ADR-013/014)
+### 0a. Rate-Limit Recovery, Attachments & File Upload (ADR-013/014/015/016)
 - **429 handling in three layers** (ADR-013): a rate limit pauses before the next route (gateway `Retry-After` honoured to a 60s ceiling, else 1.5s growing per hop) with a live busy-row countdown; an active `:free` model can implicitly fall back to the endpoint's other free models discovered from its own `/models` list the first time the chain runs dry (capped at 4 hops, never a paid model, **opt-in** via `"fallbackAuto": true` / `KICODE_FALLBACK_AUTO=on`); and an all-routes-capped turn ends with advice ("wait a bit, or /models") instead of a bare HTTP code.
 - **Recovery modal on a failed turn** (ADR-015): a centered card carries the gateway's message with `r retry · m choose model · esc dismiss` — `r` re-runs the exact request (words, attachments, model), `m` opens the model picker and retries on whatever lands, Esc keeps the error in the transcript. Goal runs stay autonomous; the queue holds behind the modal. Auto-switching is opt-in, not default.
-- **`/attach <path>` in the prompt** (ADR-014): images ride the existing base64 path (`[Image n]` badges); documents are read at attach time and appended to the next turn as a `Context from attached file "…"` block that works on every model. Badges in the typing area, backspace detaches, right-click menu clears either kind.
+- **File upload by click** (ADR-016): a `[+]` button on the right of the input bar opens the platform's own file-selection window — PowerShell's `OpenFileDialog` on Windows, `zenity`/`kdialog` on Linux, `osascript` on macOS — and the chosen file attaches automatically. Images ride the existing base64 path (`[Image n]` badges); documents are read at attach time and appended to the next turn as a `Context from attached file "…"` block that works on every model. Cancelling is silent, a platform with no picker falls back to typing a path in the prompt, and the old `/attach` command is gone; badges, backspace-detach and the right-click clear items carry over from ADR-014.
+- **Caret row off-by-one fixed** (found by the attach-button tests, ADR-016): the caret row omitted the tab bar's row, so with the sidebar visible the terminal caret and every prompt-row click sat one row too high; the selection-start guard also now refuses the chrome under the rule, so a drag there cannot copy `Ask anything...` as conversation text.
 - **Plan-mode false refusals fixed**: the read-only classifier now permits `2>/dev/null`, `2>&1` and `1>/dev/null` — the stderr-quieting idioms models reach for constantly while exploring — while any redirect to a real path stays refused.
 - **Request block chips**: the user message's fill hugs its text (widest row + 2 cells) rather than stretching to the column, so short messages no longer read as a background cut off mid-row.
 

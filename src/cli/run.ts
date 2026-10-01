@@ -25,6 +25,7 @@ import { RouteHealth } from "../routes/health";
 import { DEFAULT_THEME, canonicalThemeName, isThemeName } from "../tui/theme";
 import { FallbackProvider } from "../providers/fallback";
 import { readClipboard } from "../clipboard";
+import { pickFile } from "../pickFile";
 import {
   deleteSession,
   latestSessionFor,
@@ -708,6 +709,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
           }));
         },
         readClipboard,
+        pickFile: () => pickFile(),
         favorites: {
           list: () => loadFavorites(),
           save: (favorites) => saveFavorites(favorites),

@@ -128,9 +128,11 @@ describe("frame geometry", () => {
     const { frame } = draw({ editor });
 
     expect(frame.caret).not.toBeNull();
-    // Rows: separator, the box's top padding, the input, the status row, the
-    // box's bottom padding, the footer — so the input is fourth from the end.
-    expect(frame.caret?.row).toBe(24 - 4);
+    // Rows from the bottom: footer, the box's bottom padding, the status row,
+    // the input — so the input is third from the end. The tab bar above the
+    // transcript pushes everything down one row, and the caret has to move
+    // with it or the cursor lands on the state row instead of the input.
+    expect(frame.caret?.row).toBe(24 - 3);
     expect(frame.caret?.col).toBeLessThan(80);
   });
 
@@ -396,8 +398,9 @@ describe("the command palette", () => {
   });
 
   it("dims the names that cannot run here", () => {
-    // The cursor is parked on /cd, so the earlier rows are unselected.
-    const { frame, plain } = draw({ palette: { items: COMMANDS, selected: 3 } }, { cols: 80, rows: 30 });
+    // The cursor is parked on /cd — /agents and /btw come before it now that
+    // /attach has moved to the prompt's [+] button.
+    const { frame, plain } = draw({ palette: { items: COMMANDS, selected: 2 } }, { cols: 80, rows: 30 });
     const agents = plain.findIndex((line) => line.includes("/agents"));
     const btw = plain.findIndex((line) => line.includes("/btw"));
 

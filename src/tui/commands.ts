@@ -30,11 +30,6 @@ export const COMMANDS: readonly Command[] = [
     description: "Switch agent",
     unavailable: "KiCode runs one agent; sub-agents are not built yet.",
   },
-  {
-    name: "attach",
-    description: "Attach an image or document to the next message",
-    usage: "<file path>",
-  },
   { name: "btw", description: "One-shot answer from the session's context, not added to it", usage: "<question>" },
   { name: "budget", description: "Show or set the session token budget", usage: "[tokens]" },
   { name: "cd", description: "Change working directory", usage: "<directory>" },
