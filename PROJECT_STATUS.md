@@ -28,6 +28,11 @@
 - **`esc` is drawn as a clickable `[×]` everywhere it is offered**: the session footer's hints, a picker's title row, a menu's title and footer, the clipboard menu, and a card's own decision row. Each target is found by walking the row the chip was drawn in, so it cannot drift from the glyph.
 - **While a card is up it is the only thing clickable** (plus the footer, whose `[×]` is the permission card's way out) — and two bugs were fixed on the way: a multi-line gateway message printed as one run-on row on the recovery card, and the `[+]` attach hit box sat one column left of its glyph.
 
+### 0f. The Input Box Is Fill Only, on a Lighter Surface (ADR-021)
+- **The box and its state row wear a new theme slot, `input`**, a step off the user-turn fill — lighter on every dark theme (kicode `#1d1e2e` → `#2b2f47`), darker on the light ones — so the typing area reads as the surface in front instead of a shade off the transcript, and it follows whichever theme is in use.
+- **No bar down the box's left edge**: the box is fill and its own air, and the state row lost its bar too (the mode word keeps its colour, which is where build/plan is read from). The text still starts in the same column, so the caret, badges and every click that places the caret are unchanged.
+- **More air**: two rows of the box's fill above the text and two below, where there was one of each — the box is a row taller, the caret sits at row 20 of 24, and the transcript gives up that row.
+
 ### 0e. The Prompt Wraps, and the Box Grows With It (ADR-020)
 - **The prompt wraps instead of being cut at the edge**: a line past the terminal's width is broken at the last space that fits (mid-word when there is none), so a long path or a wall of one character is readable rather than ending in a `…` — nothing typed is off screen.
 - **The box grows with the text, up to six rows**, past which the rows follow the caret — what is being typed stays visible without the box eating the transcript it stands on. The rows under the first keep the first row's text column, and the `[+]` control rides only the row being typed on.
@@ -36,8 +41,8 @@
 
 ### 0c. The Input Box Reads as a Typing Area, and the Todo List Goes Live (ADR-018)
 - **The send arrow is gone**: the blue `↑` button was the loudest thing on a quiet row for the one action the keyboard already has (enter). The `[+]` attach button stays, anchored to the right edge; its click hit box was re-derived to match, since the drawn glyph and the hit box are computed from the same arithmetic in two files.
-- **The box wears the surface a user turn wears** (`theme.block`, not `theme.panel`), so the place being typed into is visibly the same material as the words it becomes, and the page behind it got deeper (`kicode` background `#0c0d14` → `#08090f`). The permission card keeps `panel`, and the state row takes whatever fill is over it.
-- **A blank row of the box's own fill sits between the editor and the state row**, in place of the padding row that used to trail under the status line — the same height, so the transcript does not lose a row.
+- **The box wears a filled surface of its own** (`theme.block` at the time, `theme.input` since ADR-021), not the `theme.panel` it shared with the tab bar, so the place being typed into is visibly a surface rather than one more line of transcript — and the page behind it got deeper (`kicode` background `#0c0d14` → `#08090f`). The permission card keeps `panel`, and the state row takes whatever fill is over it.
+- **A blank row of the box's own fill sits between the editor and the state row**, in place of the padding row that used to trail under the status line — the same height, so the transcript does not lose a row. *(Since ADR-021 that gap is two rows and the box carries its own air above the text as well; it is one row taller in total.)*
 - **Live todo card**: the `todo` tool's output is no longer appended per call — the previous card is lifted out and the newest state put at the end of the transcript, so there is exactly one checklist and it ticks over where the work is. The system prompt now asks the model to keep such a list for multi-step work.
 
 ### 0b. Reading-Level Transcript Discipline (ADR-012)
@@ -57,7 +62,7 @@
   - Interactive `+` button to open the Clipboard & Attachment Options menu.
   - Attached image chips `[Image i]` with click-to-remove.
   - `[+]` attach button at the right edge of the prompt row — the only control pressed while typing; the variant is changed with `/effort` and send is enter (the `[Think]` pill and the `↑` button were both removed at the owner's request).
-  - The box is filled with the user-turn surface and keeps a blank row between the editor and the state row, so it reads as the typing area (ADR-018).
+  - The box is a fill-only surface (no left bar) on the theme's own `input` slot, with two rows of its own fill above the text and two below, so it reads as the typing area (ADR-018, ADR-021).
   - Long prompts wrap inside the box and the box grows with them (up to six rows, then it follows the caret) instead of being clipped at the right edge (ADR-020).
 - **Interactive Mouse Controls & Scrollbar**:
   - Drag-to-select text in the transcript without auto-copying or auto-pasting.

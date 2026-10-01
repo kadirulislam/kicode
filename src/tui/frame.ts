@@ -1882,7 +1882,7 @@ function renderBottom(
   // on, so the place being typed into is visibly the same material as the
   // words it will become. `panel` (the tab bar, a card) sat one step off the
   // page and read as one more line of transcript.
-  const boxBg = theme.block;
+  const boxBg = theme.input;
   if (state.modal || state.picker || state.menu || (state.ask && !state.askTyping)) {
     // A list or a panel is on screen and the keys belong to it. An input line
     // that cannot be typed into would only invite typing that goes nowhere —
@@ -1925,14 +1925,20 @@ function renderBottom(
     const rightControls: Span[] = [];
     rightControls.push(span(attachText, styles.thinkBadge), span(" "));
 
-    // The box is a bar, not a frame: one accent edge down the left, padding
-    // rows that carry nothing else, and no border competing with the
-    // transcript's own rules — but it is filled, so it reads as the place
-    // being typed into rather than another line of the transcript.
-    push([span(`${indent}▌`, styles.accent)], boxBg);
+    // The box is fill and nothing else: no bar down its left edge, no border,
+    // and two rows of its own fill above the text and two below. The fill is
+    // what says "this is the typing area" — the bar was doing that job and
+    // talking over the surface it was marking out.
+    //
+    // `gutter` is the text column: the same two-cell inset a request block's
+    // text has, so what is typed and what was typed line up.
+    const gutter = span(`${indent}  `);
+    push([span(indent)], boxBg);
+    const boxTop = rows.length - 1;
+    push([span(indent)], boxBg);
     const firstTextRow = rows.length;
     // The rows under the first keep the same text column, so a wrapped prompt
-    // stays one block of text rather than starting over at the bar.
+    // stays one block of text rather than starting over at the gutter.
     const badgePad: Span[] = badgeWidth > 0 ? [span(" ".repeat(badgeWidth))] : [];
     view.rows.forEach((row, index) => {
       // The controls ride the row being typed on. A `[+]` beside every wrapped
@@ -1941,7 +1947,7 @@ function renderBottom(
       const gap = Math.max(width - badgeWidth - spansWidth(row.spans) - trailing, 0);
       push(
         [
-          span(`${indent}▌ `, styles.accent),
+          gutter,
           ...(index === 0 ? badges : badgePad),
           ...row.spans,
           span(" ".repeat(gap)),
@@ -1952,34 +1958,34 @@ function renderBottom(
     });
     caretRow = firstTextRow + view.caretRow;
     caretCol = badgeWidth + view.caretCol;
-    // A row of air between the editor and the state row below it: what is
-    // being typed and where it will go are two different answers, and stacked
-    // flush they read as one run of text.
-    push([span(`${indent}▌`, styles.accent)], boxBg);
+    // Two rows of air under the text: what is being typed and where it will go
+    // are two different answers, and stacked flush they read as one run of
+    // text. The box carries its mass below the text so the words are not pinned
+    // to the fill's top edge.
+    push([span(indent)], boxBg);
+    push([span(indent)], boxBg);
     prompt = {
-      top: firstTextRow - 1,
-      bottom: firstTextRow + view.rows.length,
-      // One-based, which is what a mouse reports: the gutter, the bar and its
-      // space, then whatever the badges take.
+      top: boxTop,
+      bottom: rows.length - 1,
+      // One-based, which is what a mouse reports: the gutter and its two cells,
+      // then whatever the badges take.
       textLeft: margin + 3 + badgeWidth,
       rows: view.rows.map((row, index) => ({ row: firstTextRow + index, start: row.start, end: row.end })),
     };
   }
 
   // The state row shares the box the prompt (or the ask) is in, and stands
-  // alone on the background only when there is no box under it at all. While an
-  // ask is up the whole box is edged in the ask's colour — the mode word keeps
-  // its own, so build/plan is still readable — because one box with one edge
-  // does not make the state row look like a fourth line of the question. It is
+  // alone on the background only when there is no box under it at all. It is
   // filled with whatever is over it: the permission card's own panel while a
   // decision is up, the box when there is one to type into, and the page
-  // otherwise.
+  // otherwise — and it carries no bar of its own, because the fill under it
+  // already says which box it belongs to.
   const stateRowBg = state.modal
     ? theme.panel
     : !state.picker && !state.ask && !state.menu
       ? boxBg
       : theme.bg;
-  push(modeSpans(state, styles, width, indent, state.modal ? styles.warn : undefined), stateRowBg);
+  push(modeSpans(state, styles, width, indent), stateRowBg);
   // The footer's own chips close whatever is open, so escape is a mouse action
   // here too. Its columns are read off the packed row, which is the only place
   // that knows where they landed.
@@ -1999,7 +2005,7 @@ function renderBottom(
  * is warn-coloured too, for the same reason: an unusual setting should catch
  * the eye.
  */
-function modeSpans(state: TuiState, styles: Styles, width: number, indent: string, barStyle?: string): Span[] {
+function modeSpans(state: TuiState, styles: Styles, width: number, indent: string): Span[] {
   const isPaused = Boolean(state.isPaused);
   // A goal run leads the row while it lasts: it is the same "what is this
   // session doing right now" question the mode word answers, and it is more
@@ -2008,7 +2014,7 @@ function modeSpans(state: TuiState, styles: Styles, width: number, indent: strin
   const goalActive = Boolean(state.goalActive) && !isPaused;
   const headStyle = isPaused ? styles.warn : state.mode === "plan" ? styles.warn : styles.mode;
   const head = [
-    span(`${indent}▌ `, barStyle ?? (isPaused ? styles.warn : goalActive ? styles.warn : styles.accent)),
+    span(`${indent}  `),
     span(isPaused ? "paused" : goalActive ? "Goal" : MODE_LABELS[state.mode], headStyle),
     span(" · ", styles.faint),
   ];
@@ -2021,7 +2027,7 @@ function modeSpans(state: TuiState, styles: Styles, width: number, indent: strin
 
   if (state.copiedNotice) {
     return [
-      span(`${indent}▌ `, barStyle ?? styles.ok),
+      span(`${indent}  `),
       span("✓ copied", styles.ok),
       span(" · ", styles.faint),
       span(state.copiedNotice, styles.bold),

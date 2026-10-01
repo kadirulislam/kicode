@@ -373,11 +373,13 @@ describe("runTui", () => {
 
     app.input.write("/goal ship it\r");
     await tick(60);
-    expect(app.screen()).toContain("▌ Goal ·");
+    expect(app.screen()).toContain("Goal ·");
 
     // Transient: the run is over, so the head is the session's own mode again.
     await tick(400);
-    expect(app.lastFrame()).not.toContain("▌ Goal");
+    // The state row is the one above the footer; the goal card may still be in
+    // the transcript, but the row that reports the session's mode is not.
+    expect(app.lastFrame().split(/\r?\n/).at(-2) ?? "").not.toContain("Goal");
 
     app.input.write("\u0003");
     expect(await done).toBe(0);
@@ -2898,7 +2900,7 @@ describe("clicking a wrapped prompt", () => {
     frame
       .split(/\r?\n/)
       .map((line, index) => ({ line, index }))
-      .filter(({ line }) => /^\s*▌ f/.test(line));
+      .filter(({ line }) => /^\s*f/.test(line));
 
   it("puts the caret on the row that was clicked, not at the start of the prompt", async () => {
     const { app, done } = await drive([]);
@@ -2919,7 +2921,7 @@ describe("clicking a wrapped prompt", () => {
     // The character landed on the row the pointer was over. Reading the offset
     // wrong would put it at the start of the prompt, on the first row.
     const after = app.lastFrame().split(/\r?\n/);
-    expect((after[second.index] ?? "").replace(/^\s*▌\s*/, "").startsWith("Z")).toBe(true);
+    expect((after[second.index] ?? "").trimStart().startsWith("Z")).toBe(true);
 
     // The line is 150 characters and the caret is in the middle of it, where
     // `finish`'s ctrl+u would only clear back to the caret: select all first,

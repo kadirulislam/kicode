@@ -149,23 +149,22 @@ describe("frame geometry", () => {
     const { frame } = draw({ editor });
 
     expect(frame.caret).not.toBeNull();
-    // Rows from the bottom: footer, the state row, the row of air, then the
-    // input — so the input is still third from the end; the box's blank row took
-    // the place of the padding row it used to carry underneath. The tab bar
+    // Rows from the bottom: footer, the state row, two rows of the box's own
+    // fill, then the input — the box carries its air below the text. The tab bar
     // above the transcript pushes everything down one row, and the caret has to
     // move with it or the cursor lands on the state row instead of the input.
-    expect(frame.caret?.row).toBe(24 - 3);
+    expect(frame.caret?.row).toBe(24 - 4);
     expect(frame.caret?.col).toBeLessThan(80);
   });
 
   it("paints a mouse drag with the accent selection fill, not inverse video", () => {
     // Inverse video is invisible on some terminals; the palette's accent fill
     // is not, and it is the same language the UI already uses for "picked out".
-    // The prompt input sits on screen row 21 of a 24-row frame; the drag spans
+    // The prompt input sits on screen row 20 of a 24-row frame; the drag spans
     // "hello" (cols 8-13), which the highlight splits into its own styled run.
     const editor = new LineEditor();
     editor.insert("hello world");
-    const { frame, plain } = draw({ editor, selection: { from: { row: 21, col: 8 }, to: { row: 21, col: 13 } } });
+    const { frame, plain } = draw({ editor, selection: { from: { row: 20, col: 8 }, to: { row: 20, col: 13 } } });
     // The highlight splits "hello" mid-word into styled runs, so the styled
     // line itself does not contain the whole word — locate the row by its
     // ANSI-stripped text instead.
@@ -273,13 +272,17 @@ describe("the transcript", () => {
   });
 
   it("sits above the prompt box, with the box's own rows below it", () => {
-    const { plain } = draw({ entries: conversation });
+    const { frame, plain } = draw({ entries: conversation });
 
-    // Rows: 0 the tabs, then the body, then the separator, the box's padding,
-    // the input, the status row, the box's padding and the footer.
-    expect(plain[24 - 7]).toContain("missing a default");
-    expect(plain[24 - 6]).toContain("─");
-    expect((plain[24 - 5] ?? "").trim()).toBe("▌");
+    // Under the rule: two rows of the box's fill, the text, then two more. The
+    // fill is the whole of what says where the box starts — there is no bar in
+    // it to draw the edge.
+    const rule = plain.findIndex((line) => line.includes("─"));
+    expect(plain[rule - 1]).toContain("missing a default");
+    expect(plain[rule + 1]?.trim()).toBe("");
+    expect(plain[rule + 2]?.trim()).toBe("");
+    expect(plain[rule + 3]).toContain(PLACEHOLDER);
+    for (const row of [1, 2, 3, 4, 5]) expect(frame.lines[rule + row]).toContain(bg(theme.input));
   });
 
   it("pins the newest line to the bottom when the history is longer than the screen", () => {
@@ -333,7 +336,9 @@ describe("the bottom bar", () => {
     const lines = draw({ model: "gpt-5.6-luna", variant: "high" }).plain;
     const row = lines.findIndex((line) => line.includes("Build"));
 
-    expect(lines[row]?.trimStart()).toBe("▌ Build · gpt-5.6-luna · high");
+    // No bar in front of it: the row is inside the input box, and the box's own
+    // fill is what marks it out.
+    expect(lines[row]?.trimStart()).toBe("Build · gpt-5.6-luna · high");
   });
 
   it("shows a spinner while a turn is in flight", () => {
@@ -900,7 +905,7 @@ describe("the question panel", () => {
     const { frame, plain } = panel({ askTyping: true, editor });
     const typing = plain.join("\n");
 
-    expect(typing).toContain("▌ Inter");
+    expect(typing).toContain("Inter");
     expect(typing).toContain("[×] cancel");
     // Leaving the caret in the input row is what makes it typeable.
     expect(frame.caret).not.toBeNull();
@@ -1081,6 +1086,8 @@ describe("the approval modal", () => {
 describe("the blocks", () => {
   const block = bg(theme.block);
   const panel = bg(theme.panel);
+  /** The input box's own fill, a step off `block`. */
+  const fill = bg(theme.input);
 
   /**
    * The transcript's own rows: everything above the rule that closes it.
@@ -1190,19 +1197,23 @@ describe("the blocks", () => {
 
     const prompt = frame.lines.find((line) => strip(line).includes(PLACEHOLDER));
     const mode = frame.lines.find((line) => strip(line).includes("Build"));
-    // The box wears the surface a user's own turn wears, so it reads as the
-    // place being typed into rather than one more line of transcript. The
-    // panel is the tab bar and a card's own fill, not this.
-    expect(prompt).toContain(block);
-    expect(mode).toContain(block);
+    // The box and the state row wear the theme's own input surface — a step off
+    // the fill a user's turn wears, so the place being typed into reads as the
+    // surface in front rather than one more line of transcript. The panel is
+    // the tab bar and a card's own fill, not this.
+    expect(prompt).toContain(fill);
+    expect(mode).toContain(fill);
     expect(prompt).not.toContain(panel);
-    // Every row of the box carries the fill — the padding rows included — so
-    // it is one block, not a stripe of page between two bars.
-    const bars = frame.lines.filter((line) => line.includes(block) && strip(line).trimStart().startsWith("▌"));
-    expect(bars.length).toBeGreaterThanOrEqual(4);
+    expect(prompt).not.toContain(block);
+    // Every row of the box carries the fill — the rows of air included — so it
+    // is one surface, not a stripe of page between two bars. And no row of it
+    // starts with a bar: the fill is what marks the box out.
+    const rows = frame.lines.filter((line) => line.includes(fill));
+    expect(rows.length).toBeGreaterThanOrEqual(5);
+    for (const row of rows) expect(strip(row).trimStart().startsWith("▌")).toBe(false);
     // The footer goes back to the background: the box is the box.
     const footer = frame.lines.find((line) => strip(line).includes("ctrl+p commands"));
-    expect(footer).not.toContain(block);
+    expect(footer).not.toContain(fill);
   });
 
   it("leaves a row of air between the editor and the state row", () => {
@@ -1211,21 +1222,27 @@ describe("the blocks", () => {
     const editor = lines.findIndex((line) => line.includes(PLACEHOLDER));
     const mode = lines.findIndex((line) => line.includes("Build"));
 
-    // Enter puts a blank row between what is being typed and where it will go:
-    // stacked flush, the two answers read as one run of text.
-    expect(mode - editor).toBe(2);
-    expect(lines[editor + 1]?.trim()).toBe("▌");
+    // Enter puts two rows of the box's own fill between what is being typed and
+    // where it will go: stacked flush, the two answers read as one run of text.
+    expect(mode - editor).toBe(3);
+    expect(lines[editor + 1]?.trim()).toBe("");
+    expect(lines[editor + 2]?.trim()).toBe("");
   });
 
   it("leaves a blank row between entries, and one more around a request", () => {
-    const { plain } = draw({
-      entries: [
-        { kind: "user", text: "hi" },
-        { kind: "assistant", text: "Hello." },
-        { kind: "note", text: "Switched model", tone: "dim" },
-        { kind: "user", text: "again" },
-      ],
-    });
+    // A 30-row screen, so the four short entries fit and no scrollbar takes the
+    // last column of the blank rows being counted.
+    const { plain } = draw(
+      {
+        entries: [
+          { kind: "user", text: "hi" },
+          { kind: "assistant", text: "Hello." },
+          { kind: "note", text: "Switched model", tone: "dim" },
+          { kind: "user", text: "again" },
+        ],
+      },
+      { cols: 80, rows: 30 },
+    );
 
     const last = (text: string): number => plain.findLastIndex((line) => line.includes(text));
     const blanks = (from: number, to: number): number =>
@@ -1244,12 +1261,16 @@ describe("the blocks", () => {
 
     // The tab bar is on the same surface, so the box is what comes after it.
     const box = frame.lines.slice(1).filter((line) => line.includes(panel));
-    // The title, the body, the options, and the state row under them.
+    // The card's own title, body and options, then the state row under them.
     expect(box.length).toBeGreaterThanOrEqual(4);
-    for (const line of box) {
+    // The card's rows carry its warn bar; the state row under it does not — the
+    // fill is what ties it to the box, and a bar there would read as a fifth
+    // line of the card.
+    for (const line of box.slice(0, -1)) {
       expect(line).toContain(styles.warn);
       expect(line).toContain("▌");
     }
+    expect(box.at(-1)).not.toContain("▌");
     // One box, whose last row is still the state row — and still says which
     // mode the session is in, in the mode's own colour.
     expect(strip(box.at(-1) ?? "")).toContain("Build");
@@ -1303,9 +1324,11 @@ describe("the prompt that wraps", () => {
     const { frame } = typed("f".repeat(200));
     const prompt = frame.prompt!;
 
+    // The rows of air above and below the text are part of the box: one fill
+    // from its first row to its last, with no bar down the edge.
     for (const line of frame.lines.slice(prompt.top - 1, prompt.bottom)) {
-      expect(line).toContain(block);
-      expect(strip(line).trimStart().startsWith("▌")).toBe(true);
+      expect(line).toContain(bg(theme.input));
+      expect(strip(line).trimStart().startsWith("▌")).toBe(false);
     }
   });
 
@@ -1313,9 +1336,9 @@ describe("the prompt that wraps", () => {
     const { frame, shown } = typed("f".repeat(200));
     const prompt = frame.prompt!;
 
-    // The box's own rows bracket the text: a bar, the rows, a bar.
-    expect(prompt.rows[0]?.row).toBe(prompt.top + 1);
-    expect(prompt.rows.at(-1)?.row).toBe(prompt.bottom - 1);
+    // The box's own rows bracket the text: two rows of air, the text, two more.
+    expect(prompt.rows[0]?.row).toBe(prompt.top + 2);
+    expect(prompt.rows.at(-1)?.row).toBe(prompt.bottom - 2);
     expect(frame.caret?.row).toBe(prompt.rows.at(-1)?.row);
     // The caret is the cell the next character goes in: just past the text on
     // the row it is on, which is a different column once the row wrapped.
@@ -1396,7 +1419,9 @@ describe("the transcript column", () => {
       // too narrow to spare it.
       const request = columnOf("hi", "▌");
       expect(columnOf("→ read", "│")).toBe(request);
-      expect(columnOf("Ask anything", "▌")).toBe(request);
+      // The box carries no bar of its own, but its text starts where the
+      // request block's text does: the bar, its space, and the words.
+      expect(columnOf("Ask anything", "A")).toBe(request + 2);
       expect(request).toBe(cols >= 50 ? 2 : 0);
     }
   });
