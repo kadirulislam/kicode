@@ -4122,20 +4122,13 @@ class TuiApp {
         return true;
       }
 
-      // 3. Check [↑] Send button click (right edge of prompt box)
-      const sendLen = 3;
-      const sendStart = usable - sendLen;
-      if (event.x >= sendStart && event.x <= usable) {
-        void this.submit();
-        return true;
-      }
-
-      // 4. Check [+] attach button click — opens the platform's file-picker
-      // window and attaches whatever is chosen, the click-driven replacement
-      // for the old /attach command. The variant has no button of its own;
-      // `/effort` changes it.
+      // 3. Check [+] attach button click. It sits at the right edge of the
+      // prompt row — the only control the row carries, now that send has no
+      // button of its own (enter sends) and the variant has none either
+      // (`/effort` changes it). The cell after `[+]` is padding, so the hit
+      // box stops one short of the rim, exactly where the glyph is drawn.
       const attachLen = 3;
-      const attachStart = sendStart - attachLen - 1;
+      const attachStart = usable - attachLen - 1;
       if (event.x >= attachStart && event.x < attachStart + attachLen) {
         void this.attachFromPicker();
         return true;

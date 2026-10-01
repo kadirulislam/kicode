@@ -128,10 +128,11 @@ describe("frame geometry", () => {
     const { frame } = draw({ editor });
 
     expect(frame.caret).not.toBeNull();
-    // Rows from the bottom: footer, the box's bottom padding, the status row,
-    // the input — so the input is third from the end. The tab bar above the
-    // transcript pushes everything down one row, and the caret has to move
-    // with it or the cursor lands on the state row instead of the input.
+    // Rows from the bottom: footer, the state row, the row of air, then the
+    // input — so the input is still third from the end; the box's blank row took
+    // the place of the padding row it used to carry underneath. The tab bar
+    // above the transcript pushes everything down one row, and the caret has to
+    // move with it or the cursor lands on the state row instead of the input.
     expect(frame.caret?.row).toBe(24 - 3);
     expect(frame.caret?.col).toBeLessThan(80);
   });
@@ -1033,10 +1034,22 @@ describe("the blocks", () => {
   const block = bg(theme.block);
   const panel = bg(theme.panel);
 
+  /**
+   * The transcript's own rows: everything above the rule that closes it.
+   *
+   * The input box under the rule is filled with the same surface a user's turn
+   * is — that is what makes it read as somewhere to type — so a test about a
+   * turn's block has to say which block it means.
+   */
+  const transcriptOf = (frame: { lines: readonly string[] }): string[] => {
+    const rule = frame.lines.findIndex((line) => strip(line).includes("─"));
+    return frame.lines.slice(0, rule < 0 ? frame.lines.length : rule);
+  };
+
   it("draws a user turn as a filled block with one straight left edge", () => {
     const { frame, plain } = draw({ entries: [{ kind: "user", text: "why is the build failing?" }] });
 
-    const filled = frame.lines.filter((line) => line.includes(block));
+    const filled = transcriptOf(frame).filter((line) => line.includes(block));
     // Padding above and below the text, all of it part of the same block.
     expect(filled.length).toBeGreaterThanOrEqual(3);
     for (const row of filled) expect(strip(row).trimStart().startsWith("▌")).toBe(true);
@@ -1047,7 +1060,7 @@ describe("the blocks", () => {
   it("gives a one-line request a five-row panel", () => {
     const { frame } = draw({ entries: [{ kind: "user", text: "hi" }] });
 
-    const filled = frame.lines.filter((line) => line.includes(block));
+    const filled = transcriptOf(frame).filter((line) => line.includes(block));
     // Two rows of padding, the text, two more: one row of padding still reads
     // as a line that happens to be tall.
     expect(filled).toHaveLength(5);
@@ -1062,7 +1075,7 @@ describe("the blocks", () => {
     // out to the text row's width — which reads as a glitched background, not
     // a panel.
     const { frame } = draw({ entries: [{ kind: "user", text: "hi" }] });
-    const filled = frame.lines.filter((line) => line.includes(block));
+    const filled = transcriptOf(frame).filter((line) => line.includes(block));
     const widths = filled.map((row) => textWidth(strip(row)));
     expect(new Set(widths).size).toBe(1);
   });
@@ -1071,7 +1084,7 @@ describe("the blocks", () => {
     // The fill is a chip around the words: bar, text, and a couple of cells of
     // block colour — not a band that stretches the width of the column.
     const { frame } = draw({ entries: [{ kind: "user", text: "hi" }] });
-    const filled = frame.lines.filter((line) => line.includes(block));
+    const filled = transcriptOf(frame).filter((line) => line.includes(block));
     for (const row of filled) {
       // Two gutter cells are page-coloured, then the block itself.
       expect(textWidth(strip(row))).toBeLessThan(20);
@@ -1085,22 +1098,23 @@ describe("the blocks", () => {
     expect(joined).toContain("[spec.txt]");
   });
 
-  it("keeps only the attach button and send on the prompt row", () => {
+  it("keeps only the attach button on the prompt row", () => {
     const { plain } = draw({});
     const prompt = plain.find((line) => line.includes("Ask anything")) ?? "";
 
-    // The row carries the two controls that are pressed while typing. The
-    // variant pill was removed at the owner's request — `/effort` changes it
-    // — and nothing on the row may stand in for it.
+    // The row carries the one control that is pressed while typing. Send has
+    // no button of its own — enter sends, and a filled arrow was the loudest
+    // thing on screen for the one key everybody already presses — and the
+    // variant pill went the same way: `/effort` changes it.
     expect(prompt).toContain("[+]");
-    expect(prompt).toContain("\u2191");
+    expect(prompt).not.toContain("\u2191");
     expect(prompt).not.toContain("[Think]");
   });
 
   it("keeps the bar and the fill together on a wrapped turn", () => {
     const { frame, plain } = draw({ entries: [{ kind: "user", text: "x".repeat(200) }] }, { cols: 40, rows: 20 });
 
-    const filled = frame.lines.filter((line) => line.includes(block));
+    const filled = transcriptOf(frame).filter((line) => line.includes(block));
     expect(filled.length).toBeGreaterThan(3);
     for (const row of filled) expect(strip(row)).toContain("▌");
     // And nothing overflows the width with a bar on every row.
@@ -1120,7 +1134,7 @@ describe("the blocks", () => {
     expect(plain.filter((line) => line.trimStart().startsWith("│")).length).toBeGreaterThanOrEqual(3);
     expect(plain.join("\n")).toContain("→ read");
     expect(plain.join("\n")).toContain("42 lines");
-    expect(frame.lines.join("\n")).not.toContain(block);
+    expect(transcriptOf(frame).join("\n")).not.toContain(block);
   });
 
   it("fills the prompt box and its mode row as one surface", () => {
@@ -1128,11 +1142,31 @@ describe("the blocks", () => {
 
     const prompt = frame.lines.find((line) => strip(line).includes(PLACEHOLDER));
     const mode = frame.lines.find((line) => strip(line).includes("Build"));
-    expect(prompt).toContain(panel);
-    expect(mode).toContain(panel);
+    // The box wears the surface a user's own turn wears, so it reads as the
+    // place being typed into rather than one more line of transcript. The
+    // panel is the tab bar and a card's own fill, not this.
+    expect(prompt).toContain(block);
+    expect(mode).toContain(block);
+    expect(prompt).not.toContain(panel);
+    // Every row of the box carries the fill — the padding rows included — so
+    // it is one block, not a stripe of page between two bars.
+    const bars = frame.lines.filter((line) => line.includes(block) && strip(line).trimStart().startsWith("▌"));
+    expect(bars.length).toBeGreaterThanOrEqual(4);
     // The footer goes back to the background: the box is the box.
     const footer = frame.lines.find((line) => strip(line).includes("ctrl+p commands"));
-    expect(footer).not.toContain(panel);
+    expect(footer).not.toContain(block);
+  });
+
+  it("leaves a row of air between the editor and the state row", () => {
+    const { plain } = draw({});
+    const lines = plain.map((line) => line.trimEnd());
+    const editor = lines.findIndex((line) => line.includes(PLACEHOLDER));
+    const mode = lines.findIndex((line) => line.includes("Build"));
+
+    // Enter puts a blank row between what is being typed and where it will go:
+    // stacked flush, the two answers read as one run of text.
+    expect(mode - editor).toBe(2);
+    expect(lines[editor + 1]?.trim()).toBe("▌");
   });
 
   it("leaves a blank row between entries, and one more around a request", () => {

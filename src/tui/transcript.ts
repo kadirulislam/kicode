@@ -228,9 +228,19 @@ export function applyEvent(
     case "tool-start":
       entries.push({ kind: "tool", name: event.name, args: event.args });
       return;
-    case "tool-result":
+    case "tool-result": {
+      // The todo list is live, not history. The agent rewrites it as it works,
+      // and a fresh copy per update would bury the conversation under
+      // near-identical checklists. The previous card is lifted out and the new
+      // state put at the end, so there is exactly one checklist and it stays
+      // where the work is.
+      if (event.name === "todo") {
+        const previous = entries.findLastIndex((entry) => entry.kind === "result" && entry.name === "todo");
+        if (previous !== -1) entries.splice(previous, 1);
+      }
       entries.push({ kind: "result", name: event.name, content: event.content, isError: event.isError });
       return;
+    }
     case "compacted":
       entries.push({
         kind: "note",

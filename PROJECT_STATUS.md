@@ -1,7 +1,7 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 952 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 955 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
 **Binary Distribution:** Built (`dist/cli.js`, ~457 KB) via `npm run build`
 
@@ -22,6 +22,12 @@
 - **The card sits at the foot of the page**, directly above the rule and the prompt — where the eye already is while typing — instead of being centred in the transcript. The permission modal gets the same fade behind it, and the mode row and footer keep their colour because they carry the keys the card is asking for.
 - **While a card is up it owns the clicks**: the faded page contributes no click targets, so an unclear row cannot be pressed by accident.
 
+### 0c. The Input Box Reads as a Typing Area, and the Todo List Goes Live (ADR-018)
+- **The send arrow is gone**: the blue `↑` button was the loudest thing on a quiet row for the one action the keyboard already has (enter). The `[+]` attach button stays, anchored to the right edge; its click hit box was re-derived to match, since the drawn glyph and the hit box are computed from the same arithmetic in two files.
+- **The box wears the surface a user turn wears** (`theme.block`, not `theme.panel`), so the place being typed into is visibly the same material as the words it becomes, and the page behind it got deeper (`kicode` background `#0c0d14` → `#08090f`). The permission card keeps `panel`, and the state row takes whatever fill is over it.
+- **A blank row of the box's own fill sits between the editor and the state row**, in place of the padding row that used to trail under the status line — the same height, so the transcript does not lose a row.
+- **Live todo card**: the `todo` tool's output is no longer appended per call — the previous card is lifted out and the newest state put at the end of the transcript, so there is exactly one checklist and it ticks over where the work is. The system prompt now asks the model to keep such a list for multi-step work.
+
 ### 0b. Reading-Level Transcript Discipline (ADR-012)
 - **Accent selection fill** instead of inverse video (`Styles.selection` + parameterized `markCells`) — visible on terminals where `ESC[7m` renders as nothing; the centered permission modal is selectable like every other row. Root-cause fix: `TuiApp.state()` now passes the live selection to the renderer (previously the tested highlight code never ran on screen); pinned by a raw-bytes mouse-drag regression test.
 - **Thinking ticker**: live reasoning renders as one line (`▌ thinking <newest sentence>`, 96-char cap) at low/medium verbosity; full stream only at high.
@@ -38,8 +44,8 @@
   - `Ask anything...` placeholder, no emoji.
   - Interactive `+` button to open the Clipboard & Attachment Options menu.
   - Attached image chips `[Image i]` with click-to-remove.
-  - `[+]` attach button and `↑` send button on the prompt row; the variant is changed with `/effort` (the `[Think]` pill was removed at the owner's request).
-  - `↑` Send button (clickable and keyboard responsive) in a blue square.
+  - `[+]` attach button at the right edge of the prompt row — the only control pressed while typing; the variant is changed with `/effort` and send is enter (the `[Think]` pill and the `↑` button were both removed at the owner's request).
+  - The box is filled with the user-turn surface and keeps a blank row between the editor and the state row, so it reads as the typing area (ADR-018).
 - **Interactive Mouse Controls & Scrollbar**:
   - Drag-to-select text in the transcript without auto-copying or auto-pasting.
   - Mouse-interactive scrollbar on the right border.

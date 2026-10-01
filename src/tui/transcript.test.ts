@@ -137,6 +137,37 @@ describe("lastThoughtFragment", () => {
   });
 });
 
+describe("the live todo card", () => {
+  const todo = (content: string): AgentEvent => ({ type: "tool-result", id: "todo", name: "todo", content, isError: false });
+
+  it("rewrites one card in place instead of logging every update", () => {
+    const entries = feed([
+      todo("● Todos (0/2)\n\n├── ◐ First\n└── ○ Second"),
+      { type: "text", delta: "working" },
+      todo("● Todos (1/2)\n\n├── ✓ First\n└── ◐ Second"),
+    ]);
+
+    const cards = entries.filter((entry) => entry.kind === "result" && entry.name === "todo");
+    expect(cards).toHaveLength(1);
+    // The one card carries the newest state, and it sits at the end — where
+    // the work is — rather than frozen where the list was first written.
+    expect(entries.at(-1)).toMatchObject({
+      kind: "result",
+      name: "todo",
+      content: expect.stringContaining("✓ First"),
+    });
+  });
+
+  it("leaves every other tool's output in the log", () => {
+    const entries = feed([
+      { type: "tool-result", id: "r1", name: "read", content: "one", isError: false },
+      { type: "tool-result", id: "r2", name: "read", content: "two", isError: false },
+    ]);
+
+    expect(entries.filter((entry) => entry.kind === "result")).toHaveLength(2);
+  });
+});
+
 describe("result lines", () => {
   const result = (content: string): Entry => ({ kind: "result", name: "read", content, isError: false });
 

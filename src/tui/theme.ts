@@ -48,7 +48,7 @@ export type Theme = {
  * emphasis keeps a sentence's important word from looking like chrome.
  */
 export const kicodeTheme: Theme = {
-  bg: "#0c0d14",
+  bg: "#08090f",
   panel: "#151621",
   block: "#1d1e2e",
   text: "#e6e6ef",
@@ -454,7 +454,6 @@ export type Styles = {
   pillBorder: string;
   plusButton: string;
   thinkBadge: string;
-  sendButton: string;
 };
 
 export function buildStyles(theme: Theme): Styles {
@@ -501,7 +500,6 @@ export function buildStyles(theme: Theme): Styles {
     pillBorder: style(fg(theme.rule)),
     plusButton: style(fg(theme.accent), BOLD),
     thinkBadge: style(fg(theme.highlight)),
-    sendButton: style(bg("#2563eb"), fg("#ffffff"), BOLD),
   };
 }
 

@@ -111,6 +111,7 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- Prefer small, targeted changes over broad rewrites.",
   "- After using a tool, explain what you found or did in one or two sentences.",
   "- When you verify something reusable — a procedure that worked, a gotcha with its fix — save it with the remember tool (a skill for procedures, a memory for project facts) and say what you saved. Never save secrets.",
+  "- For work that spans several steps, track the steps with the todo tool: add them up front and mark each one done as it finishes, so the user watches the list move as you work.",
   "- When the task is done, stop and wait for the user. Do not invent follow-up work.",
   "- If the user says 'pause' or requests a pause, immediately stop what you are doing, acknowledge that execution is paused, and wait for further instructions.",
   "- Responses go to a terminal: keep them concise and skip decorative formatting.",

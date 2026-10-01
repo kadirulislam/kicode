@@ -1591,8 +1591,6 @@ function renderBottom(
   const hits: Hit[] = [];
   let caretRow: number | null = null;
   let caretCol = 0;
-  /** Set when the prompt box was drawn, so its bottom padding row follows. */
-  let bottomPad = false;
 
   push([span("─".repeat(usable), styles.rule)], theme.bg);
   // The palette floats over the transcript rather than sitting on a surface of
@@ -1722,6 +1720,12 @@ function renderBottom(
   // keyboard, so a caret in a box that cannot take typing would be a lie.
   // One filled panel with an amber bar reads as "answer this", where a bar
   // per row on the transcript's own background reads as more transcript.
+  //
+  // The surface the box is drawn on: the same fill a user's own turn sits
+  // on, so the place being typed into is visibly the same material as the
+  // words it will become. `panel` (the tab bar, a card) sat one step off the
+  // page and read as one more line of transcript.
+  const boxBg = theme.block;
   if (state.modal || state.picker || state.menu || (state.ask && !state.askTyping)) {
     // A list or a panel is on screen and the keys belong to it. An input line
     // that cannot be typed into would only invite typing that goes nowhere —
@@ -1744,18 +1748,18 @@ function renderBottom(
       badgeWidth += text.length + 1;
     }
 
-    // Right controls: [+] [send] — plain text, no emoji. The [+] is the attach
-    // button: it opens the platform's file-selection window, so attaching is a
-    // click and not a slash command to remember. The variant is changed with
-    // `/effort`; the row keeps only the two controls that are pressed while
-    // typing, so nothing squeezes the editor on a narrow terminal.
+    // Right controls: [+] — plain text, no emoji. The [+] is the attach button:
+    // it opens the platform's file-selection window, so attaching is a click
+    // and not a slash command to remember. Send has no button of its own: a
+    // filled arrow was the loudest thing on a quiet screen for the one action
+    // the keyboard already has (enter), so the row keeps only the control that
+    // is actually pressed while typing. The variant is changed with `/effort`,
+    // which needs no button either.
     const attachText = "[+]";
     const attachLen = textWidth(attachText);
-    const sendSpan = span(" \u2191 ", styles.sendButton);
-    const sendLen = 3;
-    // The trailing space after the send button is part of the controls, so the
-    // gap arithmetic matches exactly what is drawn and the row never overflows.
-    const rightLen = attachLen + 1 + sendLen + 1;
+    // The trailing space is part of the controls, so the gap arithmetic matches
+    // exactly what is drawn and the row never overflows.
+    const rightLen = attachLen + 1;
 
     const availableWidth = Math.max(width - badgeWidth - rightLen, 10);
     const placeholder = attachedCount > 0 ? "" : (state.ask ? "Type your answer…" : PLACEHOLDER);
@@ -1767,12 +1771,12 @@ function renderBottom(
 
     const rightControls: Span[] = [];
     rightControls.push(span(attachText, styles.thinkBadge), span(" "));
-    rightControls.push(sendSpan, span(" "));
 
     // The box is a bar, not a frame: one accent edge down the left, padding
-    // rows that carry nothing else, and no top or bottom border competing
-    // with the transcript's own rules.
-    push([span(`${indent}▌`, styles.accent)], theme.panel);
+    // rows that carry nothing else, and no border competing with the
+    // transcript's own rules — but it is filled, so it reads as the place
+    // being typed into rather than another line of the transcript.
+    push([span(`${indent}▌`, styles.accent)], boxBg);
     push(
       [
         span(`${indent}▌ `, styles.accent),
@@ -1781,23 +1785,30 @@ function renderBottom(
         gapSpan,
         ...rightControls,
       ],
-      theme.panel,
+      boxBg,
     );
     caretRow = rows.length - 1;
     caretCol = badgeWidth + view.caret;
-    bottomPad = true;
+    // A row of air between the editor and the state row below it: what is
+    // being typed and where it will go are two different answers, and stacked
+    // flush they read as one run of text.
+    push([span(`${indent}▌`, styles.accent)], boxBg);
   }
 
   // The state row shares the box the prompt (or the ask) is in, and stands
   // alone on the background only when there is no box under it at all. While an
   // ask is up the whole box is edged in the ask's colour — the mode word keeps
   // its own, so build/plan is still readable — because one box with one edge
-  // does not make the state row look like a fourth line of the question.
-  push(
-    modeSpans(state, styles, width, indent, state.modal ? styles.warn : undefined),
-    state.modal || (!state.picker && !state.ask && !state.menu) ? theme.panel : theme.bg,
-  );
-  if (bottomPad) push([span(`${indent}▌`, styles.accent)], theme.panel);
+  // does not make the state row look like a fourth line of the question. It is
+  // filled with whatever is over it: the permission card's own panel while a
+  // decision is up, the box when there is one to type into, and the page
+  // otherwise.
+  const stateRowBg = state.modal
+    ? theme.panel
+    : !state.picker && !state.ask && !state.menu
+      ? boxBg
+      : theme.bg;
+  push(modeSpans(state, styles, width, indent, state.modal ? styles.warn : undefined), stateRowBg);
   push(footerSpans(state, styles, usable), theme.bg);
 
   return { lines: rows.map((row) => paint(row.spans, row.background, usable)), rows, caretRow, caretCol, hits };

@@ -11,11 +11,11 @@
 - [x] Tab close message fix and clean transition.
 - [x] Mouse text selection without auto-copy/auto-paste side effects; `Ctrl+C` copy support.
 - [x] Right-click clipboard & attachment context menu (Text / Image paste options).
-- [x] Modern prompt bar with `+` attachment button, `🧠 Think` pill, and `↑` send button.
+- [x] Modern prompt bar with `+` attachment button, `🧠 Think` pill, and `↑` send button. *(superseded — the `[Think]` pill went in ADR-016 and the `↑` arrow in ADR-018; the prompt row now carries `[+]` alone.)*
 - [x] TokenHarbor / TokenHarbour & OpenCode built-in services and key resolution.
 - [x] Global settings API key & custom provider persistence (`~/.kicode.json`).
 - [x] Interactive modal dialogs for `Manually enter API Key` and `Add API Provider`.
-- [x] Emoji-free bar-style chat area (ADR-004): `▌` accent bar, `[Think]` pill, `↑` send, single `·` separators, no sender headers.
+- [x] Emoji-free bar-style chat area (ADR-004): `▌` accent bar, single `·` separators, no sender headers, and now a filled typing surface (ADR-018). The `[Think]` pill and `↑` send button have since been dropped.
 - [x] Airy tabs with `+NEW` button; every fresh session opens on the home screen (ADR-005).
 - [x] Palette lists only runnable commands — aliases/dead names work when typed, take no rows (ADR-006).
 - [x] Plan + todo session tools with per-session isolation (ADR-007).
@@ -62,6 +62,8 @@
 - [x] Recovery modal on a failed turn (ADR-015): the gateway's message in a centered card with `r retry · m choose model · esc dismiss` — `r` re-runs the exact request, `m` opens the model picker and retries on whatever model lands, Esc keeps the error. Goal runs stay autonomous (note only); the queue holds behind the modal; auto-switching is now opt-in instead of default.
 - [x] File upload by click (ADR-016): a `[+]` button on the right of the input bar opens the platform's own file-selection window — PowerShell's `OpenFileDialog` on Windows, `zenity`/`kdialog` on Linux, `osascript` on macOS — and the chosen file attaches automatically. Images (png/jpeg/webp/gif, ≤8 MB) join the pasted-screenshot base64 path; documents (≤512 KB text, capped at 24 000 chars) are read at attach time and appended as a named `Context from attached file "…"` block. Cancelling is silent, a missing picker falls back to typing a path in the prompt, and the old `/attach` command is gone. Badges, backspace-detach and the right-click clear items are unchanged from ADR-014.
 - [x] `[Think]` variant pill removed from the prompt row at the owner's request — the row now carries only `[+]` and `↑`, and `/effort` changes the variant. Pinned by a frame test that the row no longer contains `[Think]`.
+- [x] Send arrow removed from the input bar, and the box made unmistakably the typing area (ADR-018): the box now wears `theme.block` — the surface a user's own turn wears — instead of the `panel` it shared with the tab bar, the `kicode` page background deepened `#0c0d14` → `#08090f` behind it, and a blank row of the box's own fill sits between the editor and the state row (in place of the padding row that used to trail under it, so the box is the same height). The `[+]` attach button anchors to the right edge and its hit box was re-derived to match.
+- [x] Live todo progress (ADR-018): the `todo` tool's checklist is no longer logged once per call — the previous card is lifted out and the newest state put at the end of the transcript, so the agent's list ticks over in one place, where the work is. The system prompt now asks for a list on any multi-step task.
 - [x] **Caret row off-by-one fixed (found by the attach-button tests)**: the caret row omitted the tab bar's row, so with the sidebar visible the terminal caret and every prompt-row click/drag sat one row too high. A drag starting on the chrome under the rule could also copy `Ask anything...` as conversation text; the selection-start guard now refuses the rule and below (ADR-016).
 
 ## Pending (agreed, not yet built)
@@ -74,10 +76,10 @@
   4. **Sessions grouped by date** — `/sessions` should group rows under `Today`, `29-09-2026`, … instead of one flat list.
   5. **Text wrapping everywhere** — long lines must wrap in the transcript, chat area, modals and small terminals rather than being clipped or hidden.
   6. **Compact to 30–50% while keeping task context** — compaction currently cuts too little/too much; target 30–50% of the window with all task-relevant context preserved.
-  7. **Live todo progress while the agent works** — show the todo list's progress in the transcript/busy row as the agent advances through it.
+  7. ~~**Live todo progress while the agent works**~~ — **done (ADR-018)**: the `todo` tool's checklist is rewritten in place at the end of the transcript as the agent advances, and the system prompt asks for a list on multi-step work. A busy-row count is still open if the card scrolls out of view.
   8. **Agent sometimes stops mid-task** — a turn ends before the work is done; find the stop and make it continue reliably.
   9. **Rate-limit → model modal, but keep working** — on a rate-limit error show the model chooser (as the recovery modal already does) *and* continue the work automatically rather than waiting on the user.
-  10. **Deeper chat-area background** — the chat/transcript background should be a deeper colour than it is now.
+  10. ~~**Deeper chat-area background**~~ — **done (ADR-018)**: the `kicode` transcript background went `#0c0d14` → `#08090f`, and the input box moved onto the user-turn surface so the typing area reads as a raised card against it.
 - [ ] Owner's minor-issues list (awaited — superseded by the ten items above).
 
 ## Future / Next Milestones
