@@ -23,7 +23,6 @@ import {
   setColorEnabled,
   sliceCells,
   span,
-  textWidth,
   type Span,
 } from "./ansi";
 import { COMMANDS, commandQuery, filterCommands, isAvailable, stepSelectable, type Command } from "./commands";
@@ -42,6 +41,7 @@ import {
   type Modal,
   type PanelRow,
   type PickItem,
+  type PromptBox,
   type Selection,
   type SessionMode,
   type TabHit,
@@ -458,6 +458,8 @@ class TuiApp {
   private panelRows: PanelRow[] = [];
   /** Screen row of prompt line from last draw */
   private promptRow: number | null = null;
+  /** The prompt box's rows from the last draw, for clicks that place the caret. */
+  private promptBox: PromptBox | null = null;
   /** The last frame's rows with every escape sequence taken out, for copying. */
   private frameText: string[] = [];
   /** Which rows a drag may select, in the rows the mouse reports. */
@@ -3848,6 +3850,22 @@ class TuiApp {
    * A permission prompt is deliberately neither: a click must never answer it,
    * least of all by landing on `allow`.
    */
+  /**
+   * The editor offset a click at `x` picks out, for a press on the prompt box,
+   * or null when the row is not one of the box's text rows.
+   *
+   * The box reports which text each of its rows carries, because once a long
+   * prompt wraps a row no longer starts at the beginning of the line. Without
+   * that, a click on the third row would put the caret near the start of the
+   * prompt — which is the bug a wrapping box would otherwise introduce.
+   */
+  private promptClickOffset(row: number, x: number): number | null {
+    const box = this.promptBox;
+    const line = box?.rows.find((candidate) => candidate.row === row);
+    if (!box || !line) return null;
+    return Math.max(line.start, Math.min(line.end, line.start + (x - box.textLeft)));
+  }
+
   private click(event: MouseKey): boolean {
     if (event.wheel) {
       // Moving the view moves the text a highlight is over, so the two cannot
@@ -3965,12 +3983,12 @@ class TuiApp {
         this.anchor = null;
         return true;
       }
-      if (this.promptRow !== null && event.y === this.promptRow && this.editor.selectionStart !== null) {
-        const margin = this.output.columns && this.output.columns >= 50 ? 2 : 0;
-        const promptLeft = margin + 3 + (this.attached.length > 0 ? this.attached.length * 10 : 0);
-        const charIndex = Math.max(0, Math.min(this.editor.text.length, event.x - promptLeft));
-        this.editor.selectionEnd = charIndex;
-        this.editor.cursor = charIndex;
+      // A drag that started in the prompt extends the editor's own selection,
+      // on whatever row of a wrapped prompt the pointer is over.
+      const overPrompt = this.editor.selectionStart !== null ? this.promptClickOffset(event.y, event.x) : null;
+      if (overPrompt !== null) {
+        this.editor.selectionEnd = overPrompt;
+        this.editor.cursor = overPrompt;
         return true;
       }
       if (this.dragging && this.selection) {
@@ -4123,8 +4141,10 @@ class TuiApp {
       }
     }
 
-    // Clicking inside the prompt row (image chips, [+] attach, [send])
-    if (this.promptRow !== null && event.y === this.promptRow) {
+    // Clicking on the prompt's first text row: the row the badges and the
+    // `[+]` control are drawn on. A wrapped prompt's lower rows carry text and
+    // nothing else, so a press there is only ever a caret (handled below).
+    if (this.promptBox && this.promptBox.rows[0]?.row === event.y) {
       const margin = this.output.columns && this.output.columns >= 50 ? 2 : 0;
       const usable = (this.output.columns ?? 80) - 1;
       const promptLeft = margin + 3;
@@ -4164,26 +4184,21 @@ class TuiApp {
       }
     }
 
-    // Clicking inside the prompt row
-    if (this.promptRow !== null && event.y === this.promptRow) {
-      // Already handled click for buttons, if dragging in prompt row
-      if (this.editor.text.length > 0) {
-        const margin = this.output.columns && this.output.columns >= 50 ? 2 : 0;
-        const promptLeft = margin + 3 + (this.attached.length > 0 ? this.attached.length * 10 /* approx badge width */ : 0);
-        const editorWidth = textWidth(this.editor.text);
-        if (event.x >= promptLeft && event.x <= promptLeft + editorWidth) {
-          const charIndex = Math.max(0, Math.min(this.editor.text.length, event.x - promptLeft));
-          if (!this.dragging) {
-            this.editor.cursor = charIndex;
-            this.editor.selectionStart = charIndex;
-            this.editor.selectionEnd = charIndex;
-            this.dragging = true;
-          } else {
-            this.editor.selectionEnd = charIndex;
-            this.editor.cursor = charIndex;
-          }
-          return true;
+    // Clicking inside the prompt's text: the caret lands where the press did,
+    // on whichever row of a wrapped prompt the press was on.
+    if (this.editor.text.length > 0) {
+      const placed = this.promptClickOffset(event.y, event.x);
+      if (placed !== null) {
+        if (!this.dragging) {
+          this.editor.cursor = placed;
+          this.editor.selectionStart = placed;
+          this.editor.selectionEnd = placed;
+          this.dragging = true;
+        } else {
+          this.editor.selectionEnd = placed;
+          this.editor.cursor = placed;
         }
+        return true;
       }
     }
 
@@ -4224,7 +4239,10 @@ class TuiApp {
     // screen — except the chrome under the rule: the prompt box, the state row
     // and the footer are not text anyone would paste as the conversation.
     const maxRow = this.frameText.length || (this.selectable ? this.selectable.bottom : 50);
-    const chromeTop = this.promptRow !== null ? this.promptRow - 2 : Number.POSITIVE_INFINITY;
+    // Everything from the rule under the transcript down is chrome, and the
+    // box's top row is the only thing that says where it starts — the caret's
+    // row moves as the prompt wraps, so it is not a fixed two rows down.
+    const chromeTop = this.promptBox ? this.promptBox.top - 1 : Number.POSITIVE_INFINITY;
     if (event.y >= 1 && event.y <= maxRow && event.y < chromeTop) {
       this.selection = { from: { row: event.y, col: event.x }, to: { row: event.y, col: event.x } };
       this.editor.clearSelection();
@@ -4813,6 +4831,7 @@ class TuiApp {
     this.frameText = frame.text;
     this.selectable = frame.selectable;
     this.promptRow = frame.caret ? frame.caret.row : null;
+    this.promptBox = frame.prompt;
     this.scrollbarInfo = frame.scrollbar ?? null;
 
     this.output.write(CURSOR_HOME + frame.lines.join("\r\n"));

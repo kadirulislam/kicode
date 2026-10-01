@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { LineEditor, caretColumn, editorView } from "./editor";
+import { EDITOR_MAX_ROWS, LineEditor, caretColumn, editorRows, editorView, type EditorWrap } from "./editor";
 import { shortenPath } from "./frame";
 import { LOGO_TEXT, logoRows, logoWidth } from "./logo";
 import { buildStyles, darkTheme } from "./theme";
-import { spansWidth } from "./ansi";
+import { INVERSE, spansWidth } from "./ansi";
 
 const styles = buildStyles(darkTheme);
 
@@ -136,6 +136,82 @@ describe("editorView", () => {
 
     expect(text.length).toBeLessThanOrEqual(10);
     expect(text.endsWith("…")).toBe(true);
+  });
+});
+
+describe("editorRows", () => {
+  /** The rows of a prompt, wrapped at `width`. */
+  const rowsOf = (text: string, width: number, cursor = text.length, maxRows?: number): EditorWrap => {
+    const editor = new LineEditor();
+    editor.setText(text, cursor);
+    return editorRows(editor, styles, width, "Ask anything", maxRows);
+  };
+
+  /** What each row shows, as the text it was drawn from. */
+  const textOf = (wrap: EditorWrap): string[] => wrap.rows.map((row) => row.spans.map((item) => item.text).join(""));
+
+  it("wraps a line that runs past the width instead of cutting it off", () => {
+    const text = "f".repeat(200);
+    const wrap = rowsOf(text, 71);
+
+    // The same characters, on more rows: nothing is dropped at the edge, which
+    // is the whole reason the box wraps.
+    expect(textOf(wrap).join("")).toBe(text);
+    expect(textOf(wrap)).toHaveLength(3);
+    for (const row of wrap.rows) expect(spansWidth(row.spans)).toBeLessThanOrEqual(71);
+    // The caret is at the end, which is now the bottom row.
+    expect(wrap.caretRow).toBe(2);
+    expect(wrap.caretCol).toBe(200 - 142);
+  });
+
+  it("breaks at a space when there is one to break at", () => {
+    // `beta` fits after `alpha` by the cells, but a word is not a unit of
+    // length: the row ends where a space lets it.
+    expect(textOf(rowsOf("alpha beta gamma", 10))).toEqual(["alpha", "beta gamma"]);
+  });
+
+  it("measures the caret against the row it wrapped onto", () => {
+    const wrap = rowsOf("f".repeat(40), 20, 20);
+
+    // A caret sitting exactly on a break is drawn under it, at the start of the
+    // row below, rather than hanging past the row above.
+    expect(wrap.caretRow).toBe(1);
+    expect(wrap.caretCol).toBe(0);
+  });
+
+  it("keeps the caret's own row on screen once the box is full", () => {
+    const text = "f".repeat(200);
+    const wrap = rowsOf(text, 20, text.length, EDITOR_MAX_ROWS);
+
+    // Six rows of twenty: the box stops growing and follows the caret, so a
+    // pasted wall of text cannot push the conversation off the screen.
+    expect(wrap.rows).toHaveLength(EDITOR_MAX_ROWS);
+    expect(wrap.caretRow).toBe(EDITOR_MAX_ROWS - 1);
+    expect(wrap.rows[0]?.start).toBe(80);
+    expect(wrap.rows.at(-1)?.end).toBe(text.length);
+  });
+
+  it("never splits a wide character across two rows", () => {
+    expect(textOf(rowsOf("日".repeat(3), 5, 3))).toEqual(["日日", "日"]);
+  });
+
+  it("draws a selection that crosses a break on both rows", () => {
+    const editor = new LineEditor();
+    editor.setText("alpha beta", 10);
+    editor.selectionStart = 0;
+    editor.selectionEnd = 10;
+
+    const wrap = editorRows(editor, styles, 6, "Ask anything");
+    expect(wrap.rows).toHaveLength(2);
+    for (const row of wrap.rows) expect(row.spans.some((item) => item.style === INVERSE)).toBe(true);
+  });
+
+  it("shows the placeholder on one row while there is nothing typed", () => {
+    const wrap = rowsOf("", 20, 0);
+
+    expect(wrap.rows).toHaveLength(1);
+    expect(textOf(wrap)).toEqual(["Ask anything"]);
+    expect(wrap.caretCol).toBe(0);
   });
 });
 

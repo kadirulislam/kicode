@@ -1,4 +1,4 @@
-import { type Span, INVERSE, style, textWidth } from "./ansi";
+import { type Span, INVERSE, span, style, textWidth } from "./ansi";
 import type { Styles } from "./theme";
 
 /**
@@ -183,6 +183,123 @@ export class LineEditor {
 /** Caret column in cells, given the text before it. */
 export function caretColumn(editor: LineEditor): number {
   return textWidth(editor.text.slice(0, editor.cursor));
+}
+
+/** The most rows the prompt box grows to before it starts scrolling instead. */
+export const EDITOR_MAX_ROWS = 6;
+
+/** One row of the prompt: the code-unit range it shows, and how to draw it. */
+export type EditorRow = { start: number; end: number; spans: Span[] };
+
+export type EditorWrap = {
+  /** The rows the box shows, top first. */
+  rows: EditorRow[];
+  /** The row the caret is on, in `rows`. */
+  caretRow: number;
+  /** The caret's column in cells, measured from the start of the text. */
+  caretCol: number;
+};
+
+/**
+ * Where a line of text breaks into rows, as code-unit ranges.
+ *
+ * A row breaks at the last space that fits when there is one, and mid-word when
+ * there is not: a long path, or a wall of one letter, is still readable rather
+ * than cut off at the edge — which is the whole point of wrapping the prompt.
+ */
+function breakRows(text: string, width: number): { start: number; end: number }[] {
+  const rows: { start: number; end: number }[] = [];
+  let start = 0;
+  let used = 0;
+  /** Index of the last space in the current row, or -1. */
+  let space = -1;
+
+  for (let index = 0; index < text.length; ) {
+    const char = String.fromCodePoint(text.codePointAt(index) ?? 0);
+    const cells = textWidth(char);
+    // A character too wide for a row still has to be shown, so an empty row is
+    // never broken off to make room for it.
+    if (used + cells > width && index > start) {
+      // The space the line breaks at belongs to neither row: it is a break, and
+      // drawing it would only leave a gap at the end of the row above.
+      const cut = space > start ? space : index;
+      rows.push({ start, end: cut });
+      start = space > start ? space + 1 : index;
+      used = textWidth(text.slice(start, index));
+      space = -1;
+    }
+    if (char === " ") space = index;
+    used += cells;
+    index += char.length;
+  }
+
+  rows.push({ start, end: text.length });
+  return rows;
+}
+
+/** A row's text with the editor's selection drawn in reverse video. */
+function selectionSpans(text: string, at: number, from: number, to: number, styles: Styles): Span[] {
+  const selStart = Math.max(from - at, 0);
+  const selEnd = Math.max(Math.min(to - at, text.length), 0);
+  if (selEnd <= selStart) return [span(text, styles.text)];
+
+  const out: Span[] = [];
+  const head = text.slice(0, selStart);
+  const middle = text.slice(selStart, selEnd);
+  const tail = text.slice(selEnd);
+  if (head) out.push(span(head, styles.text));
+  if (middle) out.push(span(middle, style(INVERSE)));
+  if (tail) out.push(span(tail, styles.text));
+  return out;
+}
+
+/**
+ * The prompt's text as the rows the box shows.
+ *
+ * The box grows with the text — a long prompt wraps rather than running off the
+ * right edge — but only up to `maxRows`. Past that the rows follow the caret,
+ * the way a multi-line input does, because what is being typed is the part that
+ * has to stay visible: a box that kept growing would eat the transcript it is
+ * standing on.
+ */
+export function editorRows(
+  editor: LineEditor,
+  styles: Styles,
+  width: number,
+  placeholder: string,
+  maxRows = EDITOR_MAX_ROWS,
+): EditorWrap {
+  if (editor.text.length === 0) {
+    const view = editorView(editor, styles, width, placeholder);
+    return { rows: [{ start: 0, end: 0, spans: view.spans }], caretRow: 0, caretCol: view.caret };
+  }
+
+  const text = editor.text;
+  const all = breakRows(text, Math.max(width, 1));
+
+  // The caret is on the last row that starts at or before it, so a caret
+  // sitting exactly on a break is drawn under it rather than at the row's end.
+  let caretRow = 0;
+  for (const [index, row] of all.entries()) if (row.start <= editor.cursor) caretRow = index;
+  const caretCol = textWidth(text.slice(all[caretRow]?.start ?? 0, editor.cursor));
+
+  const offset = Math.max(0, Math.min(caretRow - maxRows + 1, all.length - maxRows));
+  const shown = all.slice(offset, offset + maxRows);
+  const [selStart, selEnd] = editor.selectionRange();
+  const selected = editor.hasSelection();
+
+  return {
+    rows: shown.map((row) => {
+      const slice = text.slice(row.start, row.end);
+      return {
+        start: row.start,
+        end: row.end,
+        spans: selected ? selectionSpans(slice, row.start, selStart, selEnd, styles) : [span(slice, styles.text)],
+      };
+    }),
+    caretRow: caretRow - offset,
+    caretCol,
+  };
 }
 
 export type EditorView = { spans: Span[]; caret: number };

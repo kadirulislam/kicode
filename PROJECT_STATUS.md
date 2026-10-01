@@ -1,9 +1,9 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 961 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 975 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~461 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~465 KB) via `npm run build`
 
 ---
 
@@ -27,6 +27,12 @@
 - **Every answer on a card is a chip**: `[y] yes · [a] always · [n] no` on a permission prompt, `[r] retry · [m] choose model · [×] dismiss` on a failed turn. A click names the key and the same handler a keypress reaches answers it, so a mouse answer cannot drift from a typed one — `[m]` still opens the model picker with the failed turn set aside.
 - **`esc` is drawn as a clickable `[×]` everywhere it is offered**: the session footer's hints, a picker's title row, a menu's title and footer, the clipboard menu, and a card's own decision row. Each target is found by walking the row the chip was drawn in, so it cannot drift from the glyph.
 - **While a card is up it is the only thing clickable** (plus the footer, whose `[×]` is the permission card's way out) — and two bugs were fixed on the way: a multi-line gateway message printed as one run-on row on the recovery card, and the `[+]` attach hit box sat one column left of its glyph.
+
+### 0e. The Prompt Wraps, and the Box Grows With It (ADR-020)
+- **The prompt wraps instead of being cut at the edge**: a line past the terminal's width is broken at the last space that fits (mid-word when there is none), so a long path or a wall of one character is readable rather than ending in a `…` — nothing typed is off screen.
+- **The box grows with the text, up to six rows**, past which the rows follow the caret — what is being typed stays visible without the box eating the transcript it stands on. The rows under the first keep the first row's text column, and the `[+]` control rides only the row being typed on.
+- **The caret is measured against the row it wrapped onto**, so it sits where the next character goes; the renderer now reports the box's own rows (`RenderedFrame.prompt`) — including the column the text starts in — so a click places the caret on the row it actually landed on, and the old `attached.length * 10` guess for badges is gone.
+- **Caret column off-by-one fixed**: the caret sat one cell left of the insertion point (`margin + 2` where the text starts at `margin + 3`), visible in the empty box too.
 
 ### 0c. The Input Box Reads as a Typing Area, and the Todo List Goes Live (ADR-018)
 - **The send arrow is gone**: the blue `↑` button was the loudest thing on a quiet row for the one action the keyboard already has (enter). The `[+]` attach button stays, anchored to the right edge; its click hit box was re-derived to match, since the drawn glyph and the hit box are computed from the same arithmetic in two files.
@@ -52,6 +58,7 @@
   - Attached image chips `[Image i]` with click-to-remove.
   - `[+]` attach button at the right edge of the prompt row — the only control pressed while typing; the variant is changed with `/effort` and send is enter (the `[Think]` pill and the `↑` button were both removed at the owner's request).
   - The box is filled with the user-turn surface and keeps a blank row between the editor and the state row, so it reads as the typing area (ADR-018).
+  - Long prompts wrap inside the box and the box grows with them (up to six rows, then it follows the caret) instead of being clipped at the right edge (ADR-020).
 - **Interactive Mouse Controls & Scrollbar**:
   - Drag-to-select text in the transcript without auto-copying or auto-pasting.
   - Mouse-interactive scrollbar on the right border.

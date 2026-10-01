@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { bg, textWidth } from "./ansi";
-import { LineEditor } from "./editor";
+import { EDITOR_MAX_ROWS, LineEditor } from "./editor";
 import { COMMANDS } from "./commands";
 import {
   NEW_TAB,
@@ -1266,6 +1266,86 @@ describe("the blocks", () => {
 });
 
 
+
+/**
+ * A prompt longer than the box is wide used to be cut off at the right edge
+ * with a `…`, which is how you lose the end of what you are typing. These are
+ * about the box growing instead.
+ */
+describe("the prompt that wraps", () => {
+  const block = bg(theme.block);
+
+  const typed = (text: string, size: Size = { cols: 80, rows: 24 }) => {
+    const editor = new LineEditor();
+    editor.setText(text);
+    const frame = renderFrame(state({ editor }), size, styles, theme);
+    const plain = frame.lines.map((line) => strip(line));
+    // What each text row of the box shows, read off the frame at the columns
+    // the renderer reported — the same route a click takes.
+    const textLeft = (frame.prompt?.textLeft ?? 1) - 1;
+    const shown = (frame.prompt?.rows ?? []).map((row) =>
+      plain[row.row - 1]!.slice(textLeft, textLeft + (row.end - row.start)),
+    );
+    return { frame, plain, shown };
+  };
+
+  it("grows the box instead of cutting the line at the edge", () => {
+    const { frame, plain, shown } = typed("f".repeat(200));
+
+    // Every character is on screen, across three rows instead of one.
+    expect(shown.join("")).toBe("f".repeat(200));
+    expect(frame.prompt?.rows).toHaveLength(3);
+    const box = plain.slice((frame.prompt?.top ?? 1) - 1, frame.prompt?.bottom);
+    for (const line of box) expect(line).not.toContain("…");
+  });
+
+  it("fills every row of the taller box with the typing surface", () => {
+    const { frame } = typed("f".repeat(200));
+    const prompt = frame.prompt!;
+
+    for (const line of frame.lines.slice(prompt.top - 1, prompt.bottom)) {
+      expect(line).toContain(block);
+      expect(strip(line).trimStart().startsWith("▌")).toBe(true);
+    }
+  });
+
+  it("keeps the caret on the row that is being typed on", () => {
+    const { frame, shown } = typed("f".repeat(200));
+    const prompt = frame.prompt!;
+
+    // The box's own rows bracket the text: a bar, the rows, a bar.
+    expect(prompt.rows[0]?.row).toBe(prompt.top + 1);
+    expect(prompt.rows.at(-1)?.row).toBe(prompt.bottom - 1);
+    expect(frame.caret?.row).toBe(prompt.rows.at(-1)?.row);
+    // The caret is the cell the next character goes in: just past the text on
+    // the row it is on, which is a different column once the row wrapped.
+    expect(frame.caret?.col).toBe(prompt.textLeft + (shown.at(-1)?.length ?? 0));
+  });
+
+  it("stops growing at six rows and follows the caret instead", () => {
+    const { frame, shown } = typed("f".repeat(2000));
+    const prompt = frame.prompt!;
+
+    expect(prompt.rows).toHaveLength(EDITOR_MAX_ROWS);
+    expect(prompt.rows[0]!.start).toBeGreaterThan(0);
+    // What is on screen is the tail — the part being typed — and still the
+    // text as it was typed.
+    expect(shown.join("")).toBe("f".repeat(2000 - prompt.rows[0]!.start));
+    expect(frame.caret?.row).toBe(prompt.rows.at(-1)?.row);
+  });
+
+  it("takes its room from the transcript rather than the frame", () => {
+    const editor = new LineEditor();
+    editor.setText("f".repeat(2000));
+    const frame = renderFrame(state({ editor, entries: conversation }), { cols: 80, rows: 24 }, styles, theme);
+    const plain = frame.lines.map((line) => strip(line));
+
+    expect(frame.lines).toHaveLength(24);
+    // The conversation is still there under the taller box, rather than pushed
+    // off the bottom of the screen.
+    expect(plain.join("\n")).toContain("build failing");
+  });
+});
 
 describe("the transcript column", () => {
   it("starts a request block at the column's edge, not the terminal's", () => {

@@ -15,7 +15,7 @@ import {
   wrapSpans,
 } from "./ansi";
 import { COMMAND_WIDTH, isAvailable, type Command } from "./commands";
-import { type LineEditor, editorView } from "./editor";
+import { type LineEditor, editorRows } from "./editor";
 import { LOGO_TEXT, logoRows } from "./logo";
 import type { MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
@@ -295,6 +295,26 @@ export type ScrollbarInfo = {
   maxScroll: number;
 };
 
+/**
+ * Where the prompt box sits, and which text each of its rows shows.
+ *
+ * A mouse needs both: the box's own edges say where the chrome under the rule
+ * begins, and the code-unit range each row carries is what turns a click into a
+ * caret position. The same row maps to a different offset once the text wraps,
+ * so the renderer — the only thing that knows where the breaks landed — reports
+ * them rather than leaving the app to guess.
+ */
+export type PromptBox = {
+  /** Screen row of the box's top bar row. */
+  top: number;
+  /** Screen row of the box's bottom bar row. */
+  bottom: number;
+  /** The column the text starts in, 1-based, badges included. */
+  textLeft: number;
+  /** One entry per text row: its screen row, and the text it shows. */
+  rows: { row: number; start: number; end: number }[];
+};
+
 export type RenderedFrame = {
   /** Exactly `rows` strings, each already styled. */
   lines: string[];
@@ -316,6 +336,8 @@ export type RenderedFrame = {
   selectable: { top: number; bottom: number };
   /** Scrollbar geometry when visible, for mouse dragging/clicking. */
   scrollbar?: ScrollbarInfo | null;
+  /** The prompt box's rows when it is on screen, for clicks that place the caret. */
+  prompt: PromptBox | null;
 };
 
 /** A cell of the screen, in the coordinates a terminal reports a mouse in. */
@@ -544,7 +566,10 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
       ? null
       : {
           row: 1 + tabRowCount + bodyRows + bottom.caretRow,
-          col: Math.min(margin + 2 + bottom.caretCol, usable - 1),
+          // `caretCol` counts the cells before the caret, and the text starts
+          // one cell after the bar's space — so the caret is that many cells
+          // past where the row's text begins, not one short of it.
+          col: Math.min(margin + 3 + bottom.caretCol, usable - 1),
         };
 
   // Two blocks, two offsets: the body starts under the tab bar, the bottom block
@@ -565,6 +590,17 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
         ...bottom.hits.map((hit) => ({ ...hit, row: hit.row + tabRowCount + bodyRows + 1 })),
       ];
 
+  // The prompt box in screen rows, the way a mouse reports a click. Its own
+  // rows are counted from the top of the bottom block, like the hits above.
+  const prompt = bottom.prompt
+    ? {
+        ...bottom.prompt,
+        top: bottom.prompt.top + tabRowCount + bodyRows + 1,
+        bottom: bottom.prompt.bottom + tabRowCount + bodyRows + 1,
+        rows: bottom.prompt.rows.map((row) => ({ ...row, row: row.row + tabRowCount + bodyRows + 1 })),
+      }
+    : null;
+
   const scrollbar: ScrollbarInfo | null =
     body.scrollbarMax && body.scrollbarMax > 0
       ? {
@@ -583,6 +619,7 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     rows: panelRows,
     selectable: { top: 1, bottom: rows },
     scrollbar,
+    prompt,
   };
 }
 
@@ -1677,7 +1714,15 @@ function modalCard(
   return { box: out, chips };
 }
 
-type Bottom = { lines: string[]; rows: BodyLine[]; caretRow: number | null; caretCol: number; hits: Hit[] };
+type Bottom = {
+  lines: string[];
+  rows: BodyLine[];
+  caretRow: number | null;
+  caretCol: number;
+  hits: Hit[];
+  /** The prompt box's own rows, as indices into `rows`, or null when it is hidden. */
+  prompt: PromptBox | null;
+};
 
 function renderBottom(
   state: TuiState,
@@ -1697,6 +1742,7 @@ function renderBottom(
   const hits: Hit[] = [];
   let caretRow: number | null = null;
   let caretCol = 0;
+  let prompt: Bottom["prompt"] = null;
 
   push([span("─".repeat(usable), styles.rule)], theme.bg);
   // The palette floats over the transcript rather than sitting on a surface of
@@ -1874,11 +1920,7 @@ function renderBottom(
 
     const availableWidth = Math.max(width - badgeWidth - rightLen, 10);
     const placeholder = attachedCount > 0 ? "" : (state.ask ? "Type your answer…" : PLACEHOLDER);
-    const view = editorView(state.editor, styles, availableWidth, placeholder);
-
-    const viewLen = spansWidth(view.spans);
-    const gap = Math.max(width - badgeWidth - viewLen - rightLen, 0);
-    const gapSpan = span(" ".repeat(gap));
+    const view = editorRows(state.editor, styles, availableWidth, placeholder);
 
     const rightControls: Span[] = [];
     rightControls.push(span(attachText, styles.thinkBadge), span(" "));
@@ -1888,22 +1930,40 @@ function renderBottom(
     // transcript's own rules — but it is filled, so it reads as the place
     // being typed into rather than another line of the transcript.
     push([span(`${indent}▌`, styles.accent)], boxBg);
-    push(
-      [
-        span(`${indent}▌ `, styles.accent),
-        ...badges,
-        ...view.spans,
-        gapSpan,
-        ...rightControls,
-      ],
-      boxBg,
-    );
-    caretRow = rows.length - 1;
-    caretCol = badgeWidth + view.caret;
+    const firstTextRow = rows.length;
+    // The rows under the first keep the same text column, so a wrapped prompt
+    // stays one block of text rather than starting over at the bar.
+    const badgePad: Span[] = badgeWidth > 0 ? [span(" ".repeat(badgeWidth))] : [];
+    view.rows.forEach((row, index) => {
+      // The controls ride the row being typed on. A `[+]` beside every wrapped
+      // row would read as one button per line.
+      const trailing = index === 0 ? rightLen : 0;
+      const gap = Math.max(width - badgeWidth - spansWidth(row.spans) - trailing, 0);
+      push(
+        [
+          span(`${indent}▌ `, styles.accent),
+          ...(index === 0 ? badges : badgePad),
+          ...row.spans,
+          span(" ".repeat(gap)),
+          ...(index === 0 ? rightControls : []),
+        ],
+        boxBg,
+      );
+    });
+    caretRow = firstTextRow + view.caretRow;
+    caretCol = badgeWidth + view.caretCol;
     // A row of air between the editor and the state row below it: what is
     // being typed and where it will go are two different answers, and stacked
     // flush they read as one run of text.
     push([span(`${indent}▌`, styles.accent)], boxBg);
+    prompt = {
+      top: firstTextRow - 1,
+      bottom: firstTextRow + view.rows.length,
+      // One-based, which is what a mouse reports: the gutter, the bar and its
+      // space, then whatever the badges take.
+      textLeft: margin + 3 + badgeWidth,
+      rows: view.rows.map((row, index) => ({ row: firstTextRow + index, start: row.start, end: row.end })),
+    };
   }
 
   // The state row shares the box the prompt (or the ask) is in, and stands
@@ -1927,7 +1987,7 @@ function renderBottom(
   hits.push(...closeChipHits(rows.length, footer, 0));
   push(footer, theme.bg);
 
-  return { lines: rows.map((row) => paint(row.spans, row.background, usable)), rows, caretRow, caretCol, hits };
+  return { lines: rows.map((row) => paint(row.spans, row.background, usable)), rows, caretRow, caretCol, hits, prompt };
 }
 
 /**

@@ -2886,6 +2886,84 @@ describe("clicking a row", () => {
   });
 });
 
+describe("clicking a wrapped prompt", () => {
+  /**
+   * The rows the prompt's own text fills, read off the frame.
+   *
+   * Found by the bar and the text rather than by a row number: the banner and
+   * the mode row are on the same screen, and only the prompt rows are a bar
+   * followed by the wall of text this test typed.
+   */
+  const textRows = (frame: string): { index: number; line: string }[] =>
+    frame
+      .split(/\r?\n/)
+      .map((line, index) => ({ line, index }))
+      .filter(({ line }) => /^\s*▌ f/.test(line));
+
+  it("puts the caret on the row that was clicked, not at the start of the prompt", async () => {
+    const { app, done } = await drive([]);
+
+    app.input.write("f".repeat(150));
+    await tick(60);
+
+    const rows = textRows(app.lastFrame());
+    // The prompt wrapped rather than being cut off, and the click is aimed at
+    // the second of its rows.
+    expect(rows).toHaveLength(3);
+    const second = rows[1]!;
+    app.input.write(clickAt(second.index + 1, second.line.indexOf("f") + 1));
+    await tick(40);
+    app.input.write("Z");
+    await tick(40);
+
+    // The character landed on the row the pointer was over. Reading the offset
+    // wrong would put it at the start of the prompt, on the first row.
+    const after = app.lastFrame().split(/\r?\n/);
+    expect((after[second.index] ?? "").replace(/^\s*▌\s*/, "").startsWith("Z")).toBe(true);
+
+    // The line is 150 characters and the caret is in the middle of it, where
+    // `finish`'s ctrl+u would only clear back to the caret: select all first,
+    // so the session is left the way it was found.
+    app.input.write("\u001b");
+    await tick(60);
+    app.input.write("\u0001\u0015/exit\r");
+    await done;
+  });
+
+  it("selects the text between two rows of a wrapped prompt", async () => {
+    const copied: string[] = [];
+    const { app, done } = await drive([], {
+      copyToClipboard: async (text) => {
+        copied.push(text);
+        return true;
+      },
+    });
+
+    app.input.write("f".repeat(150));
+    await tick(60);
+
+    const rows = textRows(app.lastFrame());
+    expect(rows).toHaveLength(3);
+    const second = rows[1]!;
+    const third = rows[2]!;
+    // From the first cell of the second row to the cell after the last one on
+    // the third: 79 of the 150 characters.
+    const to = third.line.trimEnd().length + 1;
+    app.input.write(
+      `\u001b[<0;${second.line.indexOf("f") + 1};${second.index + 1}M` +
+        `\u001b[<32;${to};${third.index + 1}M` +
+        `\u001b[<0;${to};${third.index + 1}m`,
+    );
+    // Releasing over the prompt copies the editor's own selection, which is the
+    // span the drag covered. Poll rather than sleep once: a loaded runner
+    // stalls a tick.
+    for (let i = 0; i < 30 && copied.length === 0; i++) await tick(40);
+    expect(copied).toEqual(["f".repeat(150 - 71)]);
+
+    await finish(app, done);
+  });
+});
+
 describe("dragging over the transcript", () => {
   /** A left press, a move with the button held, and the release, in SGR. */
   const press = (row: number, col: number): string => `\u001b[<0;${col};${row}M`;
