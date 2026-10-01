@@ -1,0 +1,41 @@
+{
+  "name": "kicode",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Bring-your-own-key terminal coding agent. OpenAI-compatible, no account, no server.",
+  "type": "module",
+  "bin": {
+    "kicode": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "prepare": "tsup",
+    "start": "node dist/cli.js",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "mock": "node scripts/mock-provider.mjs"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "byok",
+    "openai-compatible"
+  ],
+  "author": "Kadirul Islam",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.2",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^5.0.1"
+  }
+}

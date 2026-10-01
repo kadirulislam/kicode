@@ -1,0 +1,9 @@
+node_modules/
+dist/
+coverage/
+
+# Never commit keys.
+.env
+.env.*
+!.env.example
+*.local
