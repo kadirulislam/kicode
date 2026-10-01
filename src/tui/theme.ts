@@ -18,6 +18,10 @@ import { BOLD, DIM, ITALIC, UNDERLINE, bg, fg, style } from "./ansi";
  *   `block`, because the box is the surface in front rather than a block inside
  *   it. It is a slot and not a constant so every theme answers the same
  *   question its own way, and the light themes step *down* instead;
+ * - `heading` names a group of rows in a list — a date in the session picker, a
+ *   section in the settings menu. It is the one piece of chrome on a card that
+ *   is neither an item nor a key, so it gets a hue of its own rather than the
+ *   accent, which is what a row the keys act on is drawn in;
  * - `rule` is the thin left rule on tool output, which is what ties a run of
  *   actions together as one piece of work;
  * - `highlight` is emphasis inside prose — the one word in a sentence that
@@ -32,6 +36,8 @@ export type Theme = {
   block: string;
   /** The input box's fill: a step off `block`, and lighter on a dark theme. */
   input: string;
+  /** The name of a group of rows in a list, in a hue the accent does not use. */
+  heading: string;
   text: string;
   dim: string;
   faint: string;
@@ -58,6 +64,7 @@ export const kicodeTheme: Theme = {
   panel: "#151621",
   block: "#1d1e2e",
   input: "#2b2f47",
+  heading: "#f472b6",
   text: "#e6e6ef",
   dim: "#9b9bb5",
   faint: "#55556d",
@@ -79,6 +86,7 @@ export const darkTheme: Theme = {
   panel: "#16212e",
   block: "#1b2837",
   input: "#263749",
+  heading: "#f472b6",
   text: "#e6edf3",
   dim: "#8296ab",
   faint: "#46617d",
@@ -106,6 +114,7 @@ export const lightTheme: Theme = {
   panel: "#e7edf4",
   block: "#eef2f8",
   input: "#e2e8f2",
+  heading: "#be185d",
   text: "#182430",
   dim: "#4d6076",
   faint: "#8a9bad",
@@ -126,6 +135,7 @@ export const tokyoNightTheme: Theme = {
   panel: "#1f2335",
   block: "#24283b",
   input: "#2f3450",
+  heading: "#bb9af7",
   text: "#c0caf5",
   dim: "#9aa5ce",
   faint: "#565f89",
@@ -146,6 +156,7 @@ export const gruvboxTheme: Theme = {
   panel: "#32302f",
   block: "#3c3836",
   input: "#4b4643",
+  heading: "#d3869b",
   text: "#ebdbb2",
   dim: "#a89984",
   faint: "#7c6f64",
@@ -166,6 +177,7 @@ export const nordTheme: Theme = {
   panel: "#3b4252",
   block: "#434c5e",
   input: "#4f596e",
+  heading: "#b48ead",
   text: "#eceff4",
   dim: "#d8dee9",
   faint: "#7b88a1",
@@ -186,6 +198,7 @@ export const draculaTheme: Theme = {
   panel: "#343746",
   block: "#3b3f52",
   input: "#464b63",
+  heading: "#ff79c6",
   text: "#f8f8f2",
   dim: "#bdc3d1",
   faint: "#6272a4",
@@ -206,6 +219,7 @@ export const catppuccinTheme: Theme = {
   panel: "#181825",
   block: "#313244",
   input: "#45475a",
+  heading: "#f5c2e7",
   text: "#cdd6f4",
   dim: "#a6adc8",
   faint: "#6c7086",
@@ -226,6 +240,7 @@ export const solarizedDarkTheme: Theme = {
   panel: "#073642",
   block: "#0b3f4d",
   input: "#12505f",
+  heading: "#d33682",
   text: "#93a1a1",
   dim: "#839496",
   faint: "#586e75",
@@ -247,6 +262,7 @@ export const catppuccinLatteTheme: Theme = {
   panel: "#e6e9ef",
   block: "#dce0e8",
   input: "#d3d8e3",
+  heading: "#ea76cb",
   text: "#4c4f69",
   dim: "#5c5f77",
   faint: "#8c8fa1",
@@ -268,6 +284,7 @@ export const githubLightTheme: Theme = {
   panel: "#f6f8fa",
   block: "#eaeef2",
   input: "#e2e6ea",
+  heading: "#bf3989",
   text: "#1f2328",
   dim: "#59636e",
   faint: "#818b98",
@@ -288,6 +305,7 @@ export const solarizedLightTheme: Theme = {
   panel: "#eee8d5",
   block: "#f4eeda",
   input: "#ede4cc",
+  heading: "#d33682",
   text: "#586e75",
   dim: "#657b83",
   faint: "#93a1a1",
@@ -316,6 +334,7 @@ export const monoTheme: Theme = {
   panel: "#161616",
   block: "#1f1f1f",
   input: "#2a2a2a",
+  heading: "#e0e0e0",
   text: "#e8e8e8",
   dim: "#b0b0b0",
   faint: "#767676",
@@ -340,6 +359,7 @@ export const contrastTheme: Theme = {
   panel: "#101014",
   block: "#1a1a20",
   input: "#26262f",
+  heading: "#ff79c6",
   text: "#ffffff",
   dim: "#dcdce4",
   faint: "#a8a8b4",
@@ -447,6 +467,8 @@ export type Styles = {
   rule: string;
   /** The build/plan word on the mode row. */
   mode: string;
+  /** The name of a group of rows in a list, e.g. a date in the session picker. */
+  heading: string;
   tabActive: string;
   tabInactive: string;
   tabHover: string;
@@ -492,6 +514,7 @@ export function buildStyles(theme: Theme): Styles {
     underline: style(fg(theme.text), UNDERLINE),
     emphasis: style(fg(theme.highlight), BOLD),
     rule: style(fg(theme.rule)),
+    heading: style(fg(theme.heading), BOLD),
     mode: style(fg(theme.mode)),
     tabActive: style(bg(theme.accent), fg(theme.bg), BOLD),
     tabInactive: style(bg(theme.panel), fg(theme.dim)),

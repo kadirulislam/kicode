@@ -798,10 +798,7 @@ function renderBody(
     const ask = renderAsk(state, styles, height, width, margin);
     return { lines: plain(ask.lines, theme.bg), hits: ask.hits };
   }
-  if (state.picker) {
-    const picker = renderPicker(state.picker, styles, height, margin, usable);
-    return { lines: plain(picker.lines, theme.bg), hits: picker.hits };
-  }
+  if (state.picker) return renderPicker(state.picker, styles, theme, height, margin, usable);
   if (state.menu) return renderMenu(state.menu, styles, theme, height, usable, margin);
   if (state.entries.length === 0) return { lines: plain(renderHome(state, styles, theme, height, usable, margin), theme.bg), hits: [] };
 
@@ -1280,7 +1277,7 @@ function renderMenu(
         listIndex.push(null);
       }
       headingRow = list.length;
-      list.push([span(row.group, styles.faint)]);
+      list.push([span(row.group, styles.heading)]);
       listIndex.push(null);
       group = row.group;
     }
@@ -1302,20 +1299,23 @@ function renderMenu(
   const first = firstRowFor(list.length, cursorRow, cursorHeading, Math.min(room, list.length));
   const visible = list.slice(first, first + room);
 
+  // A blank row of the band's own fill, not an empty one: the surface is a solid
+  // rectangle, and a gap that let the page through would break it into two.
+  const blank = (): Span[] => [span(indent), span(" ".repeat(width))];
   const band: Span[][] = [];
-  band.push([]);
+  band.push(blank());
   band.push([span(indent), ...menuTitleRow(menu.title, width, styles)]);
   band.push([span(indent), ...searchRow(menu.query, width, styles)]);
-  band.push([]);
+  band.push(blank());
   if (list.length === 0) band.push([span(indent), span("nothing matches", styles.faint), span(` ${menu.query}`, styles.dim)]);
   const bandTop = band.length;
   const hits: Hit[] = [];
   for (const [offset, row] of visible.entries()) {
-    band.push([span(indent), ...row]);
+    band.push(row.length === 0 ? blank() : [span(indent), ...row]);
     const index = listIndex[first + offset];
     if (index !== null && index !== undefined) hits.push({ kind: "menu", row: bandTop + offset + 1, index });
   }
-  band.push([]);
+  band.push(blank());
   if (showDescription)  band.push([span(indent), ...truncateSpans([span(menu.description ?? "", styles.faint)], width)]);
   band.push([span(indent), ...hintLine(menu.footer, styles)]);
 
@@ -1365,69 +1365,77 @@ function menuRow(row: MenuRow, isSelected: boolean, inner: number, styles: Style
   return padSpans([...label, span(" ".repeat(gap), fill), span(row.trailing, isSelected ? styles.paletteSelected : styles.faint)], inner);
 }
 
-/** The frame a picker is drawn inside, and the glyphs it is drawn with. */
-const PANEL_MAX = 68;
+/** How wide a card may get, and how narrow it may be before a flat list wins. */
+const PANEL_MAX = 84;
 const PANEL_MIN = 24;
+/** The air inside a card's own edge, on both sides of every row. */
+const CARD_PAD = "  ";
 
 /**
- * A list to choose from, in a panel of its own.
+ * A list to choose from, in a card of its own.
  *
  * It replaces the transcript rather than sitting above the prompt, because
- * choosing is then the only thing left to do. The panel carries its own search
- * field and its own hints: a list longer than a screen is only usable if it can
- * be narrowed by typing, and the keys it answers to belong next to it.
+ * choosing is then the only thing left to do. The card carries its own search
+ * field, its own grouped rows and its own hints: a list longer than a screen is
+ * only usable if it can be narrowed by typing, and the keys it answers to belong
+ * next to it.
+ *
+ * It is one filled surface, with no frame around it — the reader's eye is
+ * already being asked to follow a column of rows, and border glyphs are one more
+ * thing drawn over them. What says "card" is the fill, the air inside its own
+ * edges, and the page showing through beside it.
  */
 function renderPicker(
   picker: Picker,
   styles: Styles,
+  theme: Theme,
   height: number,
   margin: number,
   usable: number,
-): { lines: Span[][]; hits: Hit[] } {
+): Panel {
   const isTop = picker.position === "top" || picker.title.startsWith("Tab:");
-  const width = clamp(usable - 2 * Math.max(margin, 1), PANEL_MIN, isTop ? 64 : PANEL_MAX);
+  // Almost the whole width: a list of sessions or models is read down the
+  // screen, and a card that leaves half of it empty is a card nobody asked for.
+  const width = clamp(usable - 2 * Math.max(margin, 1) - 4, PANEL_MIN, isTop ? 64 : PANEL_MAX);
   const left = isTop
     ? Math.min(margin + 2, Math.max(usable - width, 0))
     : clamp(Math.floor((usable - width) / 2), 0, Math.max(usable - width, 0));
 
-  // Inside the frame: a title row, a search row, the tabs when there are any, a
-  // blank, the hints and the bottom border. What is left is the list — and if
-  // that leaves nothing to list, the panel is not worth drawing and a flat list
-  // says more.
+  // Inside the card: a row of air at its top edge, the title, the search field,
+  // the tabs when there are any, a blank, the list, and the row of air under it.
+  // What is left is the list — and if that leaves nothing to list, the card is
+  // not worth drawing and a flat list says more.
   const hasSearch = picker.searchable !== false;
   const room = height - 5 - (hasSearch ? 1 : 0) - (picker.tabs ? 1 : 0);
-  if (room < 1 || width < PANEL_MIN) return renderFlatPicker(picker, styles, height, margin);
+  if (room < 1 || width < PANEL_MIN) {
+    const flat = renderFlatPicker(picker, styles, height, margin);
+    return { lines: plain(flat.lines, theme.bg), hits: flat.hits };
+  }
 
-  const inside = width - 2;
-  const out: Span[][] = [];
-  const put = (spans: readonly Span[]): void => {
-    out.push([span(" ".repeat(left)), ...spans]);
+  const inner = Math.max(width - CARD_PAD.length * 2, 8);
+  const card: Span[][] = [];
+  // The page beside the card, so the fill starts where the card does rather
+  // than running to the terminal's edge.
+  const side = span(" ".repeat(left), bg(theme.bg));
+  /** A row of the card: the air inside its edge, the content, the air again. */
+  const row = (content: readonly Span[]): void => {
+    card.push([side, span(CARD_PAD), ...padSpans(content, inner), span(CARD_PAD)]);
   };
-  const row = (content: Span[]): void => put([span("│", styles.faint), ...content, span("│", styles.faint)]);
 
   const hits: Hit[] = [];
-  put([span(`┌${"─".repeat(inside)}┐`, styles.faint)]);
-  const titleRow = out.length;
-  row(panelTitle(picker.title, CLOSE_CHIP, inside, styles));
-  hits.push(...closeChipHits(titleRow, out[titleRow] ?? [], 0));
-  if (hasSearch) row(searchRow(picker.query, inside, styles, picker.placeholder ?? "Search"));
+  row([]);
+  const titleRow = card.length - 1;
+  row(panelTitle(picker.title, CLOSE_CHIP, inner, styles));
+  // The chip is found by walking the row it was drawn in — the row's own spans,
+  // coordinates and all — so a target cannot drift from the glyph.
+  hits.push(...closeChipHits(titleRow, card[titleRow] ?? [], 0));
+  if (hasSearch) row(searchRow(picker.query, inner, styles, picker.placeholder ?? "Search"));
   if (picker.tabs) {
-    const tabRowIdx = out.length;
-    row(padSpans(tabSpans(picker.tabs, styles), inside));
-    let col = left + 2;
-    picker.tabs.labels.forEach((label, tabIdx) => {
-      if (tabIdx > 0) col += 3;
-      hits.push({
-        kind: "picker_tab",
-        row: tabRowIdx,
-        index: tabIdx,
-        colStart: col,
-        colEnd: col + label.length,
-      });
-      col += label.length;
-    });
+    const tabRowIdx = card.length;
+    row(tabSpans(picker.tabs, styles));
+    hits.push(...tabHits(tabRowIdx, card[tabRowIdx] ?? [], 0, picker.tabs.labels));
   }
-  put([span("│", styles.faint), span(" ".repeat(inside)), span("│", styles.faint)]);
+  row([]);
 
   const rows: Span[][] = [];
   /** The item each list line belongs to, or null for a heading or a gap. */
@@ -1445,12 +1453,15 @@ function renderPicker(
         rows.push([]);
         rowsIndex.push(null);
       }
-      rows.push([span(` ${item.group}`, styles.faint)]);
+      // The heading wears the theme's heading hue: it names the rows under it
+      // rather than being one of them, and the accent is the colour of the row
+      // the keys act on.
+      rows.push([span(` ${item.group}`, styles.heading)]);
       rowsIndex.push(null);
       heading = rows.length - 1;
     }
     if (index === selected) cursorRow = rows.length;
-    rows.push(itemRow(item, index === selected, inside, styles));
+    rows.push(itemRow(item, index === selected, inner, styles));
     rowsIndex.push(index);
   }
 
@@ -1467,9 +1478,9 @@ function renderPicker(
       }
     }
   }
-  const listTop = out.length;
+  const listTop = card.length;
   for (const [offset, line] of window.entries()) {
-    row(padSpans(line, inside));
+    row(line);
     const index = rowsIndex[first + offset];
     if (index !== null && index !== undefined) {
       hits.push({
@@ -1477,7 +1488,7 @@ function renderPicker(
         row: listTop + offset,
         index,
         colStart: left + 1,
-        colEnd: left + 1 + inside,
+        colEnd: left + width,
       });
     }
   }
@@ -1486,52 +1497,58 @@ function renderPicker(
   // mistaken for the whole of it.
   if (first + visible < rows.length) {
     const hidden = rows.length - (first + visible);
-    pushHint(out, left, `↓ ${hidden} more`, inside, styles);
+    row([span(" ", styles.hint), span(`↓ ${hidden} more`, styles.faint)]);
   } else if (picker.hints && picker.hints.length > 0) {
-    row(padSpans(hintPairs(picker.hints, styles), inside));
+    row([span(" ", styles.hint), ...hintRow(picker.hints, inner - 1, styles)]);
+  } else {
+    row([]);
   }
+  row([]);
 
-  put([span(`└${"─".repeat(inside)}┘`, styles.faint)]);
-
-  // The panel sits at the foot of the page, directly above the rule and the
+  // The card sits at the foot of the page, directly above the rule and the
   // prompt: a picker is answered with the keyboard while the eye is already
   // down by the input, so the choice belongs there rather than in the middle
   // of a transcript the user is not looking at.
-  const topPad = isTop ? 0 : Math.max(height - out.length, 0);
-  const filled: Span[][] = [];
-  for (let i = 0; i < topPad; i++) filled.push([]);
-  for (const line of out) filled.push(line);
-  while (filled.length < height) filled.push([]);
+  const topPad = isTop ? 0 : Math.max(height - card.length, 0);
+  const out: BodyLine[] = [];
+  for (let i = 0; i < topPad; i++) out.push({ spans: [], background: theme.bg });
+  for (const spans of card) out.push({ spans, background: theme.panel });
+  while (out.length < height) out.push({ spans: [], background: theme.bg });
 
   if (topPad > 0) {
     for (const hit of hits) {
       hit.row += topPad;
     }
   }
-  return { lines: filled, hits };
+  return { lines: out.slice(0, height), hits };
 }
 
-/** One row of the list: the cursor, a dot for the current one, then the notes. */
+/**
+ * One row of the list: a dot for the one in use, then the label and the notes.
+ *
+ * There is no cursor glyph: the row the keys are on is the row that is filled,
+ * and a bar beside a filled row is the same statement made twice.
+ */
 function itemRow(item: PickItem, isSelected: boolean, inside: number, styles: Styles): Span[] {
-  const body = item.disabled ? styles.faint : isSelected ? styles.accentBold : styles.text;
-  const cursor = span(isSelected ? "▌" : " ", isSelected ? styles.accent : styles.text);
-  const bullet = span(item.current ? "● " : "  ", isSelected ? styles.accent : styles.faint);
+  const body = item.disabled ? styles.faint : isSelected ? styles.paletteSelected : styles.text;
+  const lead = span("  ", isSelected ? styles.paletteSelected : undefined);
+  const bullet = span(item.current ? "● " : "  ", isSelected ? styles.paletteSelected : styles.faint);
 
   // If item has a description and no trailing note (like skills or commands)
   if (item.description && !item.trailing) {
     const nameWidth = Math.min(Math.max(textWidth(item.label), 24), 30);
-    const nameSpan = truncateSpans([span(item.label.padEnd(nameWidth + 2), isSelected ? styles.accentBold : styles.text)], nameWidth + 2);
-    const descWidth = Math.max(inside - 3 - spansWidth(nameSpan) - 1, 8);
-    const descSpan = truncateSpans([span(item.description, isSelected ? styles.dim : styles.faint)], descWidth);
-    const rowContent = [cursor, bullet, ...nameSpan, ...descSpan];
+    const nameSpan = truncateSpans([span(item.label.padEnd(nameWidth + 2), body)], nameWidth + 2);
+    const descWidth = Math.max(inside - 2 - spansWidth(nameSpan) - 1, 8);
+    const descSpan = truncateSpans([span(item.description, isSelected ? styles.paletteSelected : styles.faint)], descWidth);
+    const rowContent = [lead, bullet, ...nameSpan, ...descSpan];
     return padSpans(truncateSpans(rowContent, inside), inside);
   }
 
   const label: Span[] = [
-    cursor,
+    lead,
     bullet,
     span(item.label, body),
-    ...(item.description ? [span("  "), span(item.description, styles.faint)] : []),
+    ...(item.description ? [span("  "), span(item.description, isSelected ? styles.paletteSelected : styles.faint)] : []),
   ];
 
   if (!item.trailing) return padSpans(truncateSpans(label, inside), inside);
@@ -1543,15 +1560,19 @@ function itemRow(item: PickItem, isSelected: boolean, inside: number, styles: St
     : [span(trailingClean, styles.faint)];
   const trailingWidth = textWidth(trailingClean);
 
-  // Truncate label so label + gap + trailing never pushes right border
+  // Truncate label so label + gap + trailing never overruns the card's edge.
   const maxLabelWidth = Math.max(inside - trailingWidth - 2, 8);
   const truncatedLabel = truncateSpans(label, maxLabelWidth);
   const gap = Math.max(inside - spansWidth(truncatedLabel) - trailingWidth, 1);
 
-  return padSpans([...truncatedLabel, span(" ".repeat(gap)), ...trailingSpans], inside);
+  return padSpans([
+    ...truncatedLabel,
+    span(" ".repeat(gap), isSelected ? styles.paletteSelected : undefined),
+    ...trailingSpans,
+  ], inside);
 }
 
-/** `Title` left, one key named right, both inside the frame. */
+/** `Title` left, one key named right, both inside the card's edge. */
 function panelTitle(title: string, key: string, inside: number, styles: Styles): Span[] {
   const tail = textWidth(key) + 2;
   const head = truncateSpans([span(` ${title}`, styles.bold)], Math.max(inside - tail - 1, 1));
@@ -1572,14 +1593,41 @@ function searchRow(query: string, inside: number, styles: Styles, placeholder = 
   return padSpans(field, inside);
 }
 
-/** The hints on the panel's last row, which the list gives up its last row for. */
-function pushHint(out: Span[][], left: number, text: string, inside: number, styles: Styles): void {
-  out.push([
-    span(" ".repeat(left)),
-    span("│", styles.faint),
-    ...padSpans([span(" ", styles.hint), span(text, styles.faint)], inside),
-    span("│", styles.faint),
-  ]);
+/**
+ * A card's own keys.
+ *
+ * The pairs run left to right, except the last one, which is pinned to the
+ * right edge when there is room for it: a card's footer then has a beginning and
+ * an end rather than being one run of keys that happens to stop early.
+ */
+function hintRow(pairs: readonly (readonly [string, string])[], inner: number, styles: Styles): Span[] {
+  const all = hintPairs(pairs, styles);
+  if (pairs.length < 2) return padSpans(all, inner);
+
+  const tail = hintPairs([pairs[pairs.length - 1]!], styles);
+  const head = hintPairs(pairs.slice(0, -1), styles);
+  const gap = inner - spansWidth(head) - spansWidth(tail);
+  if (gap < 4) return padSpans(all, inner);
+  return padSpans([...head, span(" ".repeat(gap)), ...tail], inner);
+}
+
+/**
+ * One click target per tab label, found by walking the row they were drawn in.
+ *
+ * The same trick as the close chip's: the columns come off the finished row, so
+ * the targets cannot drift from the glyphs however the row was padded.
+ */
+function tabHits(row: number, spans: readonly Span[], origin: number, labels: readonly string[]): Hit[] {
+  const hits: Hit[] = [];
+  let column = origin;
+  for (const item of spans) {
+    const index = item.text ? labels.indexOf(item.text) : -1;
+    if (index >= 0) {
+      hits.push({ kind: "picker_tab", row, index, colStart: column + 1, colEnd: column + textWidth(item.text) });
+    }
+    column += textWidth(item.text);
+  }
+  return hits;
 }
 
 /**

@@ -2783,6 +2783,29 @@ class TuiApp {
       "Sessions",
       others.map((session) => this.sessionRow(session)),
       (id) => this.switchSession(id),
+      [
+        {
+          hint: ["ctrl+d", "delete"],
+          key: "d",
+          // Deleting takes the row out of the list rather than closing it: the
+          // search that found the session, and the cursor's place among the
+          // rest, are both where the work is — and the list is rebuilt from what
+          // is left, so the row cannot be deleted twice.
+          close: false,
+          run: async (item) => {
+            if (!item) return;
+            await this.deleteSession(item.value);
+            const left = (this.picker?.all ?? []).filter((row) => row.value !== item.value);
+            if (left.length === 0) {
+              this.picker = null;
+              this.draw();
+              return;
+            }
+            this.replacePickerItems(left);
+            this.draw();
+          },
+        },
+      ],
     );
   }
 

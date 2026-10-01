@@ -1,9 +1,9 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 975 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 978 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~465 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~467 KB) via `npm run build`
 
 ---
 
@@ -27,6 +27,13 @@
 - **Every answer on a card is a chip**: `[y] yes · [a] always · [n] no` on a permission prompt, `[r] retry · [m] choose model · [×] dismiss` on a failed turn. A click names the key and the same handler a keypress reaches answers it, so a mouse answer cannot drift from a typed one — `[m]` still opens the model picker with the failed turn set aside.
 - **`esc` is drawn as a clickable `[×]` everywhere it is offered**: the session footer's hints, a picker's title row, a menu's title and footer, the clipboard menu, and a card's own decision row. Each target is found by walking the row the chip was drawn in, so it cannot drift from the glyph.
 - **While a card is up it is the only thing clickable** (plus the footer, whose `[×]` is the permission card's way out) — and two bugs were fixed on the way: a multi-line gateway message printed as one run-on row on the recovery card, and the `[+]` attach hit box sat one column left of its glyph.
+
+### 0g. The List Cards Are Filled Surfaces, With Headings of Their Own (ADR-022)
+- **The picker is no longer a frame.** `/sessions`, `/models`, `/skills` and the prompt-input cards are one filled surface with no border glyphs, as wide as the screen allows (up to 84 columns, was 68) — the fill, not a `┌─┐` outline, is what says where the card is. The settings/connect band was already built that way (ADR-017); now the two cards are the same material, and both are opaque where a blank row used to let the page through.
+- **Group headings have a hue of their own** — a new `heading` theme slot, in every palette's own pink/purple family (kicode magenta `#f472b6`), because a heading names the rows under it rather than being one of them, and the accent belongs to the row the keys act on.
+- **The row under the cursor is filled, with no cursor glyph** — a fill and a bar beside it say the same thing twice — and the row's text switches to the fill's foreground. The dot for the session in use stays.
+- **A card's footer has two ends**: the hint pairs run from the left except the last, which is pinned to the card's right edge. The sessions card now names `ctrl+d delete`, which works on the row under the cursor and leaves the card up with one row fewer.
+- **The fade was checked and is unchanged** (ADR-017): the conversation behind a picker or a menu is dropped to the faint style on the page background, and the chrome (tab bar, state row, footer) keeps its colour.
 
 ### 0f. The Input Box Is Fill Only, on a Lighter Surface (ADR-021)
 - **The box and its state row wear a new theme slot, `input`**, a step off the user-turn fill — lighter on every dark theme (kicode `#1d1e2e` → `#2b2f47`), darker on the light ones — so the typing area reads as the surface in front instead of a shade off the transcript, and it follows whichever theme is in use.

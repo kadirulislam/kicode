@@ -662,6 +662,45 @@ describe("runTui", () => {
     expect(app.built.at(-1)).toEqual(other);
   });
 
+  it("names the card's own keys, and deletes the session under the cursor with ctrl+d", async () => {
+    const deleted: string[] = [];
+    const app = harness({
+      listSessions: async () => [
+        { id: "session-1", title: "current work" },
+        { id: "session-2", title: "earlier work" },
+        { id: "session-3", title: "oldest work" },
+      ],
+      deleteSession: async (id) => {
+        deleted.push(id);
+        return true;
+      },
+    });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("/sessions\r");
+    await tick(40);
+    // The card says what its own keys are, on its own last row.
+    expect(app.lastFrame()).toContain("Sessions");
+    expect(app.lastFrame()).toContain("ctrl+d delete");
+
+    // Move onto the second row, then delete it: the key acts on the row under
+    // the cursor, not on the first one. The card stays up, one row shorter,
+    // with the search and the cursor's place intact.
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\u0004");
+    await tick(60);
+
+    expect(deleted).toEqual(["session-3"]);
+    expect(app.lastFrame()).toContain("current work");
+    expect(app.lastFrame()).toContain("earlier work");
+    expect(app.lastFrame()).not.toContain("oldest work");
+    expect(app.lastFrame()).toContain("ctrl+d delete");
+
+    await finish(app, done);
+  });
+
   it("opens the command palette on a slash and filters as you type", async () => {
     const app = harness();
     const done = runTui(app.options);
@@ -1323,7 +1362,9 @@ describe("the slash commands", () => {
     // Move onto m2 before favouriting it.
     app.input.write("\u001b[B");
     await tick(20);
-    expect(app.lastFrame()).toContain("▌  m2");
+    // The cursor is on m2: the row the keys act on is the row that is filled.
+    const fill = buildStyles(themeByName(DEFAULT_THEME)).paletteSelected;
+    expect(painted(app)).toContain(`${fill}m2`);
     expect(app.lastFrame()).not.toContain("Favorites");
 
     app.input.write("\u0006");
@@ -1332,7 +1373,7 @@ describe("the slash commands", () => {
     // The group appears in the open list, not only on the next open…
     expect(app.lastFrame()).toContain("Favorites");
     // …and the cursor followed the row that moved rather than an index.
-    expect(app.lastFrame()).toContain("▌  m2");
+    expect(painted(app)).toContain(`${fill}m2`);
     expect(saved.at(-1)).toEqual([{ baseUrl: "https://api.example/v1", model: "m2" }]);
 
     await finish(app, done);

@@ -497,12 +497,16 @@ describe("the picker", () => {
     expect(text).toContain("api.example.com");
   });
 
-  it("draws the row under the cursor in the panel, not the list", () => {
-    const { plain } = draw({ picker });
-    const cursor = plain.find((line) => line.includes("glm-5.3")) ?? "";
+  it("fills the row under the cursor, rather than marking it with a bar", () => {
+    const { frame, plain } = draw({ picker });
+    const row = frame.lines.find((line) => strip(line).includes("glm-5.3")) ?? "";
 
-    expect(cursor).toContain("▌");
-    expect(cursor).toContain("paid");
+    // The row the keys are on is the row that is filled, edge to edge.
+    expect(row).toContain(styles.paletteSelected);
+    expect(plain.find((line) => line.includes("glm-5.3"))).toContain("paid");
+    // And there is no cursor glyph anywhere on the card — the search field's
+    // own block is a different thing.
+    expect(plain.join("\n")).not.toContain("▌  ");
   });
 
   it("pins a trailing note to the right, so a column of them lines up", () => {
@@ -520,6 +524,36 @@ describe("the picker", () => {
     }).plain.join("\n");
 
     expect(text).toContain("● glm-5.3");
+  });
+
+  it("names a group of rows in the heading colour, not the accent", () => {
+    const { frame } = draw({ picker });
+    const heading = frame.lines.find((line) => strip(line).includes("api.example.com")) ?? "";
+
+    // A heading names the rows under it rather than being one of them, so it
+    // gets a hue the accent does not use — the accent is the row the keys act on.
+    expect(heading).toContain(styles.heading);
+    expect(heading).not.toContain(styles.accentBold);
+  });
+
+  it("pins the last of its own keys to the card's right edge", () => {
+    const hints: [string, string][] = [
+      ["ctrl+d", "delete"],
+      ["ctrl+r", "rename"],
+      ["ctrl+a", "current directory"],
+    ];
+    const { plain } = draw({ picker: { ...picker, hints } });
+    const row = plain.find((line) => line.includes("ctrl+d")) ?? "";
+
+    // The first two run left as one group, the last sits at the far edge: a
+    // footer then has a beginning and an end rather than one run of keys that
+    // happens to stop early.
+    expect(row.indexOf("ctrl+d")).toBeLessThan(row.indexOf("ctrl+r"));
+    expect(row.indexOf("current directory")).toBeGreaterThan(row.indexOf("ctrl+r") + 20);
+    // The right-hand key ends at the card's own inner edge: the title row's
+    // close box ends two cells short of it, by its own trailing air.
+    const title = plain.find((line) => line.includes("Select model")) ?? "";
+    expect(row.trimEnd()).toHaveLength(title.trimEnd().length + 2);
   });
 
   it("carries a search field", () => {
@@ -593,13 +627,17 @@ describe("the picker", () => {
     expect(draw({ picker: { ...picker, query: "zzz", items: [] } }).plain.join("\n")).toContain("nothing matches");
   });
 
-  it("is drawn inside a frame, inset from the edges", () => {
-    const { plain } = draw({ picker });
-    const rows = plain.filter((line) => line.includes("│") || line.includes("┌") || line.includes("└"));
+  it("is one filled surface, inset from the edges, with no frame around it", () => {
+    const { frame, plain } = draw({ picker });
 
-    expect(rows.length).toBeGreaterThan(4);
-    expect(plain.join("\n")).toContain("┌");
-    expect(plain.join("\n")).toContain("└");
+    // The tab bar is on the same fill, so the card is what comes after it.
+    const card = frame.lines.slice(1).filter((line) => line.includes(bg(theme.panel)));
+    expect(card.length).toBeGreaterThan(4);
+    // No border glyphs: the fill is what says where the card is.
+    for (const glyph of ["┌", "┐", "└", "┘", "│"]) expect(plain.join("\n")).not.toContain(glyph);
+    // And it starts inside the terminal's edge rather than against it.
+    const title = plain.findIndex((line) => line.includes("Select model"));
+    expect(plain[title]?.startsWith("  ")).toBe(true);
   });
 
   it("replaces the transcript while something is being chosen", () => {
@@ -633,15 +671,14 @@ describe("the picker", () => {
       value: `m${index}`,
       ...(index === 0 ? { group: "api.example.com" } : {}),
     }));
-    const { plain } = draw(
+    const { frame } = draw(
       { picker: { title: "Select model", query: "", items, selected: 25 } },
       { cols: 80, rows: 12 },
     );
-    // The item rows carry the cursor and the current-dot; the search field's
-    // own block is a different row.
-    const cursor = plain.find((line) => line.includes("▌  ")) ?? "";
+    // The row the keys are on is the one that is filled.
+    const cursor = frame.lines.find((line) => line.includes(styles.paletteSelected)) ?? "";
 
-    expect(cursor).toContain("m25");
+    expect(strip(cursor)).toContain("m25");
   });
 
   it("says how many rows the window left out", () => {
@@ -683,18 +720,19 @@ describe("the picker", () => {
   });
 
   it("sits at the foot of the page, just above the input area", () => {
-    const { plain } = draw({
+    const { frame, plain } = draw({
       entries: conversation,
       picker: { ...picker, items: picker.items.slice(0, 1), selected: 0 },
     });
 
-    // The card's bottom border is drawn, and the rule that opens the input area
-    // is the next row after it — a picker is answered from the keyboard, so it
-    // belongs where the eye already is. (The card's lower edge is the `└` row.)
-    const bottomEdge = plain.findIndex((line) => line.includes("└"));
+    // The card's last row is the last row of the page, and the rule that opens
+    // the input area is the next row after it — a picker is answered from the
+    // keyboard, so it belongs where the eye already is.
     const rule = plain.findIndex((line) => /^─{20,}$/.test(line));
+    const page = frame.lines.slice(0, rule);
+    const bottomEdge = page.findLastIndex((line) => line.includes(bg(theme.panel)));
     expect(bottomEdge).toBeGreaterThan(0);
-    expect(rule - bottomEdge).toBe(1);
+    expect(bottomEdge).toBe(page.length - 1);
   });
 
   it("leaves the conversation on screen behind it, faded", () => {
@@ -720,11 +758,11 @@ describe("the picker", () => {
     const title = frame.lines.filter((line) => strip(line).includes("Select model"));
     expect(title.length).toBe(1);
     expect(title[0]).toContain(styles.bold);
-    // The selected row is still drawn in the accent — the fade is a single
-    // faint style, so the accent appearing at all proves the card is not it.
+    // The selected row still wears the accent fill — the fade is a single faint
+    // style, so the fill appearing at all proves the card is not it.
     const rows = frame.lines.filter((line) => strip(line).includes("glm-5.3"));
     expect(rows.length).toBe(1);
-    expect(rows[0]).toContain(styles.accentBold);
+    expect(rows[0]).toContain(styles.paletteSelected);
     expect(plain.some((line) => line.includes("glm-5.3"))).toBe(true);
   });
 
