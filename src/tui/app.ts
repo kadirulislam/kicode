@@ -86,6 +86,7 @@ import {
 } from "../mentions";
 import type { RouteHealthLine } from "../routes/health";
 import { applyEvent, entriesFromHistory, entriesToText, summarizeArgs, type Entry, type Tone } from "./transcript";
+import { readAttachedFile, docBlock, type AttachedDoc } from "./attach";
 
 /**
  * The TUI runtime.
@@ -479,6 +480,8 @@ class TuiApp {
   private favorites: ModelRef[] = [];
   /** Images pasted for the next turn, sent with it and then forgotten. */
   private attached: PastedImage[] = [];
+  /** Documents attached with `/attach`, read into the next turn as context. */
+  private attachedDocs: AttachedDoc[] = [];
   private cwd: string;
   private variant = DEFAULT_VARIANT;
   /** Shift+Tab switches it; the agent is rebuilt because the mode is read then. */
@@ -920,10 +923,19 @@ class TuiApp {
           this.editor.end();
           break;
         case "backspace":
-          if ((this.editor.text.length === 0 || this.editor.cursor === 0) && this.attached.length > 0) {
-            this.attached.pop();
-            this.notice = null;
-            break;
+          // Backspace on an empty prompt detaches: images first, then the
+          // documents — newest attachment goes first, whichever kind it is.
+          if (this.editor.text.length === 0 || this.editor.cursor === 0) {
+            if (this.attached.length > 0) {
+              this.attached.pop();
+              this.notice = null;
+              break;
+            }
+            if (this.attachedDocs.length > 0) {
+              const removed = this.attachedDocs.pop();
+              this.notice = removed ? span(`detached ${removed.name}`, this.styles.dim) : null;
+              break;
+            }
           }
           this.editor.backspace();
           break;
@@ -1429,12 +1441,15 @@ class TuiApp {
 
       const images = this.attached;
       this.attached = [];
+      const queuedDocs = this.attachedDocs;
+      this.attachedDocs = [];
       let expanded = cleanPrompt;
       if (cleanPrompt.includes("@")) {
         try {
           expanded = (await expandMentions(cleanPrompt, await this.ensureMentionIndex())).text;
         } catch {}
       }
+      if (queuedDocs.length > 0) expanded = [expanded, ...queuedDocs.map(docBlock)].join("\n\n");
 
       if (isInsert) {
         this.queuedPrompts.unshift({ prompt: expanded, images });
@@ -1472,6 +1487,11 @@ class TuiApp {
 
     const images = this.attached;
     this.attached = [];
+    // Documents attached with `/attach` travel as context blocks beside the
+    // words — the same shape an `@file` mention produces, so every model can
+    // read them. They are consumed here: one attachment, one message.
+    const docs = this.attachedDocs;
+    this.attachedDocs = [];
     // `@` mentions expand into their context here: the transcript keeps the
     // words that were typed, while the model receives those words plus the
     // files, skills and memories they named.
@@ -1483,7 +1503,13 @@ class TuiApp {
         // A directory that vanished mid-turn must not eat the prompt.
       }
     }
-    this.entries.push({ kind: "user", text: prompt, ...(images.length > 0 ? { images: images.length } : {}) });
+    if (docs.length > 0) expanded = [expanded, ...docs.map(docBlock)].join("\n\n");
+    this.entries.push({
+      kind: "user",
+      text: prompt,
+      ...(images.length > 0 ? { images: images.length } : {}),
+      ...(docs.length > 0 ? { docs: docs.map((doc) => doc.name) } : {}),
+    });
     this.scroll = 0;
     // Not awaited: a turn is answered *through* this loop — an approval, a
     // question — so holding the loop for its duration would be a deadlock, and
@@ -1543,6 +1569,41 @@ class TuiApp {
     const line = `attached image ${this.attached.length} · ${Math.max(Math.round(image.bytes / 1024), 1)} KB · sent with the next prompt`;
     // Set notice without polluting the chat conversation transcript
     this.notice = span(line, this.styles.dim);
+    this.draw();
+  }
+
+  /**
+   * `/attach <path>` — a file that rides the next message.
+   *
+   * An image joins `attached` (the paste path), everything else is read now and
+   * held as a document. Reading at attach time rather than send time is the
+   * point: a bad path is a message on screen while the user can still retype
+   * it, not an error buried in the middle of a running turn.
+   */
+  private async attachFile(argument: string): Promise<void> {
+    const filePath = argument.trim().replace(/^["']|["']$/g, "");
+    if (!filePath) {
+      this.note("usage: /attach <file path> — images ride the message; documents become its context");
+      this.draw();
+      return;
+    }
+
+    try {
+      const file = await readAttachedFile(filePath, this.cwd);
+      if (file.kind === "image") {
+        this.attached = [...this.attached, file.image];
+        this.notice = span(
+          `attached image ${this.attached.length} · ${Math.max(Math.round(file.image.bytes / 1024), 1)} KB · sent with the next prompt`,
+          this.styles.dim,
+        );
+      } else {
+        this.attachedDocs = [...this.attachedDocs, file.doc];
+        const size = `${Math.max(Math.round(file.doc.body.length / 1024), 1)} KB${file.doc.truncated ? " (truncated)" : ""}`;
+        this.notice = span(`attached ${file.doc.name} (${size}) · sent with the next prompt`, this.styles.dim);
+      }
+    } catch (error) {
+      this.note(`could not attach: ${(error as Error).message}`, "error");
+    }
     this.draw();
   }
 
@@ -1625,6 +1686,7 @@ class TuiApp {
       for await (const event of this.agent.send(prompt, images)) {
         applyEvent(this.entries, event, { at: Date.now(), turn });
         if (event.type === "tool-start") this.setBusy(`${event.name}…`);
+        else if (event.type === "route-wait") this.setBusy(`rate-limited on ${event.from} — waiting ${Math.ceil(event.ms / 1000)}s…`);
         else if (event.type === "tool-result" || event.type === "text") this.setBusy("thinking…");
         this.scheduleDraw();
       }
@@ -1896,6 +1958,9 @@ class TuiApp {
         break;
       case "paste":
         await this.pasteFromClipboard();
+        break;
+      case "attach":
+        await this.attachFile(argument);
         break;
       case "themes":
         await this.chooseTheme(argument);
@@ -4125,6 +4190,13 @@ class TuiApp {
           description: `Detach ${this.attached.length} image(s)`,
         });
       }
+      if (this.attachedDocs.length > 0) {
+        items.push({
+          label: "Remove Attached Documents",
+          value: "clear_docs",
+          description: `Detach ${this.attachedDocs.length} document(s)`,
+        });
+      }
       items.push({
         label: "Copy Entire Conversation",
         value: "copy_transcript",
@@ -4195,6 +4267,11 @@ class TuiApp {
       case "clear_images":
         this.attached = [];
         this.notice = span("removed attached images", this.styles.dim);
+        this.draw();
+        break;
+      case "clear_docs":
+        this.attachedDocs = [];
+        this.notice = span("removed attached documents", this.styles.dim);
         this.draw();
         break;
       case "copy_transcript":
@@ -4561,6 +4638,7 @@ class TuiApp {
       entries: this.entries,
       editor: this.editor,
       attachedImages: this.attached.length,
+      attachedDocs: this.attachedDocs.map((doc) => doc.name),
       busy: this.busy,
       spinnerFrame: this.spinnerFrame,
       model: this.model,

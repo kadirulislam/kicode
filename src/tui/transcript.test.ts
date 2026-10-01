@@ -95,6 +95,31 @@ describe("the model's reasoning", () => {
   });
 });
 
+describe("the router's own lines", () => {
+  it("says when the answer moved to another route", () => {
+    const entries = feed([{ type: "route", from: "a", to: "b", reason: "rate-limited (HTTP 429)" }]);
+    expect(text(entries)).toContain("switched to b");
+    expect(text(entries)).toContain("rate-limited");
+  });
+
+  it("leaves a rate-limit pause to the busy row rather than the transcript", () => {
+    // A wait is seconds, not history: an entry per pause would bury the
+    // conversation in lines about the weather at the gateway.
+    const entries = feed([{ type: "route-wait", ms: 5_000, from: "a", reason: "rate-limited (HTTP 429)" }]);
+    expect(entries).toEqual([]);
+  });
+});
+
+describe("attached documents", () => {
+  it("marks a request with the files it carried", () => {
+    const entries: Entry[] = [{ kind: "user", text: "summarise this", docs: ["notes.md", "spec.txt"] }];
+    const spans = entrySpans(entries[0]!, styles, view).map((item) => item.text).join("");
+    expect(spans).toContain("[notes.md]");
+    expect(spans).toContain("[spec.txt]");
+    expect(spans).toContain("summarise this");
+  });
+});
+
 describe("lastThoughtFragment", () => {
   it("returns the newest sentence", () => {
     expect(lastThoughtFragment("Read the file. Found the bug. Fixing it now.")).toBe("Fixing it now.");

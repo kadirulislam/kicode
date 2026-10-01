@@ -1,15 +1,21 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 913 Tests Passing (47 test suites)  
+**Build Status:** Stable, All 937 Tests Passing (48 test suites, two consecutive green runs)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~449 KB) via `npm run build`
 
 ---
 
 ## 🚀 Key Features Implemented
 
-### 0. Reading-Level Transcript Discipline (ADR-012)
+### 0a. Rate-Limit Recovery & Attachments (ADR-013/014)
+- **429 handling in three layers** (ADR-013): a rate limit pauses before the next route (gateway `Retry-After` honoured to a 60s ceiling, else 1.5s growing per hop) with a live busy-row countdown; an active `:free` model implicitly falls back to the endpoint's other free models discovered from its own `/models` list the first time the chain runs dry (capped at 4 hops, never a paid model, kill switch `"fallbackAuto": false` / `KICODE_FALLBACK_AUTO=off`); and an all-routes-capped turn ends with advice ("wait a bit, or /models") instead of a bare HTTP code.
+- **`/attach <path>` in the prompt** (ADR-014): images ride the existing base64 path (`[Image n]` badges); documents are read at attach time and appended to the next turn as a `Context from attached file "…"` block that works on every model. Badges in the typing area, backspace detaches, right-click menu clears either kind.
+- **Plan-mode false refusals fixed**: the read-only classifier now permits `2>/dev/null`, `2>&1` and `1>/dev/null` — the stderr-quieting idioms models reach for constantly while exploring — while any redirect to a real path stays refused.
+- **Request block chips**: the user message's fill hugs its text (widest row + 2 cells) rather than stretching to the column, so short messages no longer read as a background cut off mid-row.
+
+### 0b. Reading-Level Transcript Discipline (ADR-012)
 - **Accent selection fill** instead of inverse video (`Styles.selection` + parameterized `markCells`) — visible on terminals where `ESC[7m` renders as nothing; the centered permission modal is selectable like every other row. Root-cause fix: `TuiApp.state()` now passes the live selection to the renderer (previously the tested highlight code never ran on screen); pinned by a raw-bytes mouse-drag regression test.
 - **Thinking ticker**: live reasoning renders as one line (`▌ thinking <newest sentence>`, 96-char cap) at low/medium verbosity; full stream only at high.
 - **One-line tool results** at medium verbosity (`first line · N lines`) so a mid-turn result never becomes a wall.

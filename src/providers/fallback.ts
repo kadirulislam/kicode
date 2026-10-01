@@ -29,6 +29,16 @@ import { OpenAIProvider, ProviderError } from "./openai";
  */
 const RETRYABLE_STATUS = new Set([402, 404, 408, 409, 425, 429, 500, 502, 503, 504, 522, 524]);
 
+/**
+ * The pause between a rate limit and the next attempt, when the gateway said
+ * nothing about how long. Grows by one step per hop already tried, so a chain
+ * that is being churned through backs off rather than hammering each route in
+ * turn.
+ */
+const RETRY_PAUSE_MS = 1_500;
+/** The longest wait honoured, whatever the gateway asked for. */
+const RETRY_AFTER_CEILING_MS = 60_000;
+
 /** Whether a failure is worth another route. */
 export function isRetryable(error: unknown): boolean {
   if (!(error instanceof ProviderError)) return false;
@@ -68,14 +78,35 @@ export type FallbackProviderOptions = {
    * memory work with the disk behind a debounce.
    */
   onOutcome?: (route: FallbackRoute, outcome: RouteOutcome) => void;
+  /**
+   * More backup routes, discovered lazily.
+   *
+   * The auto free→free chain is built from the endpoint's own model list, and
+   * asking for that list is a network call nobody wants at startup — most
+   * sessions never hit a 429. It is fetched once, the first time the primary
+   * route fails, and whatever it returns is appended after the routes above.
+   * An error here is swallowed: implicit backups are a courtesy, and a gateway
+   * too unwell to list its models is too unwell to answer either.
+   */
+  moreRoutes?: () => Promise<readonly FallbackRoute[]>;
+  /**
+   * How a rate-limit pause is taken. Injected in tests so a backoff that is
+   * real seconds on the wire costs none of them.
+   */
+  wait?: (ms: number, signal: AbortSignal | undefined) => Promise<void>;
 };
 
 export class FallbackProvider implements Provider {
   private readonly hops: { route: FallbackRoute; provider: Provider }[];
   private readonly onOutcome?: (route: FallbackRoute, outcome: RouteOutcome) => void;
+  private readonly makeProvider: (route: FallbackRoute) => Provider;
+  private readonly moreRoutes?: () => Promise<readonly FallbackRoute[]>;
+  private readonly wait: (ms: number, signal: AbortSignal | undefined) => Promise<void>;
+  /** Guards the one lazy fetch: concurrent failures must not ask twice. */
+  private extraRoutes: Promise<readonly FallbackRoute[]> | null = null;
 
   constructor(options: FallbackProviderOptions) {
-    const make =
+    this.makeProvider =
       options.makeProvider ??
       ((route: FallbackRoute) =>
         new OpenAIProvider({
@@ -84,12 +115,39 @@ export class FallbackProvider implements Provider {
           ...(options.sessionId ? { sessionId: options.sessionId } : {}),
           ...(options.userAgent ? { userAgent: options.userAgent } : {}),
         }));
-    this.hops = options.routes.map((route) => ({ route, provider: make(route) }));
+    this.hops = options.routes.map((route) => ({ route, provider: this.makeProvider(route) }));
     if (options.onOutcome) this.onOutcome = options.onOutcome;
+    if (options.moreRoutes) this.moreRoutes = options.moreRoutes;
+    this.wait = options.wait ?? interruptibleWait;
   }
 
   get routes(): readonly FallbackRoute[] {
     return this.hops.map((hop) => hop.route);
+  }
+
+  /**
+   * The lazily discovered backups, appended to the chain once.
+   *
+   * Resolved on the first failure of a route that has no successor yet, so a
+   * healthy session never pays for the model list. A gateway that will not or
+   * cannot answer the list question contributes nothing, and the chain carries
+   * on with what it had — the error the user sees is the real one, not a
+   * failure of the discovery.
+   */
+  private async extend(): Promise<void> {
+    if (!this.moreRoutes || this.extraRoutes) return;
+    const pending = this.moreRoutes()
+      .then((routes) => {
+        const known = new Set(this.hops.map((hop) => `${hop.route.baseUrl}\u0000${hop.route.model}`));
+        for (const route of routes) {
+          if (known.has(`${route.baseUrl}\u0000${route.model}`)) continue;
+          known.add(`${route.baseUrl}\u0000${route.model}`);
+          this.hops.push({ route, provider: this.makeProvider(route) });
+        }
+      })
+      .catch(() => undefined);
+    this.extraRoutes = pending.then(() => []);
+    await pending;
   }
 
   async *stream(request: ChatRequest): AsyncGenerator<StreamEvent, void, void> {
@@ -124,7 +182,22 @@ export class FallbackProvider implements Provider {
         this.report(hop.route, { ok: false, ...failureFields(error, reading) });
         if (started || !isRetryable(error)) throw error;
 
+        // A rate limit is worth waiting out before touching the next route —
+        // a short backoff here keeps one busy gateway from churning the whole
+        // chain. The gateway's own `Retry-After` wins when it gave one, capped
+        // so a "come back tomorrow" parks nothing; without it, a brief pause
+        // that grows with each hop. The wait is cancellable mid-sleep.
+        if (error instanceof ProviderError && error.status === 429) {
+          const wait = Math.min(reading?.retryAfterMs ?? RETRY_PAUSE_MS * (index + 1), RETRY_AFTER_CEILING_MS);
+          yield { type: "route-wait", ms: wait, from: hop.route.label, reason: fallbackReason(error) };
+          await this.wait(wait, request.signal);
+        }
+
         failures.push(`${hop.route.label} (${fallbackReason(error)})`);
+        // Out of declared chain: ask for the implicit backups once, before
+        // giving up, so a free route that has just run dry can still be
+        // followed by the endpoint's other free models.
+        if (!this.hops[index + 1] && this.moreRoutes) await this.extend();
         const next = this.hops[index + 1];
         if (!next) {
           if (single) throw error;
@@ -134,7 +207,15 @@ export class FallbackProvider implements Provider {
       }
     }
 
-    throw new ProviderError(`Every route failed — ${failures.join(", ")}.`);
+    // A chain that ended only in rate limits is a different message from one
+    // that ended in anything else: the quota refills on its own schedule, and
+    // the useful advice is to wait or pick another model, not to debug.
+    const allLimited = failures.length > 0 && failures.every((failure) => failure.includes("rate-limited"));
+    throw new ProviderError(
+      allLimited
+        ? `Every route is rate-limited — ${failures.join(", ")}. Free quotas refill on their own schedule; wait a bit and send again, or /models to pick another route.`
+        : `Every route failed — ${failures.join(", ")}.`,
+    );
   }
 
   private report(route: FallbackRoute, outcome: RouteOutcome): void {
@@ -163,6 +244,21 @@ function failureFields(error: unknown, reading: QuotaReading | null): Omit<Route
 
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+/**
+ * Sleeps for `ms`, waking early if the request is cancelled.
+ *
+ * A plain `setTimeout` would hold a cancelled turn hostage for the whole wait;
+ * polling a short slice lets Ctrl+C land within a second of being pressed.
+ */
+async function interruptibleWait(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  const slice = 250;
+  let waited = 0;
+  while (waited < ms && !signal?.aborted) {
+    await new Promise<void>((resolve) => setTimeout(resolve, Math.min(slice, ms - waited)));
+    waited += slice;
+  }
 }
 
 function abortError(): Error {

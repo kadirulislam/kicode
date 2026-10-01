@@ -146,6 +146,15 @@ export function createIo(cwd: string, streams: IoStreams = {}): Io {
   };
 }
 
+/**
+ * How many implicit free models the auto chain may add.
+ *
+ * A cap rather than the whole list: a free endpoint can serve a dozen models,
+ * and a request that walks all of them is a long wait before the same error.
+ * Four is enough to ride out one busy route without hiding the failure.
+ */
+const FREE_HOPS_MAX = 4;
+
 const USAGE = [
   "kicode — bring-your-own-key terminal coding agent",
   "",
@@ -178,9 +187,11 @@ const USAGE = [
   "Project settings:",
   "  kicode.json in the working directory, or in ~/.kicode/ for every project,",
   "  sets \"model\", \"provider\", \"providers\", \"fallbackModels\", \"fallback\",",
-  "  \"maxTokens\", \"theme\", \"baseUrl\", \"compaction\", \"mcp\", and \"mock\": true. A provider",
-  "  declares a baseUrl and the environment variable holding its key",
-  "  (\"apiKeyEnv\"); the file deliberately has no place for a key.",
+  "  \"fallbackAuto\", \"maxTokens\", \"theme\", \"baseUrl\", \"compaction\", \"mcp\", and",
+  "  \"mock\": true. A provider declares a baseUrl and the environment",
+  "  variable holding its key (\"apiKeyEnv\"); the file has no place for a key.",
+  "  A free model (\":free\") falls back to the endpoint's other free models",
+  "  on its own; \"fallbackAuto\": false, or KICODE_FALLBACK_AUTO=off, stops it.",
   "  Precedence: flags > kicode.json > environment > defaults.",
   "",
   "Project instructions:",
@@ -455,11 +466,36 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       { label: activeProvider ? `${activeProvider}/${model}` : model, provider: activeProvider, baseUrl, apiKey, model },
       ...config.fallback,
     ];
+    // Auto free→free: a free model that just hit its quota is followed by the
+    // endpoint's other free models, discovered from its own `/models` list the
+    // first time the chain runs dry. Never a paid model, never configured
+    // routes — those already lead the chain — and a gateway that will not list
+    // its models simply contributes nothing. The fetch is lazy and cached, so
+    // a session that never sees a 429 never pays for it.
+    const moreRoutes =
+      config.fallbackAuto && /free/i.test(model)
+        ? async (): Promise<readonly FallbackRoute[]> => {
+            try {
+              const models = await listModels({ apiKey, baseUrl });
+              const free = models.filter((entry) => entry.free && entry.id !== model).slice(0, FREE_HOPS_MAX);
+              return free.map((entry) => ({
+                label: activeProvider ? `${activeProvider}/${entry.id}` : entry.id,
+                provider: activeProvider,
+                baseUrl,
+                apiKey,
+                model: entry.id,
+              }));
+            } catch {
+              return [];
+            }
+          }
+        : undefined;
     // Always the chain, even for one route: it is the same request path, and it
     // is the one place that knows which route a request went to and how it
     // ended, so it is where the route store is told.
     const provider = new FallbackProvider({
       routes,
+      ...(moreRoutes ? { moreRoutes } : {}),
       // OpenCode Go validates clients by an honest User-Agent and a stable
       // per-conversation session header (their docs list both as requirements);
       // every other gateway ignores both.

@@ -75,12 +75,13 @@ describe("isAvailable", () => {
 });
 
 describe("stepSelectable", () => {
-  const items = COMMANDS.slice(0, 4).map((command) => ({ ...command }));
+  const items = COMMANDS.slice(0, 5).map((command) => ({ ...command }));
 
   it("skips the names that cannot run", () => {
     // /agents cannot run here, so a step down from it lands on something that can.
     expect(items[0]?.name).toBe("agents");
-    expect(items[stepSelectable(items, 0, 1)]?.name).toBe("btw");
+    expect(items[1]?.name).toBe("attach");
+    expect(items[stepSelectable(items, 0, 1)]?.name).toBe("attach");
   });
 
   it("wraps around both ends", () => {

@@ -104,6 +104,23 @@ describe("what plan mode may run", () => {
     }
   });
 
+  it("lets the stderr-quieting idioms through — models reach for them constantly", () => {
+    for (const command of [
+      "ls -la 2>/dev/null",
+      "grep -r TODO src 2>/dev/null",
+      "cat package.json 2>&1",
+      "git status 2>/dev/null",
+      "find . -name '*.ts' 2>/dev/null | head -5",
+      "rg pattern src 2>&1 | head",
+    ]) {
+      expect(isReadOnlyCommand(command), command).toBe(true);
+    }
+    // A redirect to a real path is still a write.
+    for (const command of ["ls > out.txt 2>/dev/null", "ls 2>err.txt", "echo hi > /dev/null && rm x"]) {
+      expect(isReadOnlyCommand(command), command).toBe(false);
+    }
+  });
+
   it("refuses a browsing command with an action flag", () => {
     // `find` reports, unless it is asked to run or delete something.
     expect(isReadOnlyCommand("find . -name '*.ts'")).toBe(true);

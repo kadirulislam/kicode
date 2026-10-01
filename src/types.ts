@@ -98,6 +98,14 @@ export type StreamEvent =
    */
   | { type: "route"; from: string; to: string; reason: string }
   /**
+   * The router is waiting out a rate limit before the next attempt.
+   *
+   * Emitted before the pause starts, so the UI can say "waiting 5s" instead of
+   * looking hung. `from` is the route that was limited; there is no `to` yet —
+   * the retry may stay on the same route or move on when the pause ends.
+   */
+  | { type: "route-wait"; ms: number; from: string; reason: string }
+  /**
    * What the gateway said about the quota it is enforcing.
    *
    * Emitted before the first token, from the response headers, so the route

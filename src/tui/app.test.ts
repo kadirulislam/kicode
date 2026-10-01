@@ -47,6 +47,8 @@ type Harness = {
   compactions: number;
   /** The attached images each turn was sent with. */
   sentImages: PastedImage[][];
+  /** The prompt text each turn was sent with, after mentions and docs. */
+  sentPrompts: string[];
   /** How many times a turn was stopped with Ctrl+C. */
   cancels: number;
   /** Every token ceiling `/budget` set, in order. */
@@ -88,6 +90,7 @@ function harness(
   const sideQuestions: string[] = [];
   let compactions = 0;
   const sentImages: PastedImage[][] = [];
+  const sentPrompts: string[] = [];
   let cancels = 0;
   const budgets: number[] = [];
   let spent = 0;
@@ -143,6 +146,7 @@ function harness(
       },
       async *send(prompt: string, images: readonly PastedImage[] = []): AsyncGenerator<AgentEvent> {
         sentImages.push([...images]);
+        sentPrompts.push(prompt);
         messages.push({ role: "user", content: prompt });
         // A turn that actually takes a moment, so a second prompt can arrive
         // while it is still running — and so Ctrl+C has something to stop.
@@ -239,6 +243,7 @@ function harness(
     settings,
     sideQuestions,
     sentImages,
+    sentPrompts,
     viewSaves,
     added,
     get cancels() {
@@ -531,7 +536,9 @@ describe("runTui", () => {
 
     app.input.write("/");
     await tick(20);
-    // The list opens on /btw, so one step down lands on /budget.
+    // The list opens on /attach, so two steps down land on /budget.
+    app.input.write("\u001b[B");
+    await tick(20);
     app.input.write("\u001b[B");
     await tick(20);
 
@@ -1489,6 +1496,50 @@ describe("the slash commands", () => {
       expect(app.screen()).toContain("Context from @src/tui/frame.test.ts");
       // …while the transcript keeps exactly what was typed.
       expect(app.screen()).toContain("read this");
+
+      app.input.write("\u0015/exit\r");
+      await done;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("attaches a document with /attach and sends it as context", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "kicode-attach-"));
+    await writeFile(path.join(dir, "notes.md"), "# Notes\nthe fixture body\n");
+    try {
+      const { app, done } = await drive([], { cwd: dir });
+
+      app.input.write("/attach notes.md\r");
+      await tick(60);
+      // The badge says what is waiting to be sent.
+      expect(app.lastFrame()).toContain("[notes.md]");
+
+      app.input.write("summarise this\r");
+      await tick(80);
+      // The model receives the file's text in a named block…
+      expect(app.sentPrompts.at(-1)).toContain('Context from attached file "notes.md"');
+      expect(app.sentPrompts.at(-1)).toContain("the fixture body");
+      // …and the transcript keeps the words that were typed, plus the marker.
+      expect(app.screen()).toContain("summarise this");
+      expect(app.screen()).toContain("[notes.md]");
+
+      app.input.write("\u0015/exit\r");
+      await done;
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a bad attach path instead of swallowing it", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "kicode-attach-"));
+    try {
+      const { app, done } = await drive([], { cwd: dir });
+
+      app.input.write("/attach nope.txt\r");
+      await tick(60);
+      expect(app.screen()).toContain("could not attach");
+      expect(app.screen()).toContain("no file at");
 
       app.input.write("\u0015/exit\r");
       await done;

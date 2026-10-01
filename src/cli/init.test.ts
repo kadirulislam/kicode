@@ -28,6 +28,7 @@ function config(overrides: Partial<Config> = {}): Config {
     view: defaultViewSettings(),
     maxTurns: 12,
     fallback: [],
+    fallbackAuto: true,
     maxTokens: 0,
     compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, keepRecentTurns: 6, compactAt: 100_000 },
     ...overrides,

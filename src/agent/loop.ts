@@ -35,6 +35,8 @@ export type AgentEvent =
   | { type: "compacted"; before: number; after: number; summarized: number }
   /** The request moved to a backup route, before any of it was seen. */
   | { type: "route"; from: string; to: string; reason: string }
+  /** The router is pausing before its next attempt, waiting out a rate limit. */
+  | { type: "route-wait"; ms: number; from: string; reason: string }
   /** What the gateway said about the quota it is enforcing. */
   | { type: "quota"; reading: QuotaReading }
   /** The session's token ceiling stopped the turn. */
@@ -379,7 +381,7 @@ export class Agent {
           if (event.type === "text") {
             partial += event.delta;
             yield { type: "text", delta: event.delta };
-          } else if (event.type === "route" || event.type === "quota" || event.type === "reasoning") {
+          } else if (event.type === "route" || event.type === "route-wait" || event.type === "quota" || event.type === "reasoning") {
             yield event;
           } else if (event.type === "finish") {
             assistant = event.message;

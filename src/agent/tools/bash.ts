@@ -109,9 +109,15 @@ export function checkReadOnlyCommand(command: string): ReadOnlyVerdict {
 
   // A newline is a second command; the rest of these are how one writes.
   if (/[\n\r]/.test(trimmed)) return { ok: false, reason: "it holds more than one line" };
-  if (/[<>]/.test(trimmed)) return { ok: false, reason: "it redirects input or output (`<` or `>`)" };
-  if (/[;&]/.test(trimmed)) return { ok: false, reason: "it chains more than one command (`;` or `&`)" };
-  if (trimmed.includes("$(") || trimmed.includes("`")) {
+  // `2>/dev/null` and `2>&1` are how a noisy command is quieted, and models
+  // reach for them constantly while exploring. Neither can write a file — the
+  // word after `>` names a stream, `/dev/null` or `&` — so they are allowed
+  // where a bare `>` would be refused. A redirect to a real path still is.
+  // Stripped first, because `2>&1` holds an `&` the chain check would trip on.
+  const withoutStderr = trimmed.replace(/\d?>\s?(&\d?|\/dev\/null)/g, "");
+  if (/[<>]/.test(withoutStderr)) return { ok: false, reason: "it redirects input or output (`<` or `>`)" };
+  if (/[;&]/.test(withoutStderr)) return { ok: false, reason: "it chains more than one command (`;` or `&`)" };
+  if (withoutStderr.includes("$(") || withoutStderr.includes("`")) {
     return { ok: false, reason: "it substitutes the output of another command" };
   }
 

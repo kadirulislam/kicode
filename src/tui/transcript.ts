@@ -16,7 +16,8 @@ export type Tone = "dim" | "ok" | "error" | "warn" | "accent";
 
 export type Entry =
   /** `images` counts the pictures sent with the words, for the marker. */
-  | { kind: "user"; text: string; images?: number }
+  /** `docs` names the files attached with `/attach`, shown as badges. */
+  | { kind: "user"; text: string; images?: number; docs?: string[] }
   | { kind: "assistant"; text: string }
   /**
    * The model's reasoning, which is not part of the conversation — it is not
@@ -242,6 +243,10 @@ export function applyEvent(
       // one on the status row, and nothing else would tell the user that.
       entries.push({ kind: "note", text: `switched to ${event.to} — ${event.reason}`, tone: "warn" });
       return;
+    case "route-wait":
+      // Not an entry on purpose: a wait is seconds, not history, and the busy
+      // row is already saying it. (The caller maps this event to the spinner.)
+      return;
     case "budget":
       entries.push({ kind: "note", text: `session budget reached — ~${event.spent} of ${event.limit} tokens`, tone: "warn" });
       return;
@@ -349,6 +354,7 @@ export function entrySpans(entry: Entry, styles: Styles, view: ViewSettings = de
         ...(entry.images && view.transcriptImages === "on"
           ? [span(`[${entry.images} image${entry.images === 1 ? "" : "s"}] `, styles.imageBadge), span("\n")]
           : []),
+        ...(entry.docs ?? []).map((name) => [span(`[${name}] `, styles.imageBadge), span("\n")]).flat(),
         span(entry.text, styles.bold),
         span("\n"),
       ];

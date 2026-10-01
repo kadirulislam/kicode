@@ -396,8 +396,8 @@ describe("the command palette", () => {
   });
 
   it("dims the names that cannot run here", () => {
-    // The cursor is parked on /cd, so the first three rows are unselected.
-    const { frame, plain } = draw({ palette: { items: COMMANDS, selected: 2 } }, { cols: 80, rows: 30 });
+    // The cursor is parked on /cd, so the earlier rows are unselected.
+    const { frame, plain } = draw({ palette: { items: COMMANDS, selected: 3 } }, { cols: 80, rows: 30 });
     const agents = plain.findIndex((line) => line.includes("/agents"));
     const btw = plain.findIndex((line) => line.includes("/btw"));
 
@@ -1009,6 +1009,24 @@ describe("the blocks", () => {
     const filled = frame.lines.filter((line) => line.includes(block));
     const widths = filled.map((row) => textWidth(strip(row)));
     expect(new Set(widths).size).toBe(1);
+  });
+
+  it("hugs the text with a little padding, rather than running to the rim", () => {
+    // The fill is a chip around the words: bar, text, and a couple of cells of
+    // block colour — not a band that stretches the width of the column.
+    const { frame } = draw({ entries: [{ kind: "user", text: "hi" }] });
+    const filled = frame.lines.filter((line) => line.includes(block));
+    for (const row of filled) {
+      // Two gutter cells are page-coloured, then the block itself.
+      expect(textWidth(strip(row))).toBeLessThan(20);
+    }
+  });
+
+  it("shows attached documents as named badges beside the prompt", () => {
+    const { plain } = draw({ attachedDocs: ["notes.md", "spec.txt"] });
+    const joined = plain.join("\n");
+    expect(joined).toContain("[notes.md]");
+    expect(joined).toContain("[spec.txt]");
   });
 
   it("keeps the bar and the fill together on a wrapped turn", () => {

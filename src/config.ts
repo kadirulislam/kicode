@@ -76,6 +76,12 @@ export type Config = {
   maxTurns: number;
   /** Routes to try, in order, when the one in use fails. Empty when off. */
   fallback: FallbackRoute[];
+  /**
+   * Whether a free model implicitly falls back to the endpoint's other free
+   * models when it fails. Explicit `fallback` routes always come first; this
+   * only ever adds free routes, never a paid one.
+   */
+  fallbackAuto: boolean;
   /** Session token ceiling. 0 means no ceiling. */
   maxTokens: number;
   compaction: CompactionSettings;
@@ -144,6 +150,7 @@ export function loadConfig(
     view: viewFrom(theme, file.view ?? {}),
     maxTurns: overrides.maxTurns ?? DEFAULT_MAX_TURNS,
     fallback: readFallback(env, file, providers, chosen.name, baseUrl, apiKey, model),
+    fallbackAuto: readFallbackAuto(env, file),
     maxTokens: overrides.maxTokens ?? file.maxTokens ?? intFrom(env.KICODE_MAX_TOKENS, 0),
     compaction: {
       enabled: overrides.compact === false ? false : compaction.enabled !== false,
@@ -207,6 +214,22 @@ function readFallback(
   }
 
   return routes;
+}
+
+/**
+ * Whether a free model may pick up the endpoint's other free models on its own.
+ *
+ * On by default, because the failure it answers is the common one: a free
+ * route hits its limit and the session stops for want of a second one nobody
+ * configured. `"fallbackAuto": false` in `kicode.json`, or
+ * `KICODE_FALLBACK_AUTO=off`, turns it off for anyone who wants a failure to be
+ * the end of the matter. Only free models are ever added, whatever this says.
+ */
+function readFallbackAuto(env: NodeJS.ProcessEnv, file: FileSettings): boolean {
+  const declared = env.KICODE_FALLBACK_AUTO?.trim().toLowerCase();
+  if (declared === "off" || declared === "false" || declared === "0" || declared === "no") return false;
+  if (declared !== undefined && declared !== "") return true;
+  return file.fallbackAuto !== false;
 }
 
 /** Identifies a route for de-duplication: an endpoint plus a model. */

@@ -71,6 +71,8 @@ export type FileSettings = {
   fallbackModels?: string[];
   /** Backup routes on other endpoints, tried in order. */
   fallback?: FileFallbackRoute[];
+  /** Whether a free model may implicitly fall back to the endpoint's other free ones. */
+  fallbackAuto?: boolean;
   /** Session token ceiling. Omitted or 0 means no ceiling. */
   maxTokens?: number;
   /** Shorthand for pointing this project at the bundled mock provider. */
@@ -159,6 +161,11 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
     if (json.fallback !== undefined) {
       const parsed = readFallbackRoutes(json.fallback, entry.file, warnings);
       if (parsed) settings.fallback = parsed;
+    }
+
+    if (json.fallbackAuto !== undefined) {
+      if (typeof json.fallbackAuto === "boolean") settings.fallbackAuto = json.fallbackAuto;
+      else warnings.push(`Ignoring "fallbackAuto" in ${entry.file}: expected true or false.`);
     }
 
     if (json.maxTokens !== undefined) {

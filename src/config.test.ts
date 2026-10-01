@@ -269,6 +269,15 @@ describe("fallback routes", () => {
   it("is empty when nothing is declared", () => {
     expect(loadConfig({ KICODE_API_KEY: "k" }, {}).fallback).toEqual([]);
   });
+
+  it("defaults the auto free chain on, and honours both kill switches", () => {
+    expect(loadConfig({ KICODE_API_KEY: "k" }, {}).fallbackAuto).toBe(true);
+    expect(loadConfig({ KICODE_API_KEY: "k" }, { fallbackAuto: false }).fallbackAuto).toBe(false);
+    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "off" }, {}).fallbackAuto).toBe(false);
+    // An unset-but-present variable, or any other word, leaves it on.
+    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "" }, {}).fallbackAuto).toBe(true);
+    expect(loadConfig({ KICODE_API_KEY: "k", KICODE_FALLBACK_AUTO: "on" }, {}).fallbackAuto).toBe(true);
+  });
 });
 
 describe("the token budget", () => {

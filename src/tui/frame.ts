@@ -192,6 +192,8 @@ export type TuiState = {
   editor: LineEditor;
   /** Number of attached images awaiting submission with the next prompt. */
   attachedImages?: number;
+  /** Names of attached documents (`/attach`), shown beside the image badges. */
+  attachedDocs?: readonly string[];
   /** Spinner label while a turn is in flight. */
   busy: string | null;
   spinnerFrame: number;
@@ -371,6 +373,8 @@ const BAR = "▌";
 const RULE = "│";
 /** Keeps a redraw cheap on a very long conversation. */
 const MAX_TRANSCRIPT_LINES = 4000;
+/** Blank cells of block colour after the widest text row of a request block. */
+const BLOCK_PAD = 2;
 const MODAL_BODY_LINES = 6;
 /** The glyph in a tab that closes it. */
 export const TAB_CLOSE = "×";
@@ -828,12 +832,12 @@ function entryLines(entry: Entry, styles: Styles, theme: Theme, width: number, v
     const bar = (row: Span[]): BodyLine => ({ spans: [span(`${BAR} `, styles.accent), ...row], background: theme.block });
     const pad = Array.from({ length: view.spacing.block }, () => bar([]));
     const block = [...pad, ...rows.map(bar), ...pad];
-    // A block is a rectangle: every row's fill runs to the widest row, so the
-    // padding above and below the text is the same shape as the text's own
-    // background. Left unpadded, a pad row's fill covers only the bar — two
-    // cells of block colour on an otherwise page-coloured row — which reads as
-    // a rendering glitch rather than a panel.
-    const widest = Math.max(...block.map((line) => spansWidth(line.spans)), 1);
+    // A block is a rectangle that hugs its text: every row's fill runs to the
+    // widest row plus a little right padding, so the shape reads as a chip
+    // around the words rather than as a band that stops wherever it likes.
+    // Left unpadded, a pad row's fill covers only the bar — two cells of block
+    // colour on an otherwise page-coloured row — which reads as a glitch.
+    const widest = Math.max(...block.map((line) => spansWidth(line.spans)), 1) + BLOCK_PAD;
     return block.map((line) => {
       const shortfall = widest - spansWidth(line.spans);
       return shortfall > 0 ? { spans: [...line.spans, span(" ".repeat(shortfall))], background: line.background } : line;
@@ -1667,6 +1671,12 @@ function renderBottom(
         badges.push(span(text, styles.imageBadge), span(" "));
         badgeWidth += text.length + 1;
       }
+    }
+    // Documents carry their own name — what was attached is the useful part.
+    for (const name of state.attachedDocs ?? []) {
+      const text = `[${cut(name, 24)}]`;
+      badges.push(span(text, styles.imageBadge), span(" "));
+      badgeWidth += text.length + 1;
     }
 
     // Right controls: [Think] [send] — plain text, no emoji.

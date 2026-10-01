@@ -80,11 +80,13 @@ describe("FallbackProvider", () => {
     const provider = new FallbackProvider({
       routes: [route("used-up", "gw/used-up"), route("free-alt", "gw/free-alt")],
       makeProvider: (r) => (r.model === "used-up" ? failing(429) : answering("hello")),
+      wait: async () => undefined,
     });
 
     const events = await collect(provider);
 
-    expect(events[0]).toEqual({ type: "route", from: "gw/used-up", to: "gw/free-alt", reason: "rate-limited (HTTP 429)" });
+    expect(events[0]).toEqual({ type: "route-wait", ms: 1_500, from: "gw/used-up", reason: "rate-limited (HTTP 429)" });
+    expect(events[1]).toEqual({ type: "route", from: "gw/used-up", to: "gw/free-alt", reason: "rate-limited (HTTP 429)" });
     expect(events.some((event) => event.type === "text")).toBe(true);
     expect(events.at(-1)?.type).toBe("finish");
   });
@@ -138,7 +140,8 @@ describe("FallbackProvider", () => {
   it("reports every route when none of them answer", async () => {
     const provider = new FallbackProvider({
       routes: [route("a", "gw/a"), route("b", "gw/b")],
-      makeProvider: () => failing(429),
+      makeProvider: () => failing(500),
+      wait: async () => undefined,
     });
 
     await expect(collect(provider)).rejects.toThrow(/Every route failed — gw\/a .*gw\/b/);
@@ -169,6 +172,7 @@ describe("FallbackProvider", () => {
     let streams = 0;
     const provider = new FallbackProvider({
       routes: [route("used-up"), route("free-alt")],
+      wait: async () => undefined,
       makeProvider: (r) => ({
         async *stream(): AsyncGenerator<StreamEvent, void, void> {
           streams += 1;
@@ -231,6 +235,7 @@ describe("FallbackProvider outcomes", () => {
     const provider = new FallbackProvider({
       routes: [route("used-up"), route("free-alt")],
       onOutcome: (r, outcome) => outcomes.push({ model: r.model, outcome }),
+      wait: async () => undefined,
       makeProvider: (r) =>
         r.model === "used-up"
           ? {
@@ -267,4 +272,130 @@ describe("FallbackProvider outcomes", () => {
     await expect(collect(provider)).rejects.toThrow(/aborted/);
     expect(outcomes).toEqual([]);
   });
+
+  it("pauses before the next route when a rate limit names a wait, and says it did", async () => {
+    const waits: number[] = [];
+    const provider = new FallbackProvider({
+      routes: [route("used-up", "gw/used-up"), route("free-alt", "gw/free-alt")],
+      makeProvider: (r) => (r.model === "used-up" ? failing(429) : answering("hello")),
+      wait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    const events = await collect(provider);
+
+    expect(events).toContainEqual({ type: "route-wait", ms: 1_500, from: "gw/used-up", reason: "rate-limited (HTTP 429)" });
+    expect(waits).toEqual([1_500]);
+    expect(events.some((event) => event.type === "text")).toBe(true);
+  });
+
+  it("honours the wait the quota reading asked for, capped", async () => {
+    const waits: number[] = [];
+    const provider = new FallbackProvider({
+      routes: [route("used-up"), route("free-alt")],
+      makeProvider: (r) => (r.model === "used-up" ? limitedWith(45_000) : answering("ok")),
+      wait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    await collect(provider);
+    expect(waits).toEqual([45_000]);
+
+    // A "come back tomorrow" is honoured only up to the ceiling, so the session
+    // is never parked on one gateway's schedule.
+    const capped = new FallbackProvider({
+      routes: [route("used-up"), route("free-alt")],
+      makeProvider: (r) => (r.model === "used-up" ? limitedWith(90_000) : answering("ok")),
+      wait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+    await collect(capped);
+    expect(waits.at(-1)).toBe(60_000);
+  });
+
+  it("does not pause for a failure that is not a rate limit", async () => {
+    const waits: number[] = [];
+    const provider = new FallbackProvider({
+      routes: [route("down", "gw/down"), route("up", "gw/up")],
+      makeProvider: (r) => (r.model === "down" ? failing(502) : answering("ok")),
+      wait: async (ms) => {
+        waits.push(ms);
+      },
+    });
+
+    const events = await collect(provider);
+    expect(waits).toEqual([]);
+    expect(events.some((event) => event.type === "route-wait")).toBe(false);
+  });
+
+  it("appends the lazily discovered free routes once the declared chain runs dry", async () => {
+    let asked = 0;
+    const provider = new FallbackProvider({
+      routes: [route("primary", "gw/primary")],
+      makeProvider: (r) => (r.model === "primary" ? failing(429) : answering(`from ${r.model}`)),
+      moreRoutes: async () => {
+        asked += 1;
+        return [route("free-b", "gw/free-b"), route("free-c", "gw/free-c")];
+      },
+    });
+
+    const events = await collect(provider);
+
+    expect(events.some((event) => event.type === "route-wait")).toBe(true);
+    expect(events.some((event) => event.type === "text" && event.delta.includes("from free-b"))).toBe(true);
+    // One fetch per provider: the second failure walks the chain it already has.
+    expect(asked).toBe(1);
+  });
+
+  it("does not re-add a route that is already in the chain", async () => {
+    const provider = new FallbackProvider({
+      routes: [route("primary", "gw/primary"), route("free-b", "gw/free-b")],
+      makeProvider: (r) => (r.model === "primary" ? failing(429) : answering(`from ${r.model}`)),
+      wait: async () => undefined,
+      moreRoutes: async () => [route("free-b", "gw/free-b"), route("free-c", "gw/free-c")],
+    });
+
+    const events = await collect(provider);
+    // free-b was already declared; the answer must come from it, not from a copy.
+    expect(events.some((event) => event.type === "text" && event.delta.includes("from free-b"))).toBe(true);
+    expect(events.filter((event) => event.type === "route")).toHaveLength(1);
+  });
+
+  it("carries on with what it had when the discovery fails", async () => {
+    const provider = new FallbackProvider({
+      routes: [route("primary", "gw/primary")],
+      makeProvider: () => failing(429),
+      wait: async () => undefined,
+      moreRoutes: async () => {
+        throw new Error("gateway will not say");
+      },
+    });
+
+    // One route, no discovery: the original error is the answer, not a
+    // failure of the discovery itself.
+    await expect(collect(provider)).rejects.toThrow(/failed with 429/);
+  });
+
+  it("says what to do when every route is rate-limited", async () => {
+    const provider = new FallbackProvider({
+      routes: [route("a", "gw/a"), route("b", "gw/b")],
+      makeProvider: () => failing(429),
+      wait: async () => undefined,
+    });
+
+    await expect(collect(provider)).rejects.toThrow(/Every route is rate-limited/);
+  });
 });
+
+/** A route that reports its quota's Retry-After, then fails, the way a 429 does. */
+function limitedWith(retryAfterMs: number): Provider {
+  return {
+    async *stream(): AsyncGenerator<StreamEvent, void, void> {
+      yield { type: "quota", reading: { requests: null, tokens: null, retryAfterMs } };
+      throw new ProviderError("failed with 429", 429);
+    },
+  };
+}
