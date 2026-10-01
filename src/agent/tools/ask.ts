@@ -1,6 +1,15 @@
 import { parseQuestions } from "../ask";
 import type { Tool } from "./types";
 
+/** JSON.parse that answers null instead of throwing, for one-line use below. */
+function safeParse(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Asks the user to choose between options.
  *
@@ -53,11 +62,17 @@ export const askTool: Tool = {
   },
 
   async run(args, context) {
-    const questions = parseQuestions(args.questions);
+    // A double-encoded payload arrives as one JSON string; parse it before the
+    // guard so the model's most common mistake still renders as questions.
+    const payload = typeof args === "string" ? safeParse(args) : args?.questions;
+    const questions = parseQuestions(payload);
     if (questions.length === 0) {
+      const received =
+        typeof payload === "string" ? "a string" : Array.isArray(payload) ? `${payload.length} item(s)` : typeof payload;
       return {
         content:
-          "Error: no usable questions. Each needs a \"question\" string and an \"options\" array of objects with a \"label\".",
+          `Error: no usable questions (received ${received}). ` +
+          "Each question needs question text and at least one option, each option with a label.",
         isError: true,
       };
     }

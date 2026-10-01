@@ -1,7 +1,7 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 910 Tests Passing (47 test suites)  
+**Build Status:** Stable, All 911 Tests Passing (47 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
 **Binary Distribution:** Built (`dist/cli.js`) via `npm run build`
 
@@ -15,6 +15,7 @@
 - **One-line tool results** at medium verbosity (`first line · N lines`) so a mid-turn result never becomes a wall.
 - **Tool-argument summaries**: `ask` shows `3 questions: "<first question>"` instead of a raw JSON dump of option objects; every argument value is capped at one line — the permission modal now floats over a readable transcript, not a JSON wall.
 - **Folded repeat notes**: identical failures (the same 429 on every retry) render as one row with a `×N` count, folding past the user's retry message.
+- **Forgiving `ask` validation**: free-model argument drift (double-encoded JSON, single-object payloads, question text under `title`/`prompt`/`header`, options as object maps or strings) is rescued instead of refused — the plan-mode `no usable questions` error no longer bounces well-meant calls; the refusal message names what it received.
 - **Session picker search** (ADR-010): `today · 4 msgs` trailing metadata and matching against the opening-request preview.
 - **`kicode --probe`**: staged endpoint diagnosis (models → tiny chat) with gateway-specific verdicts; OpenCode client validation headers (`User-Agent: kicode/<version>`, `x-opencode-session`) sent on every request, fallbacks included.
 
