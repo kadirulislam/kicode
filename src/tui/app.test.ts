@@ -358,6 +358,26 @@ describe("runTui", () => {
     expect(await done).toBe(0);
   });
 
+  it("shows Goal as the mode head while a goal run executes", async () => {
+    // A /goal run is not a session mode — shift+tab does not cycle through it —
+    // but while it is executing, the row that says what the session is doing
+    // has to say Goal, the way it says Plan.
+    const app = harness({}, { slow: 250 });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("/goal ship it\r");
+    await tick(60);
+    expect(app.screen()).toContain("▌ Goal ·");
+
+    // Transient: the run is over, so the head is the session's own mode again.
+    await tick(400);
+    expect(app.lastFrame()).not.toContain("▌ Goal");
+
+    app.input.write("\u0003");
+    expect(await done).toBe(0);
+  }, 15000);
+
   it("highlights a live mouse drag with the accent selection fill", async () => {
     // A regression guard for a bug the frame tests could not see: the drag
     // highlight was fully implemented in the renderer, but the app never handed

@@ -236,6 +236,8 @@ export type TuiState = {
   variant: string;
   /** Build or plan; what the agent is currently allowed to do. */
   mode: SessionMode;
+  /** True while a `/goal` run is executing — shows "Goal" in the mode row. */
+  goalActive?: boolean;
   /** What the session has cost so far, for the footer. */
   usage: { tokens: number; budget: number; tools: number };
   /** Lines scrolled up from the newest. */
@@ -825,7 +827,17 @@ function entryLines(entry: Entry, styles: Styles, theme: Theme, width: number, v
     // theirs to say, not this function's.
     const bar = (row: Span[]): BodyLine => ({ spans: [span(`${BAR} `, styles.accent), ...row], background: theme.block });
     const pad = Array.from({ length: view.spacing.block }, () => bar([]));
-    return [...pad, ...rows.map(bar), ...pad];
+    const block = [...pad, ...rows.map(bar), ...pad];
+    // A block is a rectangle: every row's fill runs to the widest row, so the
+    // padding above and below the text is the same shape as the text's own
+    // background. Left unpadded, a pad row's fill covers only the bar — two
+    // cells of block colour on an otherwise page-coloured row — which reads as
+    // a rendering glitch rather than a panel.
+    const widest = Math.max(...block.map((line) => spansWidth(line.spans)), 1);
+    return block.map((line) => {
+      const shortfall = widest - spansWidth(line.spans);
+      return shortfall > 0 ? { spans: [...line.spans, span(" ".repeat(shortfall))], background: line.background } : line;
+    });
   }
 
   if (entry.kind === "tool" || entry.kind === "result") {
@@ -1726,10 +1738,15 @@ function renderBottom(
  */
 function modeSpans(state: TuiState, styles: Styles, width: number, indent: string, barStyle?: string): Span[] {
   const isPaused = Boolean(state.isPaused);
+  // A goal run leads the row while it lasts: it is the same "what is this
+  // session doing right now" question the mode word answers, and it is more
+  // specific than Build — the session is executing a goal, not taking edits
+  // one request at a time. It is transient, so it is not in the mode cycle.
+  const goalActive = Boolean(state.goalActive) && !isPaused;
   const headStyle = isPaused ? styles.warn : state.mode === "plan" ? styles.warn : styles.mode;
   const head = [
-    span(`${indent}▌ `, barStyle ?? (isPaused ? styles.warn : styles.accent)),
-    span(isPaused ? "paused" : MODE_LABELS[state.mode], headStyle),
+    span(`${indent}▌ `, barStyle ?? (isPaused ? styles.warn : goalActive ? styles.warn : styles.accent)),
+    span(isPaused ? "paused" : goalActive ? "Goal" : MODE_LABELS[state.mode], headStyle),
     span(" · ", styles.faint),
   ];
 

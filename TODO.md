@@ -54,6 +54,8 @@
 - [x] `ask` tool calls summarize as `3 questions: "<first question>"` rather than a raw JSON dump of every option object, and every other argument value is capped at one line (ADR-012).
 - [x] Repeated identical notes (e.g. the same 429 every retry) fold into one transcript row with a `×N` count instead of stacking identical blocks (ADR-012).
 - [x] `ask` validator forgives the argument shapes free models actually send: double-encoded JSON strings, a single question object or one-level-nested payload, question text under `title`/`prompt`/`text` or only in `header`, options as an object map or bare strings, option labels under `name`/`value`/`choice`. The refusal error now says what it received, so a genuinely malformed call self-corrects in one retry.
+- [x] User request block is a filled rectangle: the padding rows above/below the message now run their fill to the text row's width instead of showing a two-cell bar sliver that read as a broken background.
+- [x] `/goal` shows `Goal` in the mode row while a goal run executes (transient — not in the shift+tab mode cycle), and the turn's meta line reads `Goal · model · time`.
 
 ## Pending (agreed, not yet built)
 - [ ] Usage-tracking API: local-only `~/.kicode/usage.jsonl` (counts only — model, endpoint host, tokens, tool calls, duration), surfaced in `/stats` + new `/usage`, exported via `kicode --usage [--json]` with daily/per-model rollups.

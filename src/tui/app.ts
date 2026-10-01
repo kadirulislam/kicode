@@ -445,6 +445,8 @@ class TuiApp {
   private selectable = { top: 0, bottom: 0 };
   /** The text dragged over since the button went down, if it went down on one. */
   private selection: Selection | null = null;
+  /** True while a `/goal` run is executing, so the mode row can say "Goal". */
+  private goalRun = false;
   /** True between a press that could select and the release that ends it. */
   private dragging = false;
   /** Scrollbar geometry from last draw for mouse scrolling */
@@ -1614,7 +1616,7 @@ class TuiApp {
     const startedAt = Date.now();
     const turn = {
       startedAt,
-      mode: MODE_LABELS[this.mode],
+      mode: this.goalRun ? "Goal" : MODE_LABELS[this.mode],
       model: this.model,
       tps: this.view.tps === "on",
     };
@@ -1638,6 +1640,7 @@ class TuiApp {
       );
     } finally {
       this.stopBusy();
+      this.goalRun = false;
       await this.save().catch(() => undefined);
       this.draw();
       if (!this.isPaused && this.queuedPrompts.length > 0) {
@@ -1878,6 +1881,7 @@ class TuiApp {
         ].join("\n");
         this.entries.push({ kind: "user", text: `/goal ${argument}` });
         this.scroll = 0;
+        this.goalRun = true;
         void this.runTurn(goalPrompt);
         break;
       }
@@ -4599,6 +4603,7 @@ class TuiApp {
         : null,
       variant: this.variant,
       mode: this.mode,
+      goalActive: this.goalRun,
       usage: { tokens: this.agent.contextTokens, budget: this.options.contextTokens, tools: this.toolCalls() },
       palette: this.paletteOpen() ? { items: this.paletteItems(), selected: this.paletteSelected } : null,
       mentions:

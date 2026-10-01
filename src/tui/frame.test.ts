@@ -1001,6 +1001,16 @@ describe("the blocks", () => {
     }
   });
 
+  it("pads the block fill into one rectangle, not slivers", () => {
+    // The padding rows carry only the bar's two cells unless they are padded
+    // out to the text row's width — which reads as a glitched background, not
+    // a panel.
+    const { frame } = draw({ entries: [{ kind: "user", text: "hi" }] });
+    const filled = frame.lines.filter((line) => line.includes(block));
+    const widths = filled.map((row) => textWidth(strip(row)));
+    expect(new Set(widths).size).toBe(1);
+  });
+
   it("keeps the bar and the fill together on a wrapped turn", () => {
     const { frame, plain } = draw({ entries: [{ kind: "user", text: "x".repeat(200) }] }, { cols: 40, rows: 20 });
 
