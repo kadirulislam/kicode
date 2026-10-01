@@ -76,6 +76,19 @@ function answerTurn(text: string): StreamEvent[] {
   ];
 }
 
+/** A reply the endpoint's own output cap cut off mid-sentence. */
+function cutOffTurn(text: string): StreamEvent[] {
+  return [
+    { type: "text", delta: text },
+    { type: "finish", message: { role: "assistant", content: text }, finishReason: "length" },
+  ];
+}
+
+/** A reply with nothing in it: no words, no tool call. */
+function emptyTurn(): StreamEvent[] {
+  return [{ type: "finish", message: { role: "assistant", content: null }, finishReason: "stop" }];
+}
+
 const echoTool: Tool = {
   name: "read",
   description: "read a file",
@@ -219,6 +232,92 @@ describe("Agent.send", () => {
 
     expect(finished(events)).toEqual({ type: "done", reason: "max-turns" });
     expect(provider.requests).toHaveLength(3);
+  });
+});
+
+describe("a reply that is not an answer", () => {
+  const agentFor = (provider: FakeProvider, maxTurns?: number): Agent =>
+    new Agent({
+      provider,
+      tools: new ToolRegistry([echoTool]),
+      model: "m",
+      cwd: process.cwd(),
+      ...(maxTurns === undefined ? {} : { maxTurns }),
+    });
+
+  it("carries on when the endpoint cut the reply off at its output cap", async () => {
+    // `length` is the endpoint's cap, not the model's own stopping point, and
+    // the old loop called it an answer — the turn ended mid-sentence.
+    const provider = new FakeProvider([cutOffTurn("The fix is to change the "), answerTurn("The fix is to change the key.")]);
+
+    const events = await collect(agentFor(provider), "fix it");
+
+    expect(events).toContainEqual({ type: "continued", reason: "truncated", attempt: 1 });
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    expect(provider.requests).toHaveLength(2);
+    // What was written before the cap is kept, so the next request continues
+    // the half-finished thought instead of starting the answer again.
+    expect(provider.requests[1]?.messages.at(-1)).toEqual({ role: "assistant", content: "The fix is to change the " });
+  });
+
+  it("asks again when the reply has neither words nor a tool call", async () => {
+    const provider = new FakeProvider([emptyTurn(), answerTurn("here it is")]);
+
+    const events = await collect(agentFor(provider), "fix it");
+
+    expect(events).toContainEqual({ type: "continued", reason: "empty", attempt: 1 });
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    expect(provider.requests).toHaveLength(2);
+    // An empty reply is not recorded: an assistant message with nothing in it
+    // is a turn the model never really made.
+    expect(provider.requests[1]?.messages.at(-1)).toEqual({ role: "user", content: "fix it" });
+    // And the second request is the same question, not a continuation of
+    // nothing: nothing was added for the model to read.
+    expect(provider.requests[1]?.messages).toEqual(provider.requests[0]?.messages);
+  });
+
+  it("stops asking when the endpoint never finishes a reply", async () => {
+    // Without a ceiling this is an endpoint being asked forever, which is worse
+    // than the truncation it is working around.
+    const provider = new FakeProvider([cutOffTurn("a"), cutOffTurn("b"), cutOffTurn("c"), cutOffTurn("d"), cutOffTurn("e")]);
+
+    const events = await collect(agentFor(provider), "explain");
+
+    expect(events.filter((event) => event.type === "continued")).toHaveLength(3);
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    // The first request and three continuation attempts; the fifth turn is
+    // never made.
+    expect(provider.requests).toHaveLength(4);
+  });
+
+  it("gives the allowance back once a turn has actually done something", async () => {
+    const provider = new FakeProvider([
+      cutOffTurn("cut one"),
+      toolCallTurn("call_1", "read", "{}"),
+      cutOffTurn("cut two"),
+      answerTurn("done"),
+    ]);
+
+    const events = await collect(agentFor(provider), "go");
+
+    // Two continuations, both the first of their run: the tool call between
+    // them was progress, and progress is what the allowance is for.
+    expect(events.filter((event) => event.type === "continued")).toEqual([
+      { type: "continued", reason: "truncated", attempt: 1 },
+      { type: "continued", reason: "truncated", attempt: 1 },
+    ]);
+    expect(provider.requests).toHaveLength(4);
+  });
+
+  it("counts a continuation against the turn budget like any other request", async () => {
+    const provider = new FakeProvider([cutOffTurn("a"), cutOffTurn("b"), cutOffTurn("c")]);
+
+    const events = await collect(agentFor(provider, 2), "explain");
+
+    // The budget is the outer bound: three continuation attempts are not made
+    // because there were only two requests to spend.
+    expect(provider.requests).toHaveLength(2);
+    expect(finished(events)).toEqual({ type: "done", reason: "max-turns" });
   });
 });
 

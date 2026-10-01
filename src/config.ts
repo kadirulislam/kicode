@@ -6,13 +6,20 @@
  */
 
 import { COMPACT_TARGET_PERCENT } from "./agent/compaction";
+import { DEFAULT_MAX_TURNS } from "./agent/loop";
 import type { FileSettings } from "./settings-file";
 import { DEFAULT_THEME } from "./tui/theme";
 import { type ViewSettings, viewFrom } from "./tui/settings";
 
 export const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 export const DEFAULT_MODEL = "deepseek-v4-flash";
-export const DEFAULT_MAX_TURNS = 12;
+/**
+ * The turn budget, owned by the loop that spends it.
+ *
+ * Re-exported rather than restated: `--init` and the config file name it, and a
+ * second copy of the number is how the two would drift apart.
+ */
+export { DEFAULT_MAX_TURNS };
 export const DEFAULT_CONTEXT_TOKENS = 128_000;
 export const DEFAULT_RESERVE_TOKENS = 8_000;
 /** The estimate at which a session is compacted, even inside a larger window. */

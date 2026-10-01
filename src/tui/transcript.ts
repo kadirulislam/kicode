@@ -260,6 +260,19 @@ export function applyEvent(
     case "budget":
       entries.push({ kind: "note", text: `session budget reached — ~${event.spent} of ${event.limit} tokens`, tone: "warn" });
       return;
+    case "continued":
+      // The user watched the model stop mid-sentence. Saying which way it
+      // stopped is the difference between a glitch and the endpoint's output
+      // cap — and between reading on and reaching for Ctrl+C.
+      entries.push({
+        kind: "note",
+        text:
+          event.reason === "empty"
+            ? "the model answered with nothing — asking again"
+            : "the reply was cut off — asking it to carry on",
+        tone: "dim",
+      });
+      return;
     case "quota":
       // Deliberately silent for now: a quota reading arrives on every response,
       // and a transcript line per request would bury the conversation. It feeds
@@ -270,6 +283,12 @@ export function applyEvent(
       // empty; drop it so the transcript does not collect blank lines.
       const last = entries.at(-1);
       if (last?.kind === "assistant" && !last.text.trim()) entries.pop();
+
+      // A turn that ran out of requests stopped of its own accord, and nothing
+      // else on screen would say so: the transcript just ends.
+      if (event.reason === "max-turns") {
+        entries.push({ kind: "note", text: "turn budget reached — send anything to carry on", tone: "warn" });
+      }
 
       const line = metaLine(event, timing);
       if (line) entries.push({ kind: "meta", text: line });

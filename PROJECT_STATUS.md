@@ -1,9 +1,9 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 993 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 1001 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~472 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~473 KB) via `npm run build`
 
 ---
 
@@ -27,6 +27,13 @@
 - **Every answer on a card is a chip**: `[y] yes · [a] always · [n] no` on a permission prompt, `[r] retry · [m] choose model · [×] dismiss` on a failed turn. A click names the key and the same handler a keypress reaches answers it, so a mouse answer cannot drift from a typed one — `[m]` still opens the model picker with the failed turn set aside.
 - **`esc` is drawn as a clickable `[×]` everywhere it is offered**: the session footer's hints, a picker's title row, a menu's title and footer, the clipboard menu, and a card's own decision row. Each target is found by walking the row the chip was drawn in, so it cannot drift from the glyph.
 - **While a card is up it is the only thing clickable** (plus the footer, whose `[×]` is the permission card's way out) — and two bugs were fixed on the way: a multi-line gateway message printed as one run-on row on the recovery card, and the `[+]` attach hit box sat one column left of its glyph.
+
+### 0j. A Turn Ends at an Answer, Not at the Absence of a Tool Call (ADR-025)
+- **The stop was the loop's rule, not the model's** — owner's issue 8: "the agent sometimes stops mid-task". `done("complete")` was reached whenever a reply carried no tool call, and the loop never looked at why the endpoint stopped writing. A reply the endpoint's own output cap cut off (`finish_reason: "length"` — KiCode sends no `max_tokens`, so the gateway's default *is* the cap, often 4 096) was filed as an answer and the turn ended mid-sentence; a reply with no words and no tool call was filed as an answer too, so the turn ended having done nothing at all.
+- **A turn now ends at an answer**: a turn that asked for tools, or one that said something and was allowed to finish. Anything else — cut off by the endpoint, or empty — is asked again, bounded at **three in a row** (`MAX_CONTINUATIONS`), with the allowance handed back by any turn that ran a tool, since progress is what the bound protects. Continuations count against the ordinary request budget like any other request.
+- **A cut-off reply is kept and built on**: the words that did arrive are pushed into the transcript exactly as they were, so the next request continues the half-finished thought instead of restarting the answer. An *empty* reply is deliberately not kept — an empty assistant message is a turn the model never really made, some endpoints refuse one back — so the same question goes out unchanged.
+- **The stop is said out loud**: a new `continued` event names which way it stopped and which attempt it was, shown as a dim note (`the reply was cut off — asking it to carry on` / `the model answered with nothing — asking again`) in the TUI and as a dim line in one-shot mode.
+- **The request budget is 40, not 12** — ordinary work (look, read, edit, verify across a few files) reached 12 before anything had gone wrong — and hitting it is no longer silent: the turn adds `turn budget reached — send anything to carry on`. `loop.ts` now owns `DEFAULT_MAX_TURNS` and `config.ts` re-exports it, so the number has one home.
 
 ### 0i. Compaction Aims at a Size, Not at a Count of Turns (ADR-024)
 - **A compacted session is left at `targetPercent` of its window** — 40% by default, clamped to a 30–50% band — instead of at "the last six turns". Two turns can be two thousand tokens or ninety thousand, so a count kept far too little in a tool-heavy session and left far too much in a quiet one; a size is the thing that can be aimed at.

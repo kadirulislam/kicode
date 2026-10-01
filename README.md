@@ -827,6 +827,30 @@ was built with, so stopping one turn leaves the session ready for the next.
 A pipe, `-p`, or `--no-tui` session keeps the terminal's own `Ctrl+C`, which
 exits: there is no turn controller in the plain prompt.
 
+Not every stop is yours. A turn ends when the model *answers* — it asked for
+tools, or it said something and was allowed to finish. Two kinds of reply are
+not answers, and both used to end the turn in silence:
+
+- **A reply the endpoint cut off.** KiCode sends no `max_tokens`, so the
+  gateway's own default is the output cap — often 4 096 tokens — and a long
+  answer or a long list of tool calls runs into it. `finish_reason: "length"`
+  says so, and the words that did arrive are kept: the next request continues
+  the half-finished thought rather than starting the answer again.
+- **A reply with nothing in it.** No words and no tool call is not an answer to
+  anything, so the same question goes out again — unchanged, because an empty
+  assistant message is a turn the model never really made.
+
+Both are asked again up to three times in a row, and any turn that actually ran
+a tool gets the allowance back, since progress is the thing that bound protects.
+Each attempt carries a dim note — `the reply was cut off — asking it to carry
+on`, `the model answered with nothing — asking again` — so what you are watching
+is the endpoint's cap or a hiccup, not the model deciding it was done.
+
+One request budget bounds the whole thing: 40 model turns per request of yours
+(the old 12 was reached by ordinary work — look, read, edit, verify — before
+anything had gone wrong). A turn that does run out says so — `turn budget
+reached — send anything to carry on` — instead of the transcript just stopping.
+
 ## Build and plan mode
 
 `Shift+Tab` switches the session between two modes, shown on the pill at the
@@ -1171,9 +1195,13 @@ src/types.ts            shared message/tool/stream types
 
 One `agent.send(text)` call drives as many model turns as it takes. Each turn
 streams to the terminal, executes every tool call it asked for, appends the
-results as `tool` messages, and loops until the model answers without calling a
-tool. Malformed tool arguments and unknown tools are reported back to the model
-rather than crashing the run, and `maxTurns` bounds a model that never stops.
+results as `tool` messages, and loops until the model *answers*: a turn that
+asked for tools, or one that said something and was allowed to finish. A reply
+the endpoint cut off at its output cap and a reply with neither words nor a tool
+call are not answers, so the turn asks again — a few times, and never at the
+cost of an unbounded loop. Malformed tool arguments and unknown tools are
+reported back to the model rather than crashing the run, and `maxTurns` (40)
+bounds a model that never stops.
 
 ### The one genuinely tricky part
 

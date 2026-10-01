@@ -27,6 +27,12 @@ describe("loadConfig defaults", () => {
     expect(config.model).toBe("env-model");
   });
 
+  it("gives a turn enough requests for a task, and still a bound", () => {
+    // Ordinary work — look, read, change, verify — used to run into the twelve
+    // it was given, and a task that was not finished simply ended.
+    expect(loadConfig({}, {}).maxTurns).toBe(40);
+  });
+
   it("starts on the default theme, and takes one from the environment or the file", () => {
     expect(loadConfig({}, {}).theme).toBe(DEFAULT_THEME);
     expect(loadConfig({ KICODE_THEME: "nord" }, {}).theme).toBe("nord");

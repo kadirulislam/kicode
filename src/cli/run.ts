@@ -1105,7 +1105,19 @@ async function render(events: AsyncGenerator<AgentEvent, void, void>, io: Io): P
           `\u001b[2m[compacted ${event.summarized} earlier messages: ~${event.before} → ~${event.after} tokens, target ~${event.target}]\u001b[0m`,
         );
         break;
+      case "continued":
+        io.writeLine(
+          `\u001b[2m${
+            event.reason === "empty"
+              ? "the model answered with nothing — asking again"
+              : "the reply was cut off — asking it to carry on"
+          }\u001b[0m`,
+        );
+        break;
       case "done":
+        // A turn that ran out of requests ended on its own account, and the
+        // blank line underneath would otherwise be the whole explanation.
+        if (event.reason === "max-turns") io.writeLine("\u001b[2mturn budget reached\u001b[0m");
         io.writeLine();
         break;
     }

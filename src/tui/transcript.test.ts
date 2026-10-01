@@ -224,6 +224,39 @@ describe("the line under an answer", () => {
     });
   });
 
+  it("says why the model stopped mid-sentence, and asks it on", () => {
+    const entries = feed([
+      { type: "text", delta: "I was in the middle of say" },
+      { type: "continued", reason: "truncated", attempt: 1 },
+    ]);
+
+    expect(entries.at(-1)).toEqual({
+      kind: "note",
+      text: "the reply was cut off — asking it to carry on",
+      tone: "dim",
+    });
+  });
+
+  it("names a reply that had nothing in it, and a turn that ran out of requests", () => {
+    // Both used to end the turn in silence, which is what made the stop read as
+    // a glitch rather than as something the endpoint did.
+    const empty = feed([{ type: "continued", reason: "empty", attempt: 2 }]);
+    expect(empty.at(-1)).toEqual({
+      kind: "note",
+      text: "the model answered with nothing — asking again",
+      tone: "dim",
+    });
+
+    const spent = feed([{ type: "done", reason: "max-turns", ms: 100, model: "m" }], turn);
+    expect(spent.at(-2)).toEqual({
+      kind: "note",
+      text: "turn budget reached — send anything to carry on",
+      tone: "warn",
+    });
+    // The per-answer line still lands under it, so the turn keeps its timing.
+    expect(spent.at(-1)).toMatchObject({ kind: "meta" });
+  });
+
   it("does not repeat the budget note it comes after", () => {
     const entries = feed([
       { type: "budget", spent: 10, limit: 10 },

@@ -1,7 +1,7 @@
 import type { AskFn } from "./ask";
 import { environmentPrompt } from "./environment";
 import { imageUrl, type PastedImage } from "../clipboard";
-import type { AssistantMessage, ChatMessage, ContentPart, Provider, Usage } from "../types";
+import type { AssistantMessage, ChatMessage, ContentPart, FinishReason, Provider, Usage } from "../types";
 import type { QuotaReading } from "../routes/quota";
 import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions } from "./compaction";
 import type { ToolRegistry } from "./tools/types";
@@ -41,6 +41,15 @@ export type AgentEvent =
   | { type: "quota"; reading: QuotaReading }
   /** The session's token ceiling stopped the turn. */
   | { type: "budget"; spent: number; limit: number }
+  /**
+   * The reply was not an answer, so another one was asked for.
+   *
+   * The endpoint's output cap cut it off, or it arrived with neither words nor
+   * a tool call. Said out loud because the user watched the model stop
+   * mid-sentence, and "the cap did that" is not the same news as "the model
+   * was finished".
+   */
+  | { type: "continued"; reason: "truncated" | "empty"; attempt: number }
   /**
    * The model thinking, before it answered. Only from endpoints that stream it.
    *
@@ -131,7 +140,24 @@ export const PLAN_MODE_PROMPT = [
   "- When the plan is presented, stop. The user switches back to build mode with shift+tab.",
 ].join("\n");
 
-const DEFAULT_MAX_TURNS = 12;
+/**
+ * How many requests one turn may make before it stops of its own accord.
+ *
+ * A request is one model turn, and a task needs several: look, read, change,
+ * verify. Twelve was the old bound and ordinary work reached it — the task was
+ * not done, the model had not said it was, and the run simply ended. Forty is
+ * still a bound, but it is one a real task does not hit by accident.
+ */
+export const DEFAULT_MAX_TURNS = 40;
+
+/**
+ * How many times one turn may re-ask a reply that was not an answer.
+ *
+ * Bounded because an endpoint that always cuts its replies off would otherwise
+ * be asked forever; three is enough room for a long answer to arrive in
+ * instalments.
+ */
+const MAX_CONTINUATIONS = 3;
 
 /**
  * The error a cancelled turn ends with.
@@ -351,6 +377,10 @@ export class Agent {
       ...(completionTokens > 0 ? { completionTokens } : {}),
     });
 
+    // How many replies in a row were not answers. Reset by any turn that ran a
+    // tool, because that is progress — the thing this counter exists to bound.
+    let continuations = 0;
+
     for (let turn = 0; turn < this.maxTurns; turn++) {
       yield* this.maybeCompact();
 
@@ -364,6 +394,9 @@ export class Agent {
       }
 
       let assistant: AssistantMessage | null = null;
+      // Why the endpoint stopped writing. `length` means its own output cap cut
+      // the reply off mid-thought, which is not the same thing as an answer.
+      let finishReason: FinishReason = "stop";
       // The reply as it streams, so a stopped turn can keep it. The provider's
       // `finish` message is the authoritative copy, but a cancelled stream
       // never sends one — these deltas are all there is of what it said.
@@ -386,6 +419,7 @@ export class Agent {
             yield event;
           } else if (event.type === "finish") {
             assistant = event.message;
+            finishReason = event.finishReason;
             this.countUsage(event.usage);
             completionTokens += event.usage?.completionTokens ?? 0;
           }
@@ -406,12 +440,38 @@ export class Agent {
         return;
       }
 
-      this.messages.push(assistant);
       const calls = assistant.tool_calls ?? [];
+      const said = (assistant.content ?? "").trim().length > 0;
+
+      // A turn ends at an answer — not merely at the absence of a tool call.
+      // Two kinds of reply are not answers and both used to end the turn in
+      // silence: one the endpoint cut off at its output cap (`length`), and one
+      // that arrived with neither words nor a tool call. The work was not done
+      // and the model had not said it was, so the turn asks again.
+      if (calls.length === 0 && (finishReason !== "stop" || !said) && continuations < MAX_CONTINUATIONS) {
+        continuations += 1;
+        // Words that were cut off are kept and built on — they are what the
+        // model had written, and the next request continues from them. A reply
+        // with no words at all is not kept: an empty assistant message is a
+        // turn the model never really made, and some endpoints refuse one back.
+        if (said) this.messages.push(assistant);
+        yield { type: "continued", reason: said ? "truncated" : "empty", attempt: continuations };
+        continue;
+      }
+
+      // Progress, so the allowance is fresh for whatever comes next.
+      if (calls.length > 0) continuations = 0;
+
       if (calls.length === 0) {
+        // The words, when there were any, are the answer and are kept. An
+        // empty reply that has run out of allowances is dropped rather than
+        // recorded as a turn that said nothing.
+        if (said) this.messages.push(assistant);
         yield done("complete");
         return;
       }
+
+      this.messages.push(assistant);
 
       for (const call of calls) {
         const name = call.function.name;
