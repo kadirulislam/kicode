@@ -311,7 +311,7 @@ describe("runTui", () => {
 
     app.input.write("a long one\r");
     await tick(30);
-    expect(app.screen()).toContain("thinking…");
+    expect(app.screen()).toContain("Agent is Thinking");
 
     // The first press is about the work, not the window: it stops the turn.
     app.input.write("\u0003");
@@ -2141,6 +2141,48 @@ describe("the slash commands", () => {
     expect(app.lastFrame()).toContain("FREE · tools");
     expect(app.lastFrame()).not.toContain("$0.00");
     expect(app.lastFrame()).not.toContain("expensive-model");
+
+    await finish(app, done);
+  });
+
+  it("filters models by provider dropdown and tab", async () => {
+    const app = harness({
+      listProviders: async () => [
+        { label: "tokenharbor", value: "https://api.tokenharbor.com" },
+        { label: "opencode", value: "https://api.opencode.ai" },
+      ],
+      listModels: async (url) => {
+        if (url?.includes("tokenharbor")) {
+          return [{ id: "claude-3-7-sonnet" }, { id: "gpt-4o" }];
+        }
+        return [{ id: "mimo-v2" }];
+      },
+    });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("/models\r");
+    await tick(30);
+
+    expect(app.lastFrame()).toContain("provider: all ▾");
+    expect(app.lastFrame()).toContain("ctrl+p select provider");
+
+    // Open provider dropdown with ctrl+p
+    app.input.write("\u0010");
+    await tick(30);
+
+    expect(app.lastFrame()).toContain("Select Provider");
+    expect(app.lastFrame()).toContain("All Providers");
+    expect(app.lastFrame()).toContain("tokenharbor");
+    expect(app.lastFrame()).toContain("opencode");
+
+    // Select tokenharbor (row 1)
+    app.input.write("\u001b[B\r");
+    await tick(30);
+
+    expect(app.lastFrame()).toContain("provider: tokenharbor ▾");
+    expect(app.lastFrame()).toContain("claude-3-7-sonnet");
+    expect(app.lastFrame()).not.toContain("mimo-v2");
 
     await finish(app, done);
   });

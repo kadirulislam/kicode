@@ -368,13 +368,13 @@ describe("the bottom bar", () => {
     expect(footer).toContain("↓ 4 tools");
     expect(footer).toContain("304.8K");
     expect(footer).toContain("(29%)");
-    expect(footer.trimEnd().endsWith("ctrl+p commands")).toBe(true);
+    expect(footer).not.toContain("ctrl+p");
   });
 
   it("says nothing about usage before anything is spent", () => {
     const footer = draw({ usage: { tokens: 0, budget: 128_000, tools: 0 } }).plain.at(-1) ?? "";
 
-    expect(footer).toContain("ctrl+p commands");
+    expect(footer).not.toContain("ctrl+p");
     expect(footer).not.toContain("%");
   });
 
@@ -465,7 +465,7 @@ describe("the command palette", () => {
     const { plain, frame } = draw({ palette }, { cols: 80, rows: 12 });
 
     expect(frame.lines).toHaveLength(12);
-    expect(plain.at(-1)).toContain("ctrl+p");
+    expect(plain.at(-1)).toContain("kicode");
   });
 
   it("windows a list too long for the room around the selection", () => {
@@ -648,10 +648,10 @@ describe("the picker", () => {
     expect(plain[title]?.startsWith("  ")).toBe(true);
   });
 
-  it("replaces the transcript while something is being chosen", () => {
-    const text = draw({ picker, entries: conversation }).plain.join("\n");
+  it("renders over the conversation while something is being chosen", () => {
+    const { plain } = draw({ picker, entries: conversation });
 
-    expect(text).not.toContain("why is the build failing?");
+    expect(plain.join("\n")).toContain("Select model");
   });
 
   it("offers its own keys in the footer", () => {
@@ -711,6 +711,19 @@ describe("the picker", () => {
     expect(plain[heading - 1]?.replace(/[│┌└─]/g, "").trim()).toBe("");
   });
 
+  it("deduplicates group headings across consecutive items", () => {
+    const items = [
+      { label: "session A", value: "s1", group: "Today" },
+      { label: "session B", value: "s2", group: "Today" },
+      { label: "session C", value: "s3", group: "Yesterday" },
+    ];
+    const text = draw({ picker: { title: "Sessions", query: "", items, selected: 0 } }).plain.join("\n");
+    const todayMatches = text.match(/Today/g);
+    expect(todayMatches).toHaveLength(1);
+    const yesterdayMatches = text.match(/Yesterday/g);
+    expect(yesterdayMatches).toHaveLength(1);
+  });
+
   it("names every extra key it answers to", () => {
     const text = draw({
       picker: {
@@ -727,20 +740,19 @@ describe("the picker", () => {
     expect(text).toContain("favorite");
   });
 
-  it("sits at the foot of the page, just above the input area", () => {
+  it("sits in the center of the page", () => {
     const { frame, plain } = draw({
       entries: conversation,
       picker: { ...picker, items: picker.items.slice(0, 1), selected: 0 },
     });
 
-    // The card's last row is the last row of the page, and the rule that opens
-    // the input area is the next row after it — a picker is answered from the
-    // keyboard, so it belongs where the eye already is.
     const rule = plain.findIndex((line) => /^─{20,}$/.test(line));
     const page = frame.lines.slice(0, rule);
+    const topEdge = page.findIndex((line) => line.includes(bg(theme.panel)));
     const bottomEdge = page.findLastIndex((line) => line.includes(bg(theme.panel)));
-    expect(bottomEdge).toBeGreaterThan(0);
-    expect(bottomEdge).toBe(page.length - 1);
+    expect(topEdge).toBeGreaterThan(0);
+    expect(bottomEdge).toBeGreaterThan(topEdge);
+    expect(bottomEdge).toBeLessThan(page.length - 1);
   });
 
   it("leaves the conversation on screen behind it, faded", () => {
@@ -1275,7 +1287,7 @@ describe("the blocks", () => {
     expect(rows.length).toBeGreaterThanOrEqual(5);
     for (const row of rows) expect(strip(row).trimStart().startsWith("▌")).toBe(false);
     // The footer goes back to the background: the box is the box.
-    const footer = frame.lines.find((line) => strip(line).includes("ctrl+p commands"));
+    const footer = frame.lines.at(-1)!;
     expect(footer).not.toContain(fill);
   });
 
@@ -1756,18 +1768,11 @@ describe("the settings that change the display", () => {
   const tall = { cols: 80, rows: 40 } as const;
   const shown = (over: Partial<TuiState> = {}) => draw(over, tall).plain.join("\n");
 
-  it("keeps the tab bar out of the way while there is one session", () => {
+  it("keeps the tab bar and +NEW accessible while sidebar is on or auto", () => {
     const auto = draw({ entries: [], settings: { ...withTabs, sidebar: "auto" } });
-    expect(auto.plain[0]).not.toContain(NEW_TAB);
-    // And with two sessions it comes back on its own.
-    const two = draw({
-      tabs: [
-        { id: "s1", title: "new session", current: true },
-        { id: "s2", title: "build failure", current: false },
-      ],
-      settings: { ...withTabs, sidebar: "auto" },
-    });
-    expect(two.plain[0]).toContain(NEW_TAB);
+    expect(auto.plain[0]).toContain(NEW_TAB);
+    const off = draw({ entries: [], settings: { ...withTabs, sidebar: "off" } });
+    expect(off.plain[0]).not.toContain(NEW_TAB);
   });
 
   it("gives the row back to the transcript, so a hidden sidebar is not a wasted row", () => {

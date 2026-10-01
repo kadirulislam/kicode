@@ -99,7 +99,7 @@ export function defaultViewSettings(): ViewSettings {
     theme: themeNames()[0] ?? "kicode",
     colorMode: "dark",
     animations: "on",
-    sidebar: "auto",
+    sidebar: "on",
     scrollbar: "on",
     thinking: "show",
     markdown: "rendered",

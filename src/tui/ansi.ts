@@ -61,7 +61,7 @@ export const ENABLE_WRAP = "\u001b[?7h";
 export const DISABLE_WRAP = "\u001b[?7l";
 
 export function cursorTo(row: number, col: number): string {
-  return `\u001b[${row + 1};${col + 1}H`;
+  return `\u001b[${Math.max(row, 1)};${Math.max(col, 1)}H`;
 }
 
 let colorEnabled = true;
@@ -377,4 +377,4 @@ export function truncateSpans(spans: readonly Span[], width: number): Span[] {
   out.push({ text: "…" });
   return out;
 }
-
+export const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;

@@ -71,8 +71,13 @@ import {
 } from "./settings";
 import type { AddProviderResult } from "../providers/services";
 import {
+  addToHistory,
+  createHistoryItem,
   decodeImagePreview,
   formatTextPreview,
+  loadSavedClipboardHistory,
+  saveClipboardHistory,
+  type ClipboardHistoryItem,
   type ClipboardRead,
   type PastedImage,
 } from "../clipboard";
@@ -159,7 +164,7 @@ function formatSessionDate(iso: string): string | null {
   return iso.slice(0, 10);
 }
 
-/** Groups sessions by calendar date: Today, Tue Sep 29 2026, etc. */
+/** Groups sessions by calendar date: Today, Yesterday, Previous 7 Days, Previous 30 Days, Month Year. */
 function sessionGroup(session: SessionSummary): string {
   let date: Date | null = null;
   if (session.updatedAt) {
@@ -175,13 +180,22 @@ function sessionGroup(session: SessionSummary): string {
   if (!date) return "Other";
 
   const now = new Date();
-  const isToday =
-    date.getFullYear() === now.getFullYear() &&
-    date.getMonth() === now.getMonth() &&
-    date.getDate() === now.getDate();
-  if (isToday) return "Today";
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const startOfYesterday = startOfToday - 86_400_000;
+  const startOf7Days = startOfToday - 6 * 86_400_000;
+  const startOf30Days = startOfToday - 29 * 86_400_000;
+  const t = date.getTime();
 
-  return date.toDateString();
+  if (t >= startOfToday) return "Today";
+  if (t >= startOfYesterday) return "Yesterday";
+  if (t >= startOf7Days) return "Previous 7 Days";
+  if (t >= startOf30Days) return "Previous 30 Days";
+
+  const months = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+  ];
+  return `${months[date.getMonth()]} ${date.getFullYear()}`;
 }
 
 /** One line describing the session's token budget, either way. */
@@ -496,6 +510,8 @@ class TuiApp {
   private baseUrl: string;
   /** Models used this session, newest first, for the `Recent` group. */
   private recentModels: ModelChoice[] = [];
+  /** Selected provider filter for the /models picker (null = all providers). */
+  private selectedModelProvider: string | null = null;
   /** Models kept to hand, read from the store and written back on a toggle. */
   private favorites: ModelRef[] = [];
   /** Images pasted for the next turn, sent with it and then forgotten. */
@@ -549,7 +565,12 @@ class TuiApp {
      * `rows` rebuilds the whole list for a tab, so the filter lives with the
      * data it filters rather than in the renderer.
      */
-    tabs?: { labels: readonly string[]; active: number; rows: (active: number) => readonly PickItem[] };
+    tabs?: {
+      labels: readonly string[];
+      active: number;
+      rows: (active: number) => readonly PickItem[];
+      onTabClick?: (index: number) => boolean | void;
+    };
     pick: (value: string) => void | Promise<void>;
     /**
      * Told which row is under the cursor as it moves, for a list whose choice
@@ -588,6 +609,8 @@ class TuiApp {
   private clipboardMenu: ClipboardMenuState | null = null;
   /** True while clipboard context menu preview is being loaded. */
   private clipboardMenuOpening = false;
+  /** Recent clipboard items (last 5 text or images) saved across sessions. */
+  private clipboardHistory: ClipboardHistoryItem[] = [];
   /** Timestamp of last right-click to ignore terminal's automatic paste. */
   private lastRightClickTime = 0;
   /** Whether model execution or session is currently paused. */
@@ -648,6 +671,7 @@ class TuiApp {
     this.baseUrl = options.baseUrl;
     this.cwd = options.cwd;
     this.config = options.config ?? null;
+    this.clipboardHistory = loadSavedClipboardHistory();
   }
 
   async start(): Promise<number> {
@@ -1113,10 +1137,11 @@ class TuiApp {
   private recoveryModal(failed: { title: string; body: string }): Modal {
     return {
       title: failed.title,
+      tone: "error",
       // One span per line, with the newline in front of every line but the
       // first: a row's spans are glued together, so a gateway message that was
       // written as four lines would otherwise be printed as one run-on row.
-      body: failed.body.split("\n").map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.dim)),
+      body: failed.body.split("\n").map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.text)),
       choices: [
         { key: "r", label: "retry" },
         { key: "m", label: "choose model" },
@@ -1673,6 +1698,11 @@ class TuiApp {
    * and not sent on its own, because "look at this" is never the whole request.
    * Neither answer is silence: an empty clipboard says it is empty.
    */
+  private recordClipboardItem(item: ClipboardHistoryItem): void {
+    this.clipboardHistory = addToHistory(this.clipboardHistory, item);
+    saveClipboardHistory(this.clipboardHistory);
+  }
+
   private async pasteFromClipboard(): Promise<void> {
     if (!this.options.readClipboard) {
       this.note("this run cannot read the clipboard", "warn");
@@ -1694,6 +1724,9 @@ class TuiApp {
       this.draw();
       return;
     }
+
+    const historyItem = createHistoryItem(read);
+    if (historyItem) this.recordClipboardItem(historyItem);
 
     if (read.kind === "text") {
       await this.handleKeys([{ type: "paste", text: read.text }]);
@@ -2779,9 +2812,21 @@ class TuiApp {
       return;
     }
 
+    // Sort newest first so date groups appear in clean chronological order
+    const sorted = [...others].sort((a, b) => {
+      if (a.updatedAt && b.updatedAt) {
+        const timeA = Date.parse(a.updatedAt);
+        const timeB = Date.parse(b.updatedAt);
+        if (!Number.isNaN(timeA) && !Number.isNaN(timeB) && timeA !== timeB) {
+          return timeB - timeA;
+        }
+      }
+      return 0;
+    });
+
     this.openPicker(
       "Sessions",
-      others.map((session) => this.sessionRow(session)),
+      sorted.map((session) => this.sessionRow(session)),
       (id) => this.switchSession(id),
       [
         {
@@ -2867,6 +2912,8 @@ class TuiApp {
     const copied = await this.options.copyToClipboard?.(text).catch(() => false);
 
     if (copied) {
+      const historyItem = createHistoryItem({ kind: "text", text });
+      if (historyItem) this.recordClipboardItem(historyItem);
       this.copiedNotice = `conversation (${text.length} chars)`;
       if (this.copiedTimer) clearTimeout(this.copiedTimer);
       this.copiedTimer = setTimeout(() => {
@@ -3031,6 +3078,30 @@ class TuiApp {
     // A row's value has to carry the provider as well, so the choice moves both.
     const choice = new Map<string, { baseUrl: string; model: string }>();
 
+    // Available provider names from groups
+    const availableProviders = Array.from(
+      new Set(groups.map((g) => g.label).filter((l): l is string => Boolean(l))),
+    );
+
+    if (this.selectedModelProvider && !availableProviders.includes(this.selectedModelProvider)) {
+      this.selectedModelProvider = null;
+    }
+
+    let activeFilter = initialFilter;
+
+    const pass = (id: string, baseUrl?: string, modelMap?: Map<string, { id: string; free?: boolean }>): boolean => {
+      const info = (baseUrl ? modelMap?.get(`${baseUrl}#${id}`) : undefined) ?? modelMap?.get(id);
+      const free = isFree(id, info);
+      return activeFilter === "all" || (activeFilter === "free" ? free : !free);
+    };
+
+    const providerMatches = (baseUrl: string, groupLabel?: string): boolean => {
+      if (!this.selectedModelProvider) return true;
+      if (groupLabel && groupLabel === this.selectedModelProvider) return true;
+      const matched = groups.find((g) => g.baseUrl === baseUrl);
+      return matched?.label === this.selectedModelProvider;
+    };
+
     /**
      * The rows as they stand right now.
      *
@@ -3039,6 +3110,7 @@ class TuiApp {
      * keeps the same group order and the same values as the first build.
      */
     const rows = (filter: ModelFilter): PickItem[] => {
+      activeFilter = filter;
       const items: PickItem[] = [];
 
       const modelMap = new Map<
@@ -3052,16 +3124,13 @@ class TuiApp {
         }
       }
 
-      // One predicate decides every row, shortcuts included, so a tab cannot
-      // mean one thing in the list and another in Recent.
-      const pass = (id: string, baseUrl?: string): boolean => {
-        const info = (baseUrl ? modelMap.get(`${baseUrl}#${id}`) : undefined) ?? modelMap.get(id);
-        const free = isFree(id, info);
-        return filter === "all" || (filter === "free" ? free : !free);
-      };
       // A row is only worth offering if the endpoint it names still serves it.
       const serves = (entry: ModelRef): boolean =>
-        groups.some((group) => group.baseUrl === entry.baseUrl && group.models.some((model) => model.id === entry.model));
+        groups.some((group) => {
+          if (!providerMatches(group.baseUrl, group.label)) return false;
+          return group.baseUrl === entry.baseUrl && group.models.some((model) => model.id === entry.model);
+        });
+
       const row = (entry: ModelRef, groupHeading: string | null): PickItem => {
         const value = `${entry.baseUrl}#${entry.model}`;
         choice.set(value, entry);
@@ -3078,7 +3147,8 @@ class TuiApp {
         };
       };
 
-      const wanted = (entry: ModelRef): boolean => pass(entry.model, entry.baseUrl);
+      const wanted = (entry: ModelRef): boolean =>
+        pass(entry.model, entry.baseUrl, modelMap) && providerMatches(entry.baseUrl);
 
       const recent = this.recentModels.filter((entry) => serves(entry) && wanted(entry));
       recent.forEach((entry, index) => items.push(row(entry, index === 0 ? "Recent" : null)));
@@ -3091,6 +3161,8 @@ class TuiApp {
         .forEach((entry, index) => items.push(row(entry, index === 0 ? "Favorites" : null)));
 
       for (const group of groups) {
+        if (!providerMatches(group.baseUrl, group.label)) continue;
+
         // A provider that failed or serves nothing still gets a row: a provider
         // missing from the list is the thing hardest to notice, and this is the
         // only place the reason can be seen while the list is open.
@@ -3104,13 +3176,13 @@ class TuiApp {
           continue;
         }
 
-        const listed = group.models.filter((model) => pass(model.id, group.baseUrl));
+        const listed = group.models.filter((model) => pass(model.id, group.baseUrl, modelMap));
         if (listed.length === 0) {
           items.push({ label: `no ${filter} models`, value: "", group: group.label, disabled: true });
           continue;
         }
 
-        listed.forEach((model, index) => {
+        listed.forEach((model) => {
           const value = `${group.baseUrl}#${model.id}`;
           choice.set(value, { baseUrl: group.baseUrl, model: model.id });
           const providerSuffix = group.label ? ` (${group.label})` : "";
@@ -3119,9 +3191,7 @@ class TuiApp {
             value,
             current: model.id === this.model && group.baseUrl === this.baseUrl,
             ...(model.description ? { trailing: model.description } : {}),
-            // Only the first row of a group carries its heading, so a provider is
-            // named once rather than repeated down the list.
-            ...(index === 0 ? { group: group.label } : {}),
+            group: group.label,
           });
         });
       }
@@ -3129,7 +3199,13 @@ class TuiApp {
       return items;
     };
 
-    const items = rows(initialFilter);
+    let items = rows(initialFilter);
+
+    // If active provider has no models at all, reset provider filter to show all
+    if (!items.some((item) => !item.disabled) && this.selectedModelProvider) {
+      this.selectedModelProvider = null;
+      items = rows(initialFilter);
+    }
 
     // Nothing choosable at all: say why in one line rather than opening a panel
     // full of the same reason.
@@ -3144,7 +3220,20 @@ class TuiApp {
       return;
     }
 
+    const getTabLabels = (): readonly string[] => {
+      const providerSuffix = this.selectedModelProvider
+        ? `provider: ${this.selectedModelProvider} ▾`
+        : "provider: all ▾";
+      return ["all", "free", "paid", providerSuffix];
+    };
+
     const extras: PickerExtra[] = [
+      {
+        hint: ["ctrl+p", "select provider"],
+        key: "p",
+        close: false,
+        run: () => openProviderDropdown(),
+      },
       {
         hint: ["ctrl+k", "api key"],
         key: "k",
@@ -3168,32 +3257,101 @@ class TuiApp {
           // The Favorites group appears, or loses the row, as it happens — the
           // list is rebuilt in place rather than waiting for the next open, and
           // it stays on the tab it was favourited from.
-          this.replacePickerItems(rows(MODEL_FILTERS[this.picker?.tabs?.active ?? 0] ?? "all"));
+          this.replacePickerItems(rows(activeFilter));
           this.draw();
         },
       });
     }
 
-    this.openPicker(
-      "Select model",
-      items,
-      (value) => {
-        if (value.startsWith("__enter_key__#")) {
-          const parts = value.split("#");
-          const targetUrl = parts[1] || this.baseUrl;
-          const label = parts[2];
-          return this.enterApiKey(targetUrl, label);
-        }
-        const picked = choice.get(value);
-        return picked ? this.setModel(picked.model, picked.baseUrl) : undefined;
-      },
-      extras,
-      {
-        labels: MODEL_FILTER_LABELS,
-        active: Math.max(MODEL_FILTERS.indexOf(initialFilter), 0),
-        rows: (active) => rows(MODEL_FILTERS[active] ?? "all"),
-      },
-    );
+    const openProviderDropdown = (): void => {
+      const totalCount = groups.reduce((acc, g) => acc + g.models.length, 0);
+      const providerOptions: PickItem[] = [
+        {
+          label: "All Providers",
+          value: "__all__",
+          current: this.selectedModelProvider === null,
+          trailing: `${totalCount} models`,
+        },
+        ...availableProviders.map((name) => {
+          const g = groups.find((grp) => grp.label === name);
+          const count = g?.models.length ?? 0;
+          return {
+            label: name,
+            value: name,
+            current: this.selectedModelProvider === name,
+            trailing: `${count} model${count === 1 ? "" : "s"}`,
+          };
+        }),
+      ];
+
+      this.openPicker(
+        "Select Provider",
+        providerOptions,
+        (chosen) => {
+          this.selectedModelProvider = chosen === "__all__" ? null : chosen;
+          showModelPicker(activeFilter);
+        },
+        [
+          {
+            hint: ["esc", "back to models"],
+            key: "escape",
+            run: () => {
+              showModelPicker(activeFilter);
+            },
+          },
+        ],
+        undefined,
+        true,
+        "center",
+        (picked) => {
+          if (!picked) showModelPicker(activeFilter);
+        },
+      );
+    };
+
+    const showModelPicker = (currentTier: ModelFilter): void => {
+      activeFilter = currentTier;
+      const tabLabels = getTabLabels();
+      const currentItems = rows(currentTier);
+
+      this.openPicker(
+        "Select model",
+        currentItems,
+        (value) => {
+          if (value.startsWith("__enter_key__#")) {
+            const parts = value.split("#");
+            const targetUrl = parts[1] || this.baseUrl;
+            const label = parts[2];
+            return this.enterApiKey(targetUrl, label);
+          }
+          const picked = choice.get(value);
+          return picked ? this.setModel(picked.model, picked.baseUrl) : undefined;
+        },
+        extras,
+        {
+          labels: tabLabels,
+          active: MODEL_FILTERS.indexOf(currentTier) >= 0 ? MODEL_FILTERS.indexOf(currentTier) : 0,
+          rows: (active) => {
+            if (active < MODEL_FILTERS.length) {
+              activeFilter = MODEL_FILTERS[active] ?? "all";
+            }
+            return rows(activeFilter);
+          },
+          onTabClick: (index) => {
+            if (index === 3) {
+              openProviderDropdown();
+              return true;
+            }
+            if (index < MODEL_FILTERS.length) {
+              activeFilter = MODEL_FILTERS[index] ?? "all";
+            }
+            return false;
+          },
+        },
+      );
+    };
+
+    showModelPicker(initialFilter);
   }
 
   /**
@@ -3601,15 +3759,20 @@ class TuiApp {
 
   // ---- the picker ---------------------------------------------------------------
 
-  /** Shows a list to choose from until one is taken or the list is closed. */
   private openPicker(
     title: string,
     items: readonly PickItem[],
     pick: (value: string) => void | Promise<void>,
     extras?: readonly PickerExtra[],
-    tabs?: { labels: readonly string[]; active: number; rows: (active: number) => readonly PickItem[] },
+    tabs?: {
+      labels: readonly string[];
+      active: number;
+      rows: (active: number) => readonly PickItem[];
+      onTabClick?: (index: number) => boolean | void;
+    },
     searchable = true,
     position?: "center" | "top" | "bottom",
+    onClose?: (committed: boolean) => void,
   ): void {
     if (items.length === 0) {
       this.note(`nothing to choose from for ${title.toLowerCase()}`);
@@ -3627,6 +3790,7 @@ class TuiApp {
       ...(extras && extras.length > 0 ? { extras: [...extras] } : {}),
       ...(tabs ? { tabs } : {}),
       ...(position ? { position } : {}),
+      ...(onClose ? { onClose } : {}),
     };
     this.editor.clear();
     this.draw();
@@ -3742,7 +3906,12 @@ class TuiApp {
         if (!picker.tabs) return false;
         const count = picker.tabs.labels.length;
         const step = key.type === "tab" ? 1 : -1;
-        picker.tabs.active = (((picker.tabs.active + step) % count) + count) % count;
+        const nextActive = (((picker.tabs.active + step) % count) + count) % count;
+        if (picker.tabs.onTabClick && nextActive === 3) {
+          const handled = picker.tabs.onTabClick(3);
+          if (handled) return true;
+        }
+        picker.tabs.active = nextActive;
         picker.all = picker.tabs.rows(picker.tabs.active);
         refilter(picker.query);
         announce();
@@ -3912,6 +4081,10 @@ class TuiApp {
       if (this.clipboardMenu) {
         const len = this.clipboardMenu.items.length;
         this.clipboardMenu.selected = (this.clipboardMenu.selected + (delta < 0 ? -1 : 1) + len) % len;
+        if (this.clipboardMenu.items[this.clipboardMenu.selected]?.label.startsWith("───")) {
+          this.clipboardMenu.selected = (this.clipboardMenu.selected + (delta < 0 ? -1 : 1) + len) % len;
+        }
+        this.updateClipboardMenuPreview();
         return true;
       }
       if (this.picker) {
@@ -3990,6 +4163,7 @@ class TuiApp {
           }
         } else if (row.kind === "clipboard_menu" && this.clipboardMenu && this.clipboardMenu.selected !== row.index) {
           this.clipboardMenu.selected = row.index;
+          this.updateClipboardMenuPreview();
           changed = true;
         } else if (row.kind === "ask" && this.askState && this.askState.selected !== row.index) {
           this.askState.selected = row.index;
@@ -4132,7 +4306,7 @@ class TuiApp {
       return true;
     }
 
-    // Picker tab click (all, free, paid)
+    // Picker tab click (all, free, paid, provider)
     const pickerTabHit = this.panelRows.find(
       (c) =>
         c.kind === "picker_tab" &&
@@ -4140,6 +4314,10 @@ class TuiApp {
         (!c.colStart || !c.colEnd || (event.x >= c.colStart && event.x <= c.colEnd)),
     );
     if (pickerTabHit && this.picker?.tabs) {
+      if (this.picker.tabs.onTabClick) {
+        const handled = this.picker.tabs.onTabClick(pickerTabHit.index);
+        if (handled) return true;
+      }
       this.picker.tabs.active = pickerTabHit.index;
       this.picker.all = this.picker.tabs.rows(pickerTabHit.index);
       this.picker.items = filterPickItems(this.picker.all, this.picker.query);
@@ -4241,7 +4419,7 @@ class TuiApp {
         candidate.row === event.y &&
         (candidate.colStart === undefined ||
           candidate.colEnd === undefined ||
-          (event.x >= candidate.colStart && event.x <= candidate.colEnd)),
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
     );
     if (chip?.kind === "close") {
       this.clickedKey = { type: "escape" };
@@ -4366,6 +4544,19 @@ class TuiApp {
     this.run(this.writeSelection(text));
   }
 
+  private updateClipboardMenuPreview(): void {
+    if (!this.clipboardMenu) return;
+    const selectedItem = this.clipboardMenu.items[this.clipboardMenu.selected];
+    if (!selectedItem) return;
+    if (selectedItem.value.startsWith("history_")) {
+      const idx = Number.parseInt(selectedItem.value.slice("history_".length), 10);
+      const hItem = this.clipboardHistory[idx];
+      if (hItem && hItem.preview) {
+        this.clipboardMenu.preview = hItem.preview;
+      }
+    }
+  }
+
   /**
    * Opens clipboard options context menu on a right click in the chat area.
    */
@@ -4376,65 +4567,84 @@ class TuiApp {
       const hasSelection = Boolean(this.selection && selected.trim());
       const hasAttached = this.attached.length > 0;
 
-      let preview: ClipboardMenuState["preview"] = { kind: "empty" };
       if (this.options.readClipboard) {
         try {
           const read = await this.options.readClipboard();
-          if (read && read.kind === "image") {
-            const imgInfo = decodeImagePreview(read.image);
-            preview = {
-              kind: "image",
-              image: imgInfo,
-            };
-          } else if (read && read.kind === "text") {
-            const textInfo = formatTextPreview(read.text);
-            preview = {
-              kind: "text",
-              text: textInfo.text,
-              lines: textInfo.lines,
-              totalLines: textInfo.totalLines,
-              totalChars: textInfo.totalChars,
-            };
+          if (read && read.kind !== "empty") {
+            const item = createHistoryItem(read);
+            if (item) this.recordClipboardItem(item);
           }
         } catch {
-          preview = { kind: "empty" };
+          // ignore error reading clipboard
         }
       }
 
       const items: PickItem[] = [];
-      if (preview.kind === "text") {
+      const historySlice = this.clipboardHistory.slice(0, 5);
+
+      const formatAge = (ts: number): string => {
+        const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+        if (diffSec < 60) return "just now";
+        const diffMin = Math.floor(diffSec / 60);
+        if (diffMin < 60) return `${diffMin}m ago`;
+        const diffHr = Math.floor(diffMin / 60);
+        if (diffHr < 24) return `${diffHr}h ago`;
+        return `${Math.floor(diffHr / 24)}d ago`;
+      };
+
+      for (let i = 0; i < historySlice.length; i++) {
+        const h = historySlice[i];
+        const num = i + 1;
+        const age = formatAge(h.timestamp);
+        if (h.kind === "text") {
+          const firstLine = (h.text.split("\n")[0] || "").trim();
+          const snippet = firstLine.length > 28 ? `${firstLine.slice(0, 27)}…` : (firstLine || "empty text");
+          const chars = h.text.length;
+          const lines = h.text.split("\n").length;
+          const lineDesc = lines > 1 ? `${lines} lines · ` : "";
+          items.push({
+            label: `${num}. [TXT] "${snippet}"`,
+            value: `history_${i}`,
+            description: `${lineDesc}${chars} chars · ${age}`,
+          });
+        } else if (h.kind === "image" && h.image) {
+          const mime = h.image.mime.replace(/^image\//, "").toUpperCase();
+          const dims = h.preview?.image?.width && h.preview?.image?.height
+            ? `${h.preview.image.width}×${h.preview.image.height} `
+            : "";
+          const sizeKb = Math.max(Math.round(h.image.bytes / 1024), 1);
+          items.push({
+            label: `${num}. [IMG] ${dims}${mime} (${sizeKb} KB)`,
+            value: `history_${i}`,
+            description: `Copied image · ${age}`,
+          });
+        }
+      }
+
+      if (items.length > 0) {
         items.push({
-          label: "Paste Text from Clipboard",
-          value: "paste_text",
-          description: `Paste ${preview.totalChars ?? 0} chars into editor`,
+          label: "─── Actions ───",
+          value: "divider_actions",
+          description: "Quick Actions",
         });
       }
-      if (preview.kind === "image") {
-        items.push({
-          label: "Paste Image from Clipboard",
-          value: "paste_image",
-          description: `Attach image (${Math.max(Math.round((preview.image?.bytes ?? 0) / 1024), 1)} KB)`,
-        });
-      }
+
       items.push({
         label: "Paste from Clipboard (Smart)",
         value: "paste",
         description: "Auto-detect text or image",
       });
-      if (preview.kind !== "text") {
-        items.push({
-          label: "Paste Text from Clipboard",
-          value: "paste_text",
-          description: "Paste clipboard text into editor",
-        });
-      }
-      if (preview.kind !== "image") {
-        items.push({
-          label: "Paste Image from Clipboard",
-          value: "paste_image",
-          description: "Attach copied screenshot or image",
-        });
-      }
+      items.push({
+        label: "Paste Text from Clipboard",
+        value: "paste_text",
+        description: "Paste clipboard text into editor",
+      });
+      items.push({
+        label: "Paste Image from Clipboard",
+        value: "paste_image",
+        description: "Attach copied screenshot or image",
+      });
+
       if (hasSelection) {
         items.push({
           label: "Copy Selection",
@@ -4467,6 +4677,11 @@ class TuiApp {
         description: "Copy full conversation transcript",
       });
 
+      let preview: ClipboardMenuState["preview"] = { kind: "empty" };
+      if (historySlice.length > 0 && historySlice[0].preview) {
+        preview = historySlice[0].preview;
+      }
+
       this.clipboardMenu = {
         items,
         selected: 0,
@@ -4479,6 +4694,22 @@ class TuiApp {
   }
 
   private async executeClipboardAction(action: string): Promise<void> {
+    if (action.startsWith("history_")) {
+      const idx = Number.parseInt(action.slice("history_".length), 10);
+      const item = this.clipboardHistory[idx];
+      if (item) {
+        if (item.kind === "text") {
+          this.editor.insert(item.text);
+          this.notice = null;
+        } else if (item.kind === "image" && item.image) {
+          this.attached = [...this.attached, item.image];
+          this.notice = span(`attached image ${this.attached.length} · ${Math.max(Math.round(item.image.bytes / 1024), 1)} KB`, this.styles.dim);
+        }
+        this.draw();
+      }
+      return;
+    }
+
     switch (action) {
       case "copy_selection":
         this.copySelection();
@@ -4552,24 +4783,38 @@ class TuiApp {
       case "escape":
         this.clipboardMenu = null;
         return true;
-      case "up":
+      case "up": {
         cm.selected = (cm.selected - 1 + cm.items.length) % cm.items.length;
+        if (cm.items[cm.selected]?.label.startsWith("───")) {
+          cm.selected = (cm.selected - 1 + cm.items.length) % cm.items.length;
+        }
+        this.updateClipboardMenuPreview();
         return true;
-      case "down":
+      }
+      case "down": {
         cm.selected = (cm.selected + 1) % cm.items.length;
+        if (cm.items[cm.selected]?.label.startsWith("───")) {
+          cm.selected = (cm.selected + 1) % cm.items.length;
+        }
+        this.updateClipboardMenuPreview();
         return true;
+      }
       case "enter": {
         const item = cm.items[cm.selected];
-        this.clipboardMenu = null;
-        if (item) await this.executeClipboardAction(item.value);
+        if (item && !item.label.startsWith("───")) {
+          this.clipboardMenu = null;
+          await this.executeClipboardAction(item.value);
+        }
         return true;
       }
       case "text": {
         const num = Number.parseInt(key.text, 10);
         if (num >= 1 && num <= cm.items.length) {
           const item = cm.items[num - 1];
-          this.clipboardMenu = null;
-          if (item) await this.executeClipboardAction(item.value);
+          if (item && !item.label.startsWith("───")) {
+            this.clipboardMenu = null;
+            await this.executeClipboardAction(item.value);
+          }
         }
         return true;
       }
@@ -4629,6 +4874,8 @@ class TuiApp {
     const lines = text.split("\n").length;
     const what = lines === 1 ? "1 line" : `${lines} lines`;
     if (copied) {
+      const historyItem = createHistoryItem({ kind: "text", text });
+      if (historyItem) this.recordClipboardItem(historyItem);
       this.copiedNotice = `${what} (${text.length} chars)`;
       if (this.copiedTimer) clearTimeout(this.copiedTimer);
       this.copiedTimer = setTimeout(() => {
@@ -4696,7 +4943,7 @@ class TuiApp {
     this.closedSessions.add(id);
     this.tabs = this.tabs.filter((tab) => tab.id !== id);
 
-    if (id === this.sessionId) {
+    if (this.tabs.length === 0 || id === this.sessionId) {
       const other = this.tabs[0];
       if (!other) {
         await this.newSession();
@@ -4721,7 +4968,7 @@ class TuiApp {
       await this.options.deleteSession(id).catch(() => false);
     }
 
-    if (id === this.sessionId) {
+    if (this.tabs.length === 0 || id === this.sessionId) {
       const other = this.tabs[0];
       if (!other) {
         await this.newSession();

@@ -1,6 +1,6 @@
 import { imageCount, messageText, type ChatMessage } from "../types";
 import type { AgentEvent } from "../agent/loop";
-import { type Span, flatten, span } from "./ansi";
+import { type Span, flatten, span, SPINNER } from "./ansi";
 import { markdownSpans, tidy } from "./markdown";
 import { type ViewSettings, defaultViewSettings } from "./settings";
 import type { Styles } from "./theme";
@@ -42,8 +42,8 @@ export type Entry =
  */
 const VERBOSITY: Record<ViewSettings["verbosity"], { lines: number; chars: number; thoughtLines: number }> = {
   low: { lines: 1, chars: 120, thoughtLines: 0 },
-  medium: { lines: 3, chars: 400, thoughtLines: 6 },
-  high: { lines: 12, chars: 2000, thoughtLines: 40 },
+  medium: { lines: 3, chars: 400, thoughtLines: 0 },
+  high: { lines: 12, chars: 2000, thoughtLines: 20 },
 };
 
 /** One value of one argument, on one line: past this, it is a wall, not a summary. */
@@ -374,7 +374,12 @@ export function entriesToText(entries: readonly Entry[]): string {
   return `${blocks.filter((block) => block.length > 0).join("\n\n")}\n`;
 }
 
-export function entrySpans(entry: Entry, styles: Styles, view: ViewSettings = defaultViewSettings()): Span[] {
+export function entrySpans(
+  entry: Entry,
+  styles: Styles,
+  view: ViewSettings = defaultViewSettings(),
+  spinnerFrame = 0,
+): Span[] {
   switch (entry.kind) {
     case "user":
       // No sender header: the block's own bar and fill say who wrote it, and
@@ -400,20 +405,19 @@ export function entrySpans(entry: Entry, styles: Styles, view: ViewSettings = de
     }
     case "thought": {
       if (view.thinking === "hide") return [];
-      // One line, whichever way it is drawn: while the model is thinking, the
-      // latest sentence ticks in place — alive, but never a wall of stream —
-      // and once the answer starts it collapses to the elapsed time. The full
-      // stream is not gone: verbosity=high still shows it while running.
-      if (entry.open && view.verbosity !== "high") {
-        const fragment = lastThoughtFragment(entry.text);
+      if (entry.open) {
+        const glyph = SPINNER[spinnerFrame % SPINNER.length] ?? "⠋";
+        const dotCount = (spinnerFrame % 3) + 1;
+        const dots = ".".repeat(dotCount);
         return [
           span("\n"),
-          span("▌ thinking ", styles.accent),
-          span(fragment, styles.faint),
+          span("▌ ", styles.accent),
+          span(`${glyph} `, styles.accentBold),
+          span(`Agent is Thinking${dots}`, styles.dim),
           span("\n"),
         ];
       }
-      const heading = entry.open ? "Thought…" : `Thought: ${formatElapsed(entry.ms)}`;
+      const heading = `Thought: ${formatElapsed(entry.ms)}`;
       const rows: Span[] = [span("\n"), span(heading, styles.faint)];
       const budget = VERBOSITY[view.verbosity].thoughtLines;
       const body = entry.text.trim();

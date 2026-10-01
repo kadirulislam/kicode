@@ -456,6 +456,7 @@ export type Styles = {
   accentBold: string;
   ok: string;
   error: string;
+  errorBold: string;
   warn: string;
   code: string;
   bold: string;
@@ -507,6 +508,7 @@ export function buildStyles(theme: Theme): Styles {
     accentBold: style(fg(theme.accent), BOLD),
     ok: style(fg(theme.ok)),
     error: style(fg(theme.error)),
+    errorBold: style(fg(theme.error), BOLD),
     warn: style(fg(theme.warn)),
     code: style(fg(theme.code)),
     bold: style(fg(theme.text), BOLD),

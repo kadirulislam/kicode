@@ -13,6 +13,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { inflateSync } from "node:zlib";
 
 export type PastedImage = {
   /** Base64, without the `data:` prefix. */
@@ -119,9 +122,8 @@ function clipsFor(platform: NodeJS.Platform): ClipSource[] {
     const image = [
       "Add-Type -AssemblyName System.Windows.Forms,System.Drawing;",
       "$img = [System.Windows.Forms.Clipboard]::GetImage();",
-      "if ($img) { $ms = New-Object System.IO.MemoryStream;",
-      "$img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png);",
-      "[Console]::Out.Write([Convert]::ToBase64String($ms.ToArray())) }",
+      "if (!$img) { try { $files = [System.Windows.Forms.Clipboard]::GetFileDropList(); if ($files -and $files.Count -gt 0) { $f = $files[0]; if ($f -match '\\.(png|jpg|jpeg|gif|bmp|webp)$' -and (Test-Path $f)) { $img = [System.Drawing.Image]::FromFile($f); } } } catch { } }",
+      "if ($img) { $ms = New-Object System.IO.MemoryStream; $img.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png); [Console]::Out.Write([Convert]::ToBase64String($ms.ToArray())); $img.Dispose(); }",
     ].join(" ");
     const text = [
       "Add-Type -AssemblyName System.Windows.Forms;",
@@ -228,24 +230,26 @@ export function imageUrl(image: PastedImage): string {
   return `data:${image.mime};base64,${image.data}`;
 }
 
+export type PixelSpan = { text: string; style: string };
+
 export type ImagePreviewInfo = {
   width?: number;
   height?: number;
   mime: string;
   bytes: number;
   grid?: string[];
+  pixelRows?: PixelSpan[][];
 };
 
 /**
  * Decodes PNG thumbnail pixel grid using 24-bit ANSI colors.
  */
-export function decodeImagePreview(image: PastedImage, targetCols = 16, targetRows = 4): ImagePreviewInfo {
+export function decodeImagePreview(image: PastedImage, targetCols = 24, targetRows = 6): ImagePreviewInfo {
   const result: ImagePreviewInfo = {
     mime: image.mime,
     bytes: image.bytes,
   };
   try {
-    const { inflateSync } = require("node:zlib");
     const buf = Buffer.from(image.data, "base64");
     if (buf.length < 8) return result;
     if (buf.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
@@ -274,25 +278,51 @@ export function decodeImagePreview(image: PastedImage, targetCols = 16, targetRo
         const raw = inflateSync(Buffer.concat(idats));
         const stride = 1 + width * bpp;
         const lines: string[] = [];
+        const pixelRows: PixelSpan[][] = [];
         for (let r = 0; r < targetRows; r++) {
-          const y = Math.floor((r / targetRows) * height);
-          const rowOffset = y * stride;
+          const yTop = Math.floor(((r * 2) / (targetRows * 2)) * height);
+          const yBot = Math.floor(((r * 2 + 1) / (targetRows * 2)) * height);
+          const topOffset = yTop * stride;
+          const botOffset = yBot * stride;
           let rowStr = "";
+          const rowSpans: PixelSpan[] = [];
           for (let c = 0; c < targetCols; c++) {
             const x = Math.floor((c / targetCols) * width);
-            const pxOffset = rowOffset + 1 + x * bpp;
-            if (pxOffset + 2 < raw.length) {
-              const red = raw[pxOffset];
-              const green = bpp >= 3 ? raw[pxOffset + 1] : red;
-              const blue = bpp >= 3 ? raw[pxOffset + 2] : red;
-              rowStr += `\u001b[38;2;${red};${green};${blue}m█\u001b[0m`;
-            } else {
-              rowStr += `\u001b[38;2;120;120;120m█\u001b[0m`;
+            const topPx = topOffset + 1 + x * bpp;
+            const botPx = botOffset + 1 + x * bpp;
+            let tR = 120, tG = 120, tB = 120;
+            let bR = 120, bG = 120, bB = 120;
+            if (topPx + 2 < raw.length) {
+              tR = raw[topPx];
+              tG = bpp >= 3 ? raw[topPx + 1] : tR;
+              tB = bpp >= 3 ? raw[topPx + 2] : tR;
+              if (bpp === 4) {
+                const a = raw[topPx + 3] / 255;
+                tR = Math.round(tR * a + 26 * (1 - a));
+                tG = Math.round(tG * a + 27 * (1 - a));
+                tB = Math.round(tB * a + 38 * (1 - a));
+              }
             }
+            if (botPx + 2 < raw.length) {
+              bR = raw[botPx];
+              bG = bpp >= 3 ? raw[botPx + 1] : bR;
+              bB = bpp >= 3 ? raw[botPx + 2] : bR;
+              if (bpp === 4) {
+                const a = raw[botPx + 3] / 255;
+                bR = Math.round(bR * a + 26 * (1 - a));
+                bG = Math.round(bG * a + 27 * (1 - a));
+                bB = Math.round(bB * a + 38 * (1 - a));
+              }
+            }
+            const colorCode = `\u001b[38;2;${tR};${tG};${tB}m\u001b[48;2;${bR};${bG};${bB}m`;
+            rowStr += `${colorCode}▀\u001b[0m`;
+            rowSpans.push({ text: "▀", style: colorCode });
           }
           lines.push(rowStr);
+          pixelRows.push(rowSpans);
         }
         result.grid = lines;
+        result.pixelRows = pixelRows;
       }
     }
   } catch {
@@ -323,4 +353,154 @@ export function formatTextPreview(text: string, maxLines = 4, maxCols = 60): Tex
     totalLines,
     totalChars,
   };
+}
+
+export type ClipboardHistoryItem = {
+  id: string;
+  kind: "text" | "image";
+  text?: string;
+  image?: PastedImage;
+  timestamp: number;
+  preview: {
+    kind: "text" | "image" | "empty";
+    text?: string;
+    lines?: string[];
+    totalLines?: number;
+    totalChars?: number;
+    image?: ImagePreviewInfo;
+  };
+};
+
+export const MAX_CLIPBOARD_HISTORY = 5;
+
+export function createHistoryItem(read: ClipboardRead): ClipboardHistoryItem | null {
+  if (read.kind === "text") {
+    const textInfo = formatTextPreview(read.text);
+    return {
+      id: `clip_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      kind: "text",
+      text: read.text,
+      timestamp: Date.now(),
+      preview: {
+        kind: "text",
+        text: textInfo.text,
+        lines: textInfo.lines,
+        totalLines: textInfo.totalLines,
+        totalChars: textInfo.totalChars,
+      },
+    };
+  }
+  if (read.kind === "image") {
+    const imgInfo = decodeImagePreview(read.image);
+    return {
+      id: `clip_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      kind: "image",
+      image: read.image,
+      timestamp: Date.now(),
+      preview: {
+        kind: "image",
+        image: imgInfo,
+      },
+    };
+  }
+  return null;
+}
+
+export function addToHistory(
+  history: readonly ClipboardHistoryItem[],
+  item: ClipboardHistoryItem,
+): ClipboardHistoryItem[] {
+  if (history.length > 0) {
+    const top = history[0];
+    if (top && top.kind === item.kind) {
+      if (item.kind === "text" && top.text === item.text) return [...history];
+      if (item.kind === "image" && top.image?.data === item.image?.data) return [...history];
+    }
+  }
+  const filtered = history.filter((h) => {
+    if (h.kind !== item.kind) return true;
+    if (item.kind === "text") return h.text !== item.text;
+    if (item.kind === "image") return h.image?.data !== item.image?.data;
+    return true;
+  });
+  return [item, ...filtered].slice(0, MAX_CLIPBOARD_HISTORY);
+}
+
+export function getClipboardHistoryPath(): string {
+  const home = process.env.HOME || process.env.USERPROFILE || "";
+  if (!home) return "";
+  return join(home, ".kicode", "clipboard_history.json");
+}
+
+export function loadSavedClipboardHistory(): ClipboardHistoryItem[] {
+  try {
+    const filePath = getClipboardHistoryPath();
+    if (!filePath || !existsSync(filePath)) return [];
+    const content = readFileSync(filePath, "utf8");
+    const parsed = JSON.parse(content);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .slice(0, MAX_CLIPBOARD_HISTORY)
+      .map((entry) => {
+        if (entry.kind === "text" && typeof entry.text === "string") {
+          const textInfo = formatTextPreview(entry.text);
+          return {
+            id: entry.id || `clip_${Date.now()}`,
+            kind: "text" as const,
+            text: entry.text,
+            timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now(),
+            preview: {
+              kind: "text" as const,
+              text: textInfo.text,
+              lines: textInfo.lines,
+              totalLines: textInfo.totalLines,
+              totalChars: textInfo.totalChars,
+            },
+          };
+        }
+        if (entry.kind === "image" && entry.image && typeof entry.image.data === "string") {
+          const imgInfo = decodeImagePreview(entry.image);
+          return {
+            id: entry.id || `clip_${Date.now()}`,
+            kind: "image" as const,
+            image: entry.image,
+            timestamp: typeof entry.timestamp === "number" ? entry.timestamp : Date.now(),
+            preview: {
+              kind: "image" as const,
+              image: imgInfo,
+            },
+          };
+        }
+        return null;
+      })
+      .filter((item): item is ClipboardHistoryItem => item !== null);
+  } catch {
+    return [];
+  }
+}
+
+export function saveClipboardHistory(history: readonly ClipboardHistoryItem[]): void {
+  try {
+    const filePath = getClipboardHistoryPath();
+    if (!filePath) return;
+    const dir = dirname(filePath);
+    if (!existsSync(dir)) {
+      mkdirSync(dir, { recursive: true });
+    }
+    const toSave = history.slice(0, MAX_CLIPBOARD_HISTORY).map((item) => {
+      if (item.kind === "image" && (item.image?.bytes ?? 0) > 2 * 1024 * 1024) {
+        return null;
+      }
+      return {
+        id: item.id,
+        kind: item.kind,
+        text: item.text,
+        image: item.image,
+        timestamp: item.timestamp,
+      };
+    }).filter(Boolean);
+    writeFileSync(filePath, JSON.stringify(toSave, null, 2), "utf8");
+  } catch {
+    // Best-effort persistence
+  }
 }

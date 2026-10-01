@@ -66,21 +66,20 @@ describe("the model's reasoning", () => {
     expect(copied).not.toContain("Build ·");
   });
 
-  it("ticks one live line while running, instead of the stream", () => {
+  it("shows an animated Agent is Thinking... loading line while running, instead of the stream", () => {
     const open: Entry = { kind: "thought", text: "First I read the config. Now checking the schema.", ms: 0, open: true, since: 0 };
     const rendered = text([open]);
 
-    expect(rendered).toContain("thinking");
-    // The newest sentence is what it is doing now…
-    expect(rendered).toContain("Now checking the schema.");
-    // …and the older ones are not on screen.
+    expect(rendered).toContain("Agent is Thinking");
+    // Streams of text are hidden while thinking
+    expect(rendered).not.toContain("Now checking the schema.");
     expect(rendered).not.toContain("First I read the config");
   });
 
-  it("shows the full stream only at verbosity high", () => {
-    const open: Entry = { kind: "thought", text: "one. two.", ms: 0, open: true, since: 0 };
+  it("shows the thought body only at verbosity high once closed", () => {
+    const closed: Entry = { kind: "thought", text: "one. two.", ms: 100, open: false, since: 0 };
     const high = { ...view, verbosity: "high" as const };
-    const spans = entrySpans(open, styles, high).map((item) => item.text).join("");
+    const spans = entrySpans(closed, styles, high).map((item) => item.text).join("");
 
     expect(spans).toContain("one.");
     expect(spans).toContain("two.");

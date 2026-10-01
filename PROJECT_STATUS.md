@@ -1,13 +1,29 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 1001 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 1005 Tests Passing (49 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~473 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~480 KB) via `npm run build`
 
 ---
 
 ## 🚀 Key Features Implemented
+
+### 0. Clipboard Image Preview & Last-5 History
+- **Vivid True-Color Image Preview Before Pasting**: When copying an image (or selecting an image from history), the clipboard modal displays a real 24×6 true-color thumbnail rendered via terminal half-blocks (`▀`), with 24-bit RGB foreground and background sampling decoded directly from PNG via `node:zlib`. Colors are safely preserved across ANSI escape sanitization.
+- **Last-5 Copied History Persistence**: Automatically captures up to 5 recent copied items (text and images) across copies and right-clicks, persistently saved to `~/.kicode/clipboard_history.json`.
+- **Dynamic Arrow/Hover Preview Switching**: Navigating the clipboard menu (`↑`/`↓` arrow keys, mouse hover, or mouse wheel) dynamically swaps the preview card between text line-numbered snippets and true-color image previews for whichever history entry is focused.
+- **Quick 1-5 Number / Click Selection**: Pressing `1`–`5` or clicking any history entry immediately pastes the text into the editor or attaches the image to the upcoming prompt.
+
+### 0a. Animated "Agent is Thinking..." & Square Blocks Mode Working Animation
+- **Animated Thinking Loading Indicator**: When the model is thinking or processing a turn, instead of dumping walls or streaming fragments of raw reasoning text into the transcript, an animated loading indicator (`▌ ⠋ Agent is Thinking...`) displays with a rotating Braille spinner and cycling ellipsis dots in the transcript above the prompt box.
+- **Square Blocks Mode Status Animation**: Replaced duplicate bottom status line text with a pulsing 5-block square animation (`■ ■ □ □ □`) that explains mode execution (e.g. `Working in Build mode...`), cleanly separating thinking state in the transcript from operational mode status below the prompt box.
+- **Minimal Right-Bottom Footer**: Removed the redundant `ctrl+p commands` text from the bottom-right footer, leaving the footer clean and exclusively focused on the working directory and token/tool metrics.
+
+### 0a. Warning Modal Redesign & Persistent Tab Bar
+- **Warning / Turn Failure Modal UI**: Recovery modal (`The turn failed — what now?`) now renders with a rich red alert shade tint (`blend(theme.panel, theme.error, 0.18)`), vibrant red left indicator bar (`▌`), `⚠ ` warning glyph, bold error title, and vertical air/spacers separating title, body, and decision chips.
+- **Full Chip Mouse Click Targets**: Decision chips (`[r] retry`, `[m] choose model`, `[×] dismiss`) now have hit boundaries spanning the complete button bracket and label text (with ±1 col tolerance), allowing effortless mouse clicks anywhere on the button or text.
+- **Tab Bar Persistence Across Session Closures**: `sidebar` now defaults to `"on"` (rather than `"auto"`), ensuring that closing tabs down to a single session or a new session leaves the tab bar and `+NEW` button fully visible and clickable. Closing the last session cleanly resets to an accessible new session with the `+NEW` tab button ready.
 
 ### 0a. Rate-Limit Recovery, Attachments & File Upload (ADR-013/014/015/016)
 - **429 handling in three layers** (ADR-013): a rate limit pauses before the next route (gateway `Retry-After` honoured to a 60s ceiling, else 1.5s growing per hop) with a live busy-row countdown; an active `:free` model can implicitly fall back to the endpoint's other free models discovered from its own `/models` list the first time the chain runs dry (capped at 4 hops, never a paid model, **opt-in** via `"fallbackAuto": true` / `KICODE_FALLBACK_AUTO=on`); and an all-routes-capped turn ends with advice ("wait a bit, or /models") instead of a bare HTTP code.
@@ -17,9 +33,11 @@
 - **Plan-mode false refusals fixed**: the read-only classifier now permits `2>/dev/null`, `2>&1` and `1>/dev/null` — the stderr-quieting idioms models reach for constantly while exploring — while any redirect to a real path stays refused.
 - **Request block chips**: the user message's fill hugs its text (widest row + 2 cells) rather than stretching to the column, so short messages no longer read as a background cut off mid-row.
 
-### 0b. Panels Float Over a Faded Page (ADR-017)
+### 0b. Panels Float Over a Faded Page (ADR-017) & Centered Clean Cards
 - **Modals and pickers are cards over the transcript, not instead of it**: `/models`, `/settings` and the full-screen menus render the conversation behind them and fade it (one faint style on the page background, chip fills included), so the only thing at full strength is the card being answered.
-- **The card sits at the foot of the page**, directly above the rule and the prompt — where the eye already is while typing — instead of being centred in the transcript. The permission modal gets the same fade behind it, and the mode row and footer keep their colour because they carry the keys the card is asking for.
+- **Centered, comfortable card layout with max-content width**: Picker dialogs (`/models`, `/sessions`, provider dropdown, etc.) are centered both horizontally and vertically in the terminal window. Width calculates cleanly from content (`max-content` based on title, tabs, items, trailing badges, and hints, clamped between 24 and 76 columns) so cards hug their contents cleanly without empty horizontal dead space or background bleeding. Tab context menus remain docked at the tab bar, rate limiting/warning modals remain docked above the prompt, and clipboard menus remain docked above the input bar. Item click hit detection covers the full row width for smooth selection.
+- **Clean date grouping for `/sessions`**: Sessions are bucketed into clean date sections (`Today`, `Yesterday`, `Previous 7 Days`, `Previous 30 Days`, and `Month Year`), sorted chronologically newest-first. Group headings are deduplicated across consecutive rows so section titles render once at the top of each block instead of repeating on every row.
+- **Provider filter dropdown for `/models`**: In the `/models` picker, users can filter models across providers under `paid`, `free`, or `all` tiers. A `provider: <name> ▾` tab and `ctrl+p: select provider` key offer an interactive dropdown listing `All Providers` and each endpoint with model counts. Clicking or selecting a provider filters the model list instantly.
 - **While a card is up it owns the clicks**: the faded page contributes no click targets, so an unclear row cannot be pressed by accident.
 
 ### 0d. The Card Answers to a Mouse, and Escape Is a Chip (ADR-019)

@@ -1,6 +1,14 @@
 # KiCode Task & Roadmap Tracking
 
-## Completed Tasks
+- [x] Distinct animations for Agent thinking vs mode status: Replaced duplicate bottom "Agent is Thinking..." with a dynamic 5-block glowing pulse square blocks animation (`■ ■ □ □ □`) that explains mode execution (`Working in Build mode...`), keeping "Agent is Thinking..." exclusively in the transcript above the input box.
+- [x] Enhanced Clipboard UI with vivid 24×6 true-color half-block (`▀`) thumbnail image preview directly inside the modal before pasting, persistent last-5 copied history (`~/.kicode/clipboard_history.json`), dynamic arrow/hover preview switching across entries, and 1-5 number / mouse click selection for instant pasting or image attachment.
+- [x] Removed unused `ctrl+p commands` text from the bottom-right footer, keeping the footer minimal and focused on directory and usage metrics.
+- [x] Added animated loading indicator with rotating spinner and pulsing dots (`▌ ⠋ Agent is Thinking...`) while the Agent is thinking or waiting for responses, hiding raw reasoning text streams during thinking.
+- [x] Centered picker dialog cards (`/models`, `/sessions`, provider dropdown) both vertically and horizontally in the terminal window using clean max-content width sizing (hugs contents without dead horizontal space), while docking tab context menus at the tab bar, rate limiting warnings above prompt, and clipboard menus above input. Added full row mouse hit detection for effortless selection.
+- [x] Date grouping for `/sessions`: categorizes sessions into clean buckets ("Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", and "Month Year"), sorted chronologically newest-first.
+- [x] Provider filtering for `/models`: added dynamic `provider: <name> ▾` tab and `ctrl+p: select provider` dropdown picker, allowing instant filtering across providers under `paid`, `free`, or `all` tiers.
+- [x] Redesigned turn failure/warning modal with red alert shade tint, clean warning icon, top/middle/bottom spacing, and full clickable chip hit targets spanning button and label with column tolerance. Fixed tab bar disappearance when closing tabs: `sidebar` defaults to `on` so the active tab and `+NEW` button remain visible and clickable across all sessions.
+- [x] Fixed input box surface fill and caret alignment: `cursorTo` now uses 1-based coordinates directly without double incrementing, and full-width surfaces (`theme.input`, `theme.panel`) erase with their own background rather than leaving cut-off stripes.
 - [x] Limit default tabs to max 3.
 - [ ] Persist the active tab selection across sessions — **not built**: tabs restore via `--continue` / `latestSessionFor` only, so a restart returns to the newest session rather than the one that was in front. (Corrected 2026-10-01; the earlier entry here claimed this was done.)
 - [x] Detachable and removable image chips directly inside chat prompt area.

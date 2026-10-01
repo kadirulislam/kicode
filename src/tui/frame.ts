@@ -11,6 +11,7 @@ import {
   spansWidth,
   stripAnsi,
   textWidth,
+  SPINNER,
   truncateSpans,
   wrapSpans,
 } from "./ansi";
@@ -19,7 +20,7 @@ import { type LineEditor, editorRows } from "./editor";
 import { LOGO_TEXT, logoRows } from "./logo";
 import type { MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
-import type { Styles, Theme } from "./theme";
+import { blend, type Styles, type Theme } from "./theme";
 import { type Entry, entrySpans } from "./transcript";
 
 /**
@@ -65,6 +66,8 @@ export type Modal = {
    * the two name every key exactly once, and `esc` is a chip in both places.
    */
   footer?: readonly (readonly [string, string])[];
+  /** Optional tone for the card: "error" gives an alert red theme and border. */
+  tone?: "warn" | "error" | "accent";
 };
 
 /** The slash-command list, floating above the prompt. */
@@ -391,6 +394,7 @@ export type ClipboardMenuState = {
       width?: number;
       height?: number;
       grid?: string[];
+      pixelRows?: { text: string; style: string }[][];
     };
   };
 };
@@ -419,7 +423,6 @@ type Hit = { kind: PanelKind; row: number; index: number; colStart?: number; col
 /** A drawn panel: its rows, and which of them can be clicked. */
 type Panel = { lines: BodyLine[]; hits: Hit[]; scrollbarMax?: number };
 
-const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const BAR = "▌";
 /**
  * How much air sits between things is *not* here.
@@ -488,10 +491,10 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     // A card row carrying text covers the page; the card's own blank padding
     // rows let the faded page show through around it.
     if (cardLine && cardLine.spans.length > 0) {
-      allRows.push({ spans: cardLine.spans, background: cardLine.background ?? theme.panel });
+      allRows.push({ spans: cardLine.spans, background: cardLine.background ?? theme.panel, page: cardLine.page ?? theme.bg });
       cardRows.add(allRows.length - 1);
     } else {
-      allRows.push({ spans: line?.spans ?? [], background: line?.background ?? theme.bg });
+      allRows.push({ spans: line?.spans ?? [], background: line?.background ?? theme.bg, page: line?.page ?? theme.bg });
     }
   }
   for (const bRow of bottom.rows) {
@@ -515,7 +518,8 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     const r = allRows[i]!;
     const screenRow = i + 1;
     const spans = state.selection ? selectRow(r.spans, screenRow, state.selection, styles) : r.spans;
-    lines.push(paint(spans, r.background, usable, theme.bg));
+    const pageBg = r.page ?? (r.background === theme.block ? theme.bg : r.background);
+    lines.push(paint(spans, r.background, usable, pageBg));
   }
 
   // A backstop, not a policy: the room budgets above mean the bottom block and
@@ -544,22 +548,25 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     const start = Math.max(pageRows - box.length, 0);
     // The card is the only thing on screen that has to be read, so the page
     // under it steps back — the same treatment a picker's card gets.
-    for (let row = 0; row < Math.min(pageRows, lines.length); row++) {
+    for (let row = 0; row < pageRows; row++) {
       if (row >= start && row < start + box.length) continue;
       const source = allRows[row];
       if (source && source.spans.length > 0) lines[row] = paint(fadeRow(source, styles, theme).spans, theme.bg, usable, theme.bg);
     }
+    const isError = state.modal.tone === "error" || /failed|rate.?limit|error|denied|refused/i.test(state.modal.title);
+    const modalBg = isError ? blend(theme.panel, theme.error, 0.35) : theme.panel;
+
     box.forEach((spans, offset) => {
       const row = start + offset;
       if (row < 0 || row >= lines.length) return;
       const screenRow = row + 1;
       const boxSpans = padSpans([span(" ".repeat(left)), ...spans], left + boxWidth);
       const highlighted = state.selection ? selectRow(boxSpans, screenRow, state.selection, styles) : boxSpans;
-      lines[row] = paint(highlighted, theme.panel, usable, theme.bg);
+      lines[row] = paint(highlighted, modalBg, usable, theme.bg);
     });
     // One target per chip, in the columns it was drawn in: the card's own rows
     // are already in screen coordinates, so they need no offset.
-    const decisionRow = start + box.length - 1 + 1;
+    const decisionRow = start + card.decisionRowOffset + 1;
     for (const chip of card.chips) {
       modalRows.push({
         kind: "modal_choice",
@@ -645,10 +652,10 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
  * something to switch to.
  */
 function sidebarShown(state: TuiState): boolean {
-  const sidebar = state.settings?.sidebar ?? "auto";
-  if (sidebar === "on") return true;
+  const sidebar = state.settings?.sidebar ?? "on";
   if (sidebar === "off") return false;
-  return state.tabs.length > 1;
+  // Always show the tab bar so the active tab and +NEW button remain accessible
+  return true;
 }
 
 /**
@@ -747,7 +754,7 @@ function cut(text: string, max: number): string {
  * a user turn is filled all the way across, and the row's own colour is what
  * makes it read as one block rather than as bold text with a bar beside it.
  */
-type BodyLine = { spans: Span[]; background: string };
+type BodyLine = { spans: Span[]; background: string; page?: string };
 
 /** Rows of a plain list, all on the background. */
 function plain(rows: readonly Span[][], background: string): BodyLine[] {
@@ -844,7 +851,22 @@ function renderBody(
       for (let row = 0; row < gap; row++) lines.push({ spans: [], background: theme.bg });
     }
     starts.push(lines.length);
-    lines.push(...entryLines(entry, styles, theme, inner, view));
+    lines.push(...entryLines(entry, styles, theme, inner, view, state.spinnerFrame));
+  }
+
+  const lastEntry = state.entries.at(-1);
+  const hasOpenThought = state.entries.some((e) => e.kind === "thought" && e.open);
+  if (!hasOpenThought && state.busy && (lastEntry?.kind === "user" || lastEntry?.kind === "result")) {
+    const glyph = SPINNER[state.spinnerFrame % SPINNER.length] ?? "⠋";
+    const dotCount = (state.spinnerFrame % 3) + 1;
+    const dots = ".".repeat(dotCount);
+    const thinkingRow: Span[] = [
+      span("▌ ", styles.accent),
+      span(`${glyph} `, styles.accentBold),
+      span(`Agent is Thinking${dots}`, styles.dim),
+    ];
+    lines.push({ spans: [], background: theme.bg });
+    lines.push({ spans: thinkingRow, background: theme.bg });
   }
   // Guttering last, so an entry never has to know where the column begins.
   const drawn = gutter === 0 ? lines : lines.map(gutterLine);
@@ -966,7 +988,14 @@ function wrappedRows(spans: Span[], width: number): Span[][] {
   return rows;
 }
 
-function entryLines(entry: Entry, styles: Styles, theme: Theme, width: number, view: ViewSettings): BodyLine[] {
+function entryLines(
+  entry: Entry,
+  styles: Styles,
+  theme: Theme,
+  width: number,
+  view: ViewSettings,
+  spinnerFrame = 0,
+): BodyLine[] {
   if (entry.kind === "user") {
     const body: Span[] = [
       ...(entry.images && view.transcriptImages === "on"
@@ -981,7 +1010,11 @@ function entryLines(entry: Entry, styles: Styles, theme: Theme, width: number, v
     // `spacing.block`, because a single row still looks like a line that happens
     // to be tall while three is a panel — and which of those a person wants is
     // theirs to say, not this function's.
-    const bar = (row: Span[]): BodyLine => ({ spans: [span(`${BAR} `, styles.accent), ...row], background: theme.block });
+    const bar = (row: Span[]): BodyLine => ({
+      spans: [span(`${BAR} `, styles.accent), ...row],
+      background: theme.block,
+      page: theme.bg,
+    });
     const pad = Array.from({ length: view.spacing.block }, () => bar([]));
     const block = [...pad, ...rows.map(bar), ...pad];
     // A block is a rectangle that hugs its text: every row's fill runs to the
@@ -997,7 +1030,7 @@ function entryLines(entry: Entry, styles: Styles, theme: Theme, width: number, v
   }
 
   if (entry.kind === "tool" || entry.kind === "result") {
-    const rows = wrappedRows(entrySpans(entry, styles, view), Math.max(width - 2, 1));
+    const rows = wrappedRows(entrySpans(entry, styles, view, spinnerFrame), Math.max(width - 2, 1));
     const ruled = (row: Span[]): BodyLine => ({
       // An empty row keeps the rule without the space after it, so a gap inside
       // the run is a line rather than a line and a stray trailing cell.
@@ -1010,7 +1043,7 @@ function entryLines(entry: Entry, styles: Styles, theme: Theme, width: number, v
     return entry.kind === "tool" ? [ruled([]), ...rows.map(ruled)] : rows.map(ruled);
   }
 
-  return wrappedRows(entrySpans(entry, styles, view), width).map((spans) => ({ spans, background: theme.bg }));
+  return wrappedRows(entrySpans(entry, styles, view, spinnerFrame), width).map((spans) => ({ spans, background: theme.bg }));
 }
 
 /** The empty-transcript screen: the wordmark, centred, with a hint under it. */
@@ -1380,7 +1413,7 @@ function menuRow(row: MenuRow, isSelected: boolean, inner: number, styles: Style
 }
 
 /** How wide a card may get, and how narrow it may be before a flat list wins. */
-const PANEL_MAX = 84;
+const PANEL_MAX = 76;
 const PANEL_MIN = 24;
 /** The air inside a card's own edge, on both sides of every row. */
 const CARD_PAD = "  ";
@@ -1408,12 +1441,41 @@ function renderPicker(
   usable: number,
 ): Panel {
   const isTop = picker.position === "top" || picker.title.startsWith("Tab:");
-  // Almost the whole width: a list of sessions or models is read down the
-  // screen, and a card that leaves half of it empty is a card nobody asked for.
-  const width = clamp(usable - 2 * Math.max(margin, 1) - 4, PANEL_MIN, isTop ? 64 : PANEL_MAX);
+
+  // Measure max-content width so the modal hugs its content cleanly instead of
+  // spreading out unnecessarily with wide empty gaps.
+  let contentWidth = Math.max(
+    textWidth(picker.title) + textWidth(CLOSE_CHIP) + 4,
+    textWidth(picker.query || (picker.placeholder ?? "Search")) + 4,
+    42,
+  );
+
+  if (picker.tabs) {
+    const tabsWidth =
+      picker.tabs.labels.reduce((acc, l) => acc + textWidth(l), 0) +
+      (picker.tabs.labels.length - 1) * 3 + 2;
+    contentWidth = Math.max(contentWidth, tabsWidth);
+  }
+
+  for (const item of picker.items) {
+    let itemW = 4 + textWidth(item.label);
+    if (item.description) itemW += textWidth(item.description) + 2;
+    if (item.trailing) itemW += textWidth(item.trailing) + 2;
+    contentWidth = Math.max(contentWidth, itemW);
+  }
+
+  if (picker.hints && picker.hints.length > 0) {
+    const hintsWidth =
+      picker.hints.reduce((acc, [k, l]) => acc + textWidth(k) + textWidth(l) + 3, 0) + 2;
+    contentWidth = Math.max(contentWidth, hintsWidth);
+  }
+
+  const maxAllowed = Math.min(usable - 4, isTop ? 64 : PANEL_MAX);
+  const width = clamp(contentWidth + CARD_PAD.length * 2, Math.min(PANEL_MIN, maxAllowed), maxAllowed);
   const left = isTop
     ? Math.min(margin + 2, Math.max(usable - width, 0))
     : clamp(Math.floor((usable - width) / 2), 0, Math.max(usable - width, 0));
+  const rightPad = Math.max(usable - left - width, 0);
 
   // Inside the card: a row of air at its top edge, the title, the search field,
   // the tabs when there are any, a blank, the list, and the row of air under it.
@@ -1428,12 +1490,13 @@ function renderPicker(
 
   const inner = Math.max(width - CARD_PAD.length * 2, 8);
   const card: Span[][] = [];
-  // The page beside the card, so the fill starts where the card does rather
-  // than running to the terminal's edge.
-  const side = span(" ".repeat(left), bg(theme.bg));
+  // The page beside the card on both left and right, so the card is centered
+  // and does not bleed its background across to the right edge.
+  const sideLeft = span(" ".repeat(left), bg(theme.bg));
+  const sideRight = span(" ".repeat(rightPad), bg(theme.bg));
   /** A row of the card: the air inside its edge, the content, the air again. */
   const row = (content: readonly Span[]): void => {
-    card.push([side, span(CARD_PAD), ...padSpans(content, inner), span(CARD_PAD)]);
+    card.push([sideLeft, span(CARD_PAD), ...padSpans(content, inner), span(CARD_PAD), sideRight]);
   };
 
   const hits: Hit[] = [];
@@ -1458,8 +1521,9 @@ function renderPicker(
   /** Where the cursor's row landed, and the heading of the group it is in. */
   let cursorRow = 0;
   let heading = -1;
+  let currentGroup: string | null = null;
   for (const [index, item] of picker.items.entries()) {
-    if (item.group) {
+    if (item.group && item.group !== currentGroup) {
       // A blank row above a heading separates one group from the last, so a
       // run of rows reads as one block rather than as a heading claiming the
       // rows above it too. There is none above the very first row.
@@ -1473,6 +1537,7 @@ function renderPicker(
       rows.push([span(` ${item.group}`, styles.heading)]);
       rowsIndex.push(null);
       heading = rows.length - 1;
+      currentGroup = item.group;
     }
     if (index === selected) cursorRow = rows.length;
     rows.push(itemRow(item, index === selected, inner, styles));
@@ -1501,8 +1566,8 @@ function renderPicker(
         kind: "picker",
         row: listTop + offset,
         index,
-        colStart: left + 1,
-        colEnd: left + width,
+        colStart: 1,
+        colEnd: usable,
       });
     }
   }
@@ -1519,15 +1584,13 @@ function renderPicker(
   }
   row([]);
 
-  // The card sits at the foot of the page, directly above the rule and the
-  // prompt: a picker is answered with the keyboard while the eye is already
-  // down by the input, so the choice belongs there rather than in the middle
-  // of a transcript the user is not looking at.
-  const topPad = isTop ? 0 : Math.max(height - card.length, 0);
+  // The card is centered vertically in the terminal window, except when pinned
+  // to the top (e.g. tab right-click context menus).
+  const topPad = isTop ? 0 : Math.max(Math.floor((height - card.length) / 2), 0);
   const out: BodyLine[] = [];
-  for (let i = 0; i < topPad; i++) out.push({ spans: [], background: theme.bg });
-  for (const spans of card) out.push({ spans, background: theme.panel });
-  while (out.length < height) out.push({ spans: [], background: theme.bg });
+  for (let i = 0; i < topPad; i++) out.push({ spans: [], background: theme.bg, page: theme.bg });
+  for (const spans of card) out.push({ spans, background: theme.panel, page: theme.bg });
+  while (out.length < height) out.push({ spans: [], background: theme.bg, page: theme.bg });
 
   if (topPad > 0) {
     for (const hit of hits) {
@@ -1730,25 +1793,39 @@ function modalCard(
   styles: Styles,
   boxWidth: number,
   bodyBudget: number,
-): { box: Span[][]; chips: { index: number; start: number; end: number }[] } {
+): { box: Span[][]; chips: { index: number; start: number; end: number }[]; decisionRowOffset: number } {
+  const isError = modal.tone === "error" || /failed|rate.?limit|error|denied|refused/i.test(modal.title);
+  const barStyle = isError ? styles.error : styles.warn;
   const inner = Math.max(boxWidth - 2, 8);
+  const withSpacers = isError && bodyBudget >= 4;
   const out: Span[][] = [];
-  out.push([span(`${BAR} `, styles.warn), ...truncateSpans([span(modal.title, styles.bold)], inner)]);
+
+  // Top spacer row for internal breathing room
+  if (withSpacers) out.push([span(`${BAR} `, barStyle)]);
+
+  // Title row with warning glyph
+  const titleIcon = isError ? "⚠  " : "";
+  const titleStyle = isError ? styles.errorBold : styles.bold;
+  out.push([span(`${BAR} `, barStyle), ...truncateSpans([span(`${titleIcon}${modal.title}`, titleStyle)], inner)]);
+
+  // Spacer between title and body
+  if (withSpacers) out.push([span(`${BAR} `, barStyle)]);
 
   const wrapped = wrapSpans(modal.body, inner);
   // One of the body's rows goes to the marker when there is a remainder.
-  const shown = wrapped.length > bodyBudget ? wrapped.slice(0, Math.max(bodyBudget - 1, 0)) : wrapped;
+  const actualBudget = withSpacers ? Math.max(bodyBudget - 2, 1) : bodyBudget;
+  const shown = wrapped.length > actualBudget ? wrapped.slice(0, Math.max(actualBudget - 1, 0)) : wrapped;
   const hidden = wrapped.length - shown.length;
-  for (const line of shown) out.push([span(`${BAR} `, styles.warn), ...line]);
-  if (hidden > 0 && bodyBudget >= 1) {
+  for (const line of shown) out.push([span(`${BAR} `, barStyle), ...line]);
+  if (hidden > 0 && actualBudget >= 1) {
     const tail = hidden === 1 ? "1 more line" : `${hidden} more lines`;
-    out.push([span(`${BAR} `, styles.warn), span(`… ${tail}`, styles.faint)]);
+    out.push([span(`${BAR} `, barStyle), span(`… ${tail}`, styles.faint)]);
   }
 
-  // The decision row: one chip per key, so everything the card offers is also
-  // something a mouse can press. `esc` is the close chip, as it is everywhere
-  // else, and a chip the row's right edge would cut is not offered at all — a
-  // target for something that is not on screen is worse than no target.
+  // Spacer between body and decision chips
+  if (withSpacers) out.push([span(`${BAR} `, barStyle)]);
+
+  // The decision row: one chip per key, with full clickable width covering button and label
   const chips: { index: number; start: number; end: number }[] = [];
   const decisions: Span[] = [];
   let column = 0;
@@ -1762,18 +1839,28 @@ function modalCard(
       column += 3;
     }
     const text = choice.key === "esc" ? CLOSE_CHIP : `[${choice.key}]`;
-    const width = textWidth(text);
-    // The chip's offsets are measured from the card's left edge, so they carry
-    // the `▌ ` the decision row is drawn behind — `inner` is the room the spans
-    // get, which is why the fit test uses the column without it.
-    if (column + width <= inner) chips.push({ index, start: column + DECISION_PREFIX, end: column + width - 1 + DECISION_PREFIX });
-    decisions.push(span(text, styles.accentBold));
-    column += width;
-    decisions.push(span(` ${choice.label}`, styles.dim));
+    const keyWidth = textWidth(text);
+    const btnWidth = keyWidth + 1 + choice.label.length;
+
+    // Full button + label is clickable by mouse
+    if (column + btnWidth <= inner) {
+      chips.push({
+        index,
+        start: column + DECISION_PREFIX,
+        end: column + DECISION_PREFIX + btnWidth - 1,
+      });
+    }
+
+    const keyStyle = isError && (choice.key === "r" || choice.key === "enter") ? styles.errorBold : styles.accentBold;
+    decisions.push(span(text, keyStyle));
+    column += keyWidth;
+    decisions.push(span(` ${choice.label}`, isError ? styles.bold : styles.dim));
     column += choice.label.length + 1;
   });
-  out.push([span(`${BAR} `, styles.warn), ...truncateSpans(decisions, inner)]);
-  return { box: out, chips };
+
+  const decisionRowOffset = out.length;
+  out.push([span(`${BAR} `, barStyle), ...truncateSpans(decisions, inner)]);
+  return { box: out, chips, decisionRowOffset };
 }
 
 type Bottom = {
@@ -1861,72 +1948,81 @@ function renderBottom(
       }
     };
 
-    const titlePrefix = " Clipboard & Attachment Options ";
+    const titlePrefix = " Clipboard & Recent History (Last 5) ";
     const closeSuffix = ` ${CLOSE_CHIP} `;
     const fillerTop = Math.max(inside - textWidth(titlePrefix) - textWidth(closeSuffix), 0);
     const titleRow = rows.length;
     push([
       leftPad,
       span("┌─", borderStyle),
-      span("Clipboard & Attachment Options ", styles.bold),
+      span("Clipboard & Recent History (Last 5) ", styles.bold),
       span("─".repeat(fillerTop), borderStyle),
       span(` ${CLOSE_CHIP}`, styles.hintKey),
       span(" ┐", borderStyle),
     ], theme.bg);
     hits.push(...closeChipHits(titleRow, rows[titleRow]?.spans ?? [], 0));
 
-    // Preview area: Real image grid or text grid
+    // Preview area: Real image grid (true-color half-blocks or ANSI grid) or line-numbered text
     if (cm.preview) {
       if (cm.preview.kind === "image" && cm.preview.image) {
         const img = cm.preview.image;
         const dims = img.width && img.height ? `${img.width}×${img.height} px · ` : "";
         const sizeKb = Math.max(Math.round(img.bytes / 1024), 1);
-        const imgHeader = `Image: ${img.mime} · ${dims}${sizeKb} KB`;
+        const imgHeader = `Image Preview: ${img.mime} · ${dims}${sizeKb} KB`;
         row([span(" "), span(imgHeader, styles.accentBold)]);
-        if (img.grid && img.grid.length > 0) {
+        if (img.pixelRows && img.pixelRows.length > 0) {
+          for (const pixelRow of img.pixelRows) {
+            row([span("   "), ...pixelRow]);
+          }
+        } else if (img.grid && img.grid.length > 0) {
           for (const gridLine of img.grid) {
             row([span("   "), span(gridLine)]);
           }
         }
       } else if (cm.preview.kind === "text" && cm.preview.lines) {
-        const info = `Text (${cm.preview.totalLines ?? cm.preview.lines.length} lines · ${cm.preview.totalChars ?? cm.preview.text?.length ?? 0} chars):`;
+        const info = `Text Preview (${cm.preview.totalLines ?? cm.preview.lines.length} lines · ${cm.preview.totalChars ?? cm.preview.text?.length ?? 0} chars):`;
         row([span(" "), span(info, styles.accentBold)]);
         for (const line of cm.preview.lines) {
           row([span("   "), span(line, styles.dim)]);
         }
       } else {
-        const emptyMsg = "Clipboard is currently empty (no text or image found)";
+        const emptyMsg = "Clipboard is currently empty (no recent copies)";
         row([span(" "), span(emptyMsg, styles.faint)]);
       }
-      divider("Actions");
+      divider("Choose from History or Actions");
     }
 
     const selected = clamp(cm.selected, 0, Math.max(cm.items.length - 1, 0));
     for (const [offset, item] of cm.items.entries()) {
+      if (item.label.startsWith("───")) {
+        divider(item.description);
+        continue;
+      }
       const isSelected = offset === selected;
       const rowIdx = rows.length;
       hits.push({ kind: "clipboard_menu", row: rowIdx, index: offset });
-      const numPrefix = `${offset + 1}. `;
+      const hasLeadingNumber = /^\d+\.\s/.test(item.label);
+      const numPrefix = hasLeadingNumber ? "" : `${offset + 1}. `;
       const marker = isSelected ? "❯ " : "  ";
 
       const itemSpans: Span[] = [
         span(" "),
         span(marker, isSelected ? styles.accent : styles.faint),
-        span(numPrefix, isSelected ? styles.accentBold : styles.dim),
+        ...(numPrefix ? [span(numPrefix, isSelected ? styles.accentBold : styles.dim)] : []),
         span(item.label, isSelected ? styles.accentBold : styles.text),
         ...(item.description ? [span(`  ${item.description}`, isSelected ? styles.accent : styles.dim)] : []),
       ];
       row(itemSpans);
     }
 
-    const footerText = ` ${CLOSE_CHIP} close · ↑↓ select · enter choose `;
+    const footerText = ` ${CLOSE_CHIP} close · ↑↓ select · 1-5 choose · enter paste `;
     const fillerBottom = Math.max(inside - textWidth(footerText), 0);
     const footerRow = rows.length;
     push([
       leftPad,
       span("└─", borderStyle),
       span(CLOSE_CHIP, styles.hintKey),
-      span(" close · ↑↓ select · enter choose", styles.hint),
+      span(" close · ↑↓ select · 1-5 choose · enter paste", styles.hint),
       span(` ${"─".repeat(fillerBottom)}`, borderStyle),
       span("┘", borderStyle),
     ], theme.bg);
@@ -2086,8 +2182,9 @@ function renderBottom(
   // twice spends its width on an answer the eye has already been given. One
   // screen names the mode exactly once — the pill, or the row that stands in for
   // it while a card has the keyboard.
+  const isErrorModal = state.modal && (state.modal.tone === "error" || /failed|rate.?limit|error|denied|refused/i.test(state.modal.title));
   const stateRowBg = state.modal
-    ? theme.panel
+    ? (isErrorModal ? blend(theme.panel, theme.error, 0.35) : theme.panel)
     : !state.picker && !state.ask && !state.menu
       ? boxBg
       : theme.bg;
@@ -2131,6 +2228,28 @@ function modeWord(state: TuiState, styles: Styles): { text: string; style: strin
  * pill is already saying it. The variant is warn-coloured for the same reason
  * the mode is: an unusual setting should catch the eye.
  */
+/**
+ * Dynamic square blocks animation for active status/mode operations.
+ * Sweeps a glowing pulse back and forth across 5 square blocks (■/□).
+ */
+function squareBlocksAnimation(frame: number, styles: Styles): Span[] {
+  const count = 5;
+  const cycle = (count - 1) * 2;
+  const step = frame % cycle;
+  const active = step < count ? step : cycle - step;
+  const spans: Span[] = [];
+  for (let i = 0; i < count; i++) {
+    if (i === active) {
+      spans.push(span("■ ", styles.accentBold));
+    } else if (Math.abs(i - active) === 1) {
+      spans.push(span("■ ", styles.accent));
+    } else {
+      spans.push(span("□ ", styles.faint));
+    }
+  }
+  return spans;
+}
+
 function modeSpans(state: TuiState, styles: Styles, width: number, indent: string, showMode: boolean): Span[] {
   const word = modeWord(state, styles);
   const head = [
@@ -2138,9 +2257,15 @@ function modeSpans(state: TuiState, styles: Styles, width: number, indent: strin
     ...(showMode ? [span(word.text, word.style), span(" · ", styles.faint)] : []),
   ];
   if (state.busy !== null) {
-    const glyph = SPINNER[state.spinnerFrame % SPINNER.length] ?? "⠋";
     const queueNote = state.queuedCount && state.queuedCount > 0 ? ` · ${state.queuedCount} queued` : "";
-    return [...head, span(`${glyph} `, styles.accent), span(`${state.busy}${queueNote}`, styles.dim)];
+    const blocks = squareBlocksAnimation(state.spinnerFrame, styles);
+    const modeLabel = state.isPaused ? "Paused" : `Working in ${word.text} mode...`;
+    const label = state.busy === "thinking…" ? modeLabel : state.busy;
+    return [
+      span(`${indent}  `),
+      ...blocks,
+      span(` ${label}${queueNote}`, styles.dim),
+    ];
   }
 
   if (state.copiedNotice) {
@@ -2183,7 +2308,7 @@ function footerSpans(state: TuiState, styles: Styles, usable: number): Span[] {
   let packed: Span[] = [];
   for (const group of groups) {
     const candidate = packed.length > 0 ? [...group, span("   "), ...packed] : [...group];
-    if (spansWidth(candidate) + 2 <= usable) packed = candidate;
+    if (spansWidth(candidate) + 12 <= usable) packed = candidate;
   }
 
   const room = Math.max(usable - spansWidth(packed) - 5, 4);
@@ -2248,13 +2373,13 @@ function footerHints(styles: Styles, state: TuiState): Span[] {
   // them every key is written down exactly once. The recovery card names all
   // three of its keys and adds nothing here.
   if (state.modal) return state.modal.footer ? hintPairs(state.modal.footer, styles) : [];
-  if (state.clipboardMenu) return hintPairs([["esc", "close"], ["↑↓", "select"], ["enter", "choose"]], styles);
+  if (state.clipboardMenu) return hintPairs([["esc", "close"], ["↑↓", "select"], ["1-5", "choose"], ["enter", "paste"]], styles);
   if (state.ask) return askHints(styles, state.askTyping);
   if (state.picker) return hintPairs([["↑↓", "select"], ["enter", "confirm"], ["esc", "close"]], styles);
   // A menu names its own keys on its own last row, where they are true — the
   // session's footer is a row about the session, and the panel's keys are not.
   if (state.menu) return [];
-  return [span("ctrl+p", styles.hintKey), span(" commands", styles.hint)];
+  return [];
 }
 
 /**

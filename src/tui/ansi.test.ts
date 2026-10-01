@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { INVERSE, markCells, sliceCells, spansWidth, textWidth, truncateSpans, wrapSpans, type Span } from "./ansi";
+import { INVERSE, cursorTo, markCells, sliceCells, spansWidth, textWidth, truncateSpans, wrapSpans, type Span } from "./ansi";
 
 const plain = (spans: readonly Span[]): string => spans.map((span) => span.text).join("");
 const lines = (text: string, width: number): string[] => wrapSpans([{ text }], width).map(plain);
@@ -164,5 +164,16 @@ describe("the cells a selection covers", () => {
     const marked = markCells([{ text: "abcd", style: "\u001b[31m" }], 1, 2, "\u001b[48;2;1;2;3m");
 
     expect(marked.find((span) => span.text === "bc")?.style).toBe("\u001b[48;2;1;2;3m");
+  });
+});
+
+describe("cursorTo", () => {
+  it("formats 1-based ANSI CUP sequence directly", () => {
+    expect(cursorTo(1, 1)).toBe("\u001b[1;1H");
+    expect(cursorTo(20, 11)).toBe("\u001b[20;11H");
+  });
+
+  it("clamps coordinates to at least 1", () => {
+    expect(cursorTo(0, 0)).toBe("\u001b[1;1H");
   });
 });
