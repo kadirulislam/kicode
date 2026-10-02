@@ -421,16 +421,23 @@ async function describeHttpError(response: Response, url: string): Promise<strin
 
 /**
  * Gateways that restrict which client may call them say so with a bare 401/403
- * — the same status a wrong key gets. A hint is only worth showing when the
- * body confirms it: an OpenCode-shaped AuthError on an opencode.ai endpoint is
- * their client restriction, not a typo in the key, and the model should know
- * to say that rather than send the user hunting for a key that is already set.
+ * — the same status a wrong key gets. On an opencode.ai endpoint the two are
+ * worth telling apart, because the fix is not "check your key":
+ *
+ * - A **403** is the client gate. Credentials are the thing a 403 must not be
+ *   about — a rejected key is a 401 — so this needs no confirmation from the
+ *   body, and their gateway does not always send the OpenCode-shaped
+ *   `AuthError` that older clients saw. Reading a bare 403 as "bad key" sends
+ *   the user hunting for a key that is fine.
+ * - A **401** may be either, so the body has to confirm it: an OpenCode-shaped
+ *   `AuthError`, or words that name a client/restriction rather than a key.
  */
 function clientRestrictionHint(url: string, status: number, detail: string): string {
   if (status !== 401 && status !== 403) return "";
   const isOpenCode = /(^|\.)opencode\.ai/i.test(hostOf(url) ?? "");
   if (!isOpenCode) return "";
-  const authError = /AuthError|Invalid API key/i.test(detail);
-  if (!authError) return "";
+  const confirmed =
+    status === 403 || /AuthError|Invalid API key|client|forbidden|restricted|not allowed/i.test(detail);
+  if (!confirmed) return "";
   return "\nnote: opencode.ai free models are restricted to the OpenCode client itself — a paid Zen key works from any client, or switch routes with /models (free models on OpenRouter still accept any key)";
 }

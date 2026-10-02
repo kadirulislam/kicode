@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { CONFIG_FILENAME, resolveHome } from "./paths";
@@ -70,6 +71,35 @@ export async function readConfigFiles(
   }
 
   return { entries, files, warnings };
+}
+
+/**
+ * The `brain` path a config declares, read synchronously.
+ *
+ * The brain briefing is assembled before the first request — in the same place
+ * the directory's `AGENTS.md` is read — where there is no await to be had, so
+ * the two files `readConfigFiles` reads (per-user first, the project's after
+ * it) are read here without promises. Only that one key is looked at, and every
+ * failure is a miss: a config that will not parse has already been reported by
+ * `readConfigFiles`, and this is not the place to report it twice.
+ */
+export function readConfigBrainSync(cwd: string, env: NodeJS.ProcessEnv = process.env): string | null {
+  const candidates = [path.join(resolveHome(env), CONFIG_FILENAME), path.join(cwd, CONFIG_FILENAME)];
+  let value: string | null = null;
+
+  for (const file of candidates) {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(stripBom(readFileSync(file, "utf8")));
+    } catch {
+      continue; // absent, unreadable, or unparseable is all just "no brain key"
+    }
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const brain = (parsed as Record<string, unknown>).brain;
+    if (typeof brain === "string" && brain.trim() !== "") value = brain.trim();
+  }
+
+  return value;
 }
 
 /**

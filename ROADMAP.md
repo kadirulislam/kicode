@@ -37,12 +37,32 @@ hosted service and without a second store of truth.
 - **Both stay zero-dependency**: files on disk, no index, no embeddings. At the
   scale a CLI needs, `grep` is the retrieval engine, and it is already there.
 
-### Why not do it now
+### Why it waited
 
 It multiplies the ways a prompt can grow, and the token budget in this release
-exists precisely so that growth is visible. Skills are worth building once the
-budget has been in use for a while; building both at once makes it impossible to
-tell which one blew the context.
+exists precisely so that growth is visible. Skills were worth building once the
+budget had been in use for a while; building both at once would have made it
+impossible to tell which one blew the context.
+
+### Where this landed (ADR-030, ADR-031, ADR-032)
+
+- **Memory and skills are built** (ADR-030): a bounded brain briefing is folded
+  into the system prompt, `recall` loads a body on demand, and `memory` is the
+  append-only project file under the brain. Learned skills live at
+  `~/.kicode/brain/skills/<category>/<name>/SKILL.md`, discovered recursively.
+- **A fresh user gets a brain** (ADR-031): resolution is `KI_BRAIN_PATH` →
+  `brain` in `kicode.json` → an existing `ki-agent-brain` walk →
+  `~/.kicode/brain`, and the first save *creates* one instead of refusing.
+- **A registry is distribution, not a runtime** (ADR-032): a curated official
+  repo at `skills/<category>/<name>/SKILL.md`, a generated `skills.json`
+  manifest, and installs through the existing `npx skills` CLI. The website is
+  static and discover-only; KiCode never fetches skills mid-session, so
+  **the intelligence ships in the binary and is on for everyone**, and the whole
+  marketplace can be deleted without changing the CLI.
+
+The remaining piece of this section is the seam that lets KiCode read what the
+`npx skills` CLI installs (the `.agents/skills/` convention first, then a
+first-class `kicode` entry upstream) — Phase B and C of ADR-032.
 
 ## 2. Hermes Agent
 

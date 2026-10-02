@@ -269,7 +269,9 @@ export function applyEvent(
         text:
           event.reason === "empty"
             ? "the model answered with nothing — asking again"
-            : "the reply was cut off — asking it to carry on",
+            : event.reason === "work"
+              ? "tracked work is not finished — asking it to carry on"
+              : "the reply was cut off — asking it to carry on",
         tone: "dim",
       });
       return;
@@ -277,6 +279,11 @@ export function applyEvent(
       // Deliberately silent for now: a quota reading arrives on every response,
       // and a transcript line per request would bury the conversation. It feeds
       // the route layer and, later, the budget HUD.
+      return;
+    case "plan":
+      // The checklist is already drawn from the tool's own text, and the
+      // progress panel reads the same state straight off the event. Nothing for
+      // the transcript to add.
       return;
     case "done": {
       // A turn that produced only tool calls leaves the last assistant entry

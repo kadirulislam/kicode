@@ -77,6 +77,12 @@ export type FileSettings = {
   maxTokens?: number;
   /** Shorthand for pointing this project at the bundled mock provider. */
   mock?: boolean;
+  /**
+   * Where the brain lives. `~` means the home directory and a relative path is
+   * resolved against the working directory. Left out, a brain found by the
+   * `ki-agent-brain` walk is used and one is otherwise created in `~/.kicode`.
+   */
+  brain?: string;
   compaction?: FileCompactionSettings;
 };
 
@@ -180,6 +186,11 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
     if (json.mock !== undefined) {
       if (typeof json.mock === "boolean") settings.mock = json.mock;
       else warnings.push(`Ignoring "mock" in ${entry.file}: expected true or false.`);
+    }
+
+    if (json.brain !== undefined) {
+      if (typeof json.brain === "string" && json.brain.trim() !== "") settings.brain = json.brain.trim();
+      else warnings.push(`Ignoring "brain" in ${entry.file}: expected a path to the brain directory.`);
     }
 
     if (json.compaction !== undefined) {

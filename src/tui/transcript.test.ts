@@ -236,6 +236,16 @@ describe("the line under an answer", () => {
     });
   });
 
+  it("says when the model stopped with tracked work still open", () => {
+    const entries = feed([{ type: "continued", reason: "work", attempt: 1 }]);
+
+    expect(entries.at(-1)).toEqual({
+      kind: "note",
+      text: "tracked work is not finished — asking it to carry on",
+      tone: "dim",
+    });
+  });
+
   it("names a reply that had nothing in it, and a turn that ran out of requests", () => {
     // Both used to end the turn in silence, which is what made the stop read as
     // a glitch rather than as something the endpoint did.

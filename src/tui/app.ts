@@ -89,6 +89,7 @@ import {
   type MentionIndex,
   type MentionItem,
 } from "../mentions";
+import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
 import { applyEvent, entriesFromHistory, entriesToText, summarizeArgs, type Entry, type Tone } from "./transcript";
 import { readAttachedFile, docBlock, type AttachedDoc } from "./attach";
@@ -617,6 +618,16 @@ class TuiApp {
   private isPaused = false;
   /** Queued prompts to execute in sequence when active turn finishes. */
   private queuedPrompts: Array<{ prompt: string; images: PastedImage[] }> = [];
+  /**
+   * The plan tools' latest state, for the TODO chip and its panel.
+   *
+   * Held here rather than read off the agent because it is the screen's copy:
+   * it survives an agent rebuild (a model switch) and is what the last turn
+   * left behind, which is exactly what the button should keep showing.
+   */
+  private plan: PlanSnapshot | null = null;
+  /** True while the plan panel is open above the box. */
+  private todoPanel = false;
   /** Notice shown when text is copied. */
   private copiedNotice: string | null = null;
   private copiedTimer: NodeJS.Timeout | null = null;
@@ -955,6 +966,12 @@ class TuiApp {
 
         case "escape":
           this.notice = null;
+          // Escape closes the most recent thing that was opened. The plan panel
+          // is below every card and above the session, so it goes first.
+          if (this.todoPanel) {
+            this.todoPanel = false;
+            this.draw();
+          }
           break;
         case "up":
           if (this.editor.text.length === 0) this.scrollBy(1);
@@ -1124,7 +1141,72 @@ class TuiApp {
   private releaseHeldQueue(): void {
     if (this.busy || this.queuedPrompts.length === 0) return;
     const next = this.queuedPrompts.shift();
-    if (next) void this.runTurn(next.prompt, next.images);
+    if (next) this.runQueued(next);
+  }
+
+  /**
+   * Runs one message off the queue.
+   *
+   * A queued line that starts with a slash is a command, not words for the
+   * model: a `/goal …` typed while a turn was running must start a goal when
+   * its turn arrives, not be handed to the model as prose to read out. Anything
+   * else is an ordinary turn.
+   */
+  private runQueued(entry: { prompt: string; images: readonly PastedImage[] }): void {
+    if (entry.prompt.startsWith("/")) void this.command(entry.prompt);
+    else void this.runTurn(entry.prompt, entry.images);
+  }
+
+  /**
+   * The `ADD[+]` control: what is in the box joins the queue, unsent.
+   *
+   * It exists for the case the queue is for — a turn is running and the next
+   * message is worth writing down now. With nothing running there is nothing to
+   * queue behind, so the message simply becomes the turn.
+   */
+  private async queueEditorText(): Promise<void> {
+    const text = this.editor.text.trim();
+    if (!text) {
+      this.notice = span("nothing to add — type a message first", this.styles.faint);
+      this.draw();
+      return;
+    }
+    this.editor.acceptHistory(text);
+    this.editor.clear();
+
+    // The same treatment enter gives a message: `@` mentions expanded and any
+    // attached documents appended, so what is queued is what would have been
+    // sent — the queue is not a second, poorer path into the conversation.
+    let expanded = text;
+    if (text.includes("@")) {
+      try {
+        expanded = (await expandMentions(text, await this.ensureMentionIndex())).text;
+      } catch {}
+    }
+    const docs = this.attachedDocs;
+    this.attachedDocs = [];
+    if (docs.length > 0) expanded = [expanded, ...docs.map(docBlock)].join("\n\n");
+
+    this.queuedPrompts.push({ prompt: expanded, images: this.attached });
+    this.attached = [];
+    this.entries.push({ kind: "note", text: `[queued in conversation] ${text}`, tone: "accent" });
+    this.notice = span(`pushed into conversation queue (${this.queuedPrompts.length} queued)`, this.styles.accent);
+    if (this.busy === null && !this.isPaused) this.releaseHeldQueue();
+    this.draw();
+  }
+
+  /**
+   * Drops one message from the queue, by the tile's `[x]`.
+   *
+   * Only the tile it was pressed on goes: a queue is often several messages
+   * thought out in order, and clearing all of them to fix one is not a queue
+   * control, it is a reset.
+   */
+  private removeQueued(index: number): void {
+    if (index < 0 || index >= this.queuedPrompts.length) return;
+    this.queuedPrompts.splice(index, 1);
+    this.notice = span(`removed queued message (${this.queuedPrompts.length} queued)`, this.styles.dim);
+    this.draw();
   }
 
   /**
@@ -1424,6 +1506,15 @@ class TuiApp {
       case "enter": {
         const chosen = items[Math.min(Math.max(this.paletteSelected, 0), last)];
         if (!chosen) return false;
+        // A command that needs an argument is filled in rather than run: a
+        // usage line is a dead end, while `/goal ` with the cursor waiting is
+        // the next step. The list closes itself, because a space ends the
+        // query the palette filters on.
+        if (chosen.usage?.startsWith("<")) {
+          this.editor.setText(`/${chosen.name} `);
+          this.paletteSelected = 0;
+          return true;
+        }
         this.editor.setText(`/${chosen.name}`);
         await this.submit();
         return true;
@@ -1586,7 +1677,7 @@ class TuiApp {
       this.notice = span("session resumed", this.styles.accent);
       if (this.queuedPrompts.length > 0) {
         const next = this.queuedPrompts.shift();
-        if (next) void this.runTurn(next.prompt, next.images);
+        if (next) this.runQueued(next);
       }
       this.draw();
       return;
@@ -1896,6 +1987,9 @@ class TuiApp {
     try {
       for await (const event of this.agent.send(prompt, images)) {
         applyEvent(this.entries, event, { at: Date.now(), turn });
+        // The plan tools' state as data, so the TODO chip and its panel read a
+        // structure rather than parsing the checklist out of rendered text.
+        if (event.type === "plan") this.plan = event.snapshot;
         if (event.type === "tool-start") this.setBusy(`${event.name}…`);
         else if (event.type === "route-wait") this.setBusy(`rate-limited on ${event.from} — waiting ${Math.ceil(event.ms / 1000)}s…`);
         else if (event.type === "tool-result" || event.type === "text") this.setBusy("thinking…");
@@ -1936,9 +2030,7 @@ class TuiApp {
       // screen is doing. The queue moves when the question is answered.
       if (!this.isPaused && !this.recovery && this.queuedPrompts.length > 0) {
         const next = this.queuedPrompts.shift();
-        if (next) {
-          void this.runTurn(next.prompt, next.images);
-        }
+        if (next) this.runQueued(next);
       }
     }
   }
@@ -1981,9 +2073,15 @@ class TuiApp {
         this.queuedPrompts = [];
         this.note(`cleared ${count} queued message(s)`);
       } else if (argument) {
-        this.queuedPrompts.push({ prompt: argument, images: [] });
-        this.entries.push({ kind: "note", text: `[queued in conversation] ${argument}`, tone: "accent" });
-        this.notice = span(`pushed into conversation queue (${this.queuedPrompts.length} queued)`, this.styles.accent);
+        // With no turn in flight there is nothing for the queue to drain into,
+        // so the message is simply the next turn.
+        if (this.busy === null && !this.isPaused) {
+          void this.runTurn(argument);
+        } else {
+          this.queuedPrompts.push({ prompt: argument, images: [] });
+          this.entries.push({ kind: "note", text: `[queued in conversation] ${argument}`, tone: "accent" });
+          this.notice = span(`pushed into conversation queue (${this.queuedPrompts.length} queued)`, this.styles.accent);
+        }
       } else if (this.queuedPrompts.length === 0) {
         this.note("no messages queued in conversation (use /queue <message> to push)");
       } else {
@@ -1998,7 +2096,13 @@ class TuiApp {
 
     if (word === "insert") {
       if (!argument) {
-        this.note("usage: /insert <message to push in between>");
+        // Fill the box rather than error: a usage line is a dead end, while
+        // `/insert ` with the cursor waiting is the next step.
+        this.editor.setText("/insert ");
+        this.notice = span("type the message to insert, then press enter", this.styles.accent);
+      } else if (this.busy === null && !this.isPaused) {
+        // Nothing is running, so there is nothing to insert ahead of.
+        void this.runTurn(argument);
       } else {
         this.queuedPrompts.unshift({ prompt: argument, images: [] });
         this.entries.push({ kind: "note", text: `[inserted next in conversation] ${argument}`, tone: "accent" });
@@ -2020,6 +2124,18 @@ class TuiApp {
 
     if (!isAvailable(typed)) {
       this.note(`/${typed.name} is not available in KiCode: ${typed.unavailable}`, "warn");
+      this.draw();
+      return;
+    }
+
+    // A command whose usage is in angle brackets needs an argument. Given
+    // none, fill the box and wait rather than error: typing `/goal` and being
+    // told the usage is a dead end, while `/goal ` with the cursor waiting is
+    // the next step. Square brackets mean the argument is optional and the
+    // command runs without it.
+    if (!argument && typed.usage?.startsWith("<")) {
+      this.editor.setText(`/${typed.name} `);
+      this.notice = span(`/${typed.name} needs an argument — type it and press enter`, this.styles.accent);
       this.draw();
       return;
     }
@@ -2067,7 +2183,7 @@ class TuiApp {
         this.note("session resumed");
         if (this.queuedPrompts.length > 0) {
           const next = this.queuedPrompts.shift();
-          if (next) void this.runTurn(next.prompt, next.images);
+          if (next) this.runQueued(next);
         }
         break;
       case "sessions":
@@ -2912,7 +3028,7 @@ class TuiApp {
     const copied = await this.options.copyToClipboard?.(text).catch(() => false);
 
     if (copied) {
-      const historyItem = createHistoryItem({ kind: "text", text });
+      const historyItem = createHistoryItem({ kind: "text", text, truncated: false });
       if (historyItem) this.recordClipboardItem(historyItem);
       this.copiedNotice = `conversation (${text.length} chars)`;
       if (this.copiedTimer) clearTimeout(this.copiedTimer);
@@ -4381,11 +4497,18 @@ class TuiApp {
         }
       }
 
-      // 3. `UPLOAD[+]` at the row's right edge: the platform's file-selection
-      // window. It is the only control the row carries — send has no button of
-      // its own (enter sends) and the variant has none either (`/effort`
-      // changes it). The clipboard menu it once shared this corner with is on
-      // the prompt's right-click.
+      // 3. `ADD[+]` queues what is in the box instead of sending it, so a
+      // message can be lined up behind the turn that is running.
+      if (presses(box.addButton)) {
+        void this.queueEditorText();
+        return true;
+      }
+
+      // 4. `UPLOAD[+]` at the row's right edge: the platform's file-selection
+      // window. It is the only other control the row carries — send has no
+      // button of its own (enter sends) and the variant has none either
+      // (`/effort` changes it). The clipboard menu it once shared this corner
+      // with is on the prompt's right-click.
       if (presses(box.uploadButton)) {
         void this.attachFromPicker();
         return true;
@@ -4408,6 +4531,40 @@ class TuiApp {
         }
         return true;
       }
+    }
+
+    // A queued message's `[x]` drops that one message. It is handled before the
+    // generic chip search because its kind carries an index the queue needs and
+    // the others do not — and before the row fallback, which would otherwise
+    // read the tile as a click that sends whatever it says.
+    const queuedChip = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "queued" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (queuedChip) {
+      this.removeQueued(queuedChip.index);
+      return true;
+    }
+
+    // The `TODO [n/m]` chip on the state row toggles the plan panel open and
+    // shut. It is the same press-the-button-opens-the-thing shape the mode pill
+    // and the upload button have.
+    const todoChip = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "todo_button" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (todoChip) {
+      this.todoPanel = !this.todoPanel;
+      this.draw();
+      return true;
     }
 
     // A chip is an answer, not a selection: it names the key that does the work
@@ -4594,13 +4751,15 @@ class TuiApp {
 
       for (let i = 0; i < historySlice.length; i++) {
         const h = historySlice[i];
+        if (!h) continue;
         const num = i + 1;
         const age = formatAge(h.timestamp);
         if (h.kind === "text") {
-          const firstLine = (h.text.split("\n")[0] || "").trim();
+          const text = h.text ?? "";
+          const firstLine = (text.split("\n")[0] || "").trim();
           const snippet = firstLine.length > 28 ? `${firstLine.slice(0, 27)}…` : (firstLine || "empty text");
-          const chars = h.text.length;
-          const lines = h.text.split("\n").length;
+          const chars = text.length;
+          const lines = text.split("\n").length;
           const lineDesc = lines > 1 ? `${lines} lines · ` : "";
           items.push({
             label: `${num}. [TXT] "${snippet}"`,
@@ -4678,8 +4837,9 @@ class TuiApp {
       });
 
       let preview: ClipboardMenuState["preview"] = { kind: "empty" };
-      if (historySlice.length > 0 && historySlice[0].preview) {
-        preview = historySlice[0].preview;
+      const first = historySlice[0];
+      if (first?.preview) {
+        preview = first.preview;
       }
 
       this.clipboardMenu = {
@@ -4699,7 +4859,7 @@ class TuiApp {
       const item = this.clipboardHistory[idx];
       if (item) {
         if (item.kind === "text") {
-          this.editor.insert(item.text);
+          this.editor.insert(item.text ?? "");
           this.notice = null;
         } else if (item.kind === "image" && item.image) {
           this.attached = [...this.attached, item.image];
@@ -4874,7 +5034,7 @@ class TuiApp {
     const lines = text.split("\n").length;
     const what = lines === 1 ? "1 line" : `${lines} lines`;
     if (copied) {
-      const historyItem = createHistoryItem({ kind: "text", text });
+      const historyItem = createHistoryItem({ kind: "text", text, truncated: false });
       if (historyItem) this.recordClipboardItem(historyItem);
       this.copiedNotice = `${what} (${text.length} chars)`;
       if (this.copiedTimer) clearTimeout(this.copiedTimer);
@@ -5181,6 +5341,9 @@ class TuiApp {
       clipboardMenu: this.clipboardMenu,
       isPaused: this.isPaused,
       queuedCount: this.queuedPrompts.length,
+      queue: this.queuedPrompts.map((entry) => entry.prompt),
+      plan: this.plan,
+      todoPanel: this.todoPanel,
       settings: this.view,
       scroll: this.scroll,
       anchor: this.anchor,

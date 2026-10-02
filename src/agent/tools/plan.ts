@@ -1,14 +1,14 @@
-import type { Tool } from "./types";
+import type { PlanSnapshot, PlanTask, PlanTodo, Tool } from "./types";
 
 type PlanStep = { title: string; detail?: string; files?: string[] };
 
-type GoalTask = { id: string; title: string; status: "open" | "in_progress" | "done" };
+type GoalTask = PlanTask;
 
 type PlanState = {
   /** The latest presented plan, if the model has presented one. */
   plan: { goal: string; steps: PlanStep[] } | null;
   /** Tracked tasks for the session, in the order they were added. */
-  todos: { text: string; done: boolean; inProgress?: boolean }[];
+  todos: PlanTodo[];
   /** Active autonomous goal */
   goal: {
     title: string;
@@ -32,6 +32,24 @@ type PlanState = {
  */
 export function createPlanTools(): Tool[] {
   const state: PlanState = { plan: null, todos: [], goal: null };
+
+  /**
+   * The plan state as plain data, copied so the screen owns what it holds.
+   *
+   * Both tools answer with the whole thing: they share one session state, and
+   * a goal call is as good a moment as any to refresh the checklist beside it.
+   */
+  const snapshotOf = (): PlanSnapshot => ({
+    todos: state.todos.map((todo) => ({ ...todo })),
+    goal: state.goal
+      ? {
+          title: state.goal.title,
+          status: state.goal.status,
+          tasks: state.goal.tasks.map((task) => ({ ...task })),
+          ...(state.goal.current ? { current: state.goal.current } : {}),
+        }
+      : null,
+  });
 
   const plan: Tool = {
     name: "plan",
@@ -149,6 +167,14 @@ export function createPlanTools(): Tool[] {
       }
       return { content: "Error: \"action\" must be one of \"add\", \"done\", \"list\" or \"clear\".", isError: true };
     },
+
+    pendingWork() {
+      const open = state.todos.filter((entry) => !entry.done);
+      if (open.length === 0) return null;
+      return `${open.length} tracked task(s) still open: ${open.map((entry) => entry.text).join("; ")}`;
+    },
+
+    snapshot: snapshotOf,
   };
 
   const goal: Tool = {
@@ -259,6 +285,16 @@ export function createPlanTools(): Tool[] {
 
       return { content: renderGoalCard(state.goal) };
     },
+
+    pendingWork() {
+      const goal = state.goal;
+      if (!goal || goal.status !== "running") return null;
+      const open = goal.tasks.filter((task) => task.status !== "done");
+      if (open.length === 0) return null;
+      return `the goal \"${goal.title}\" has ${open.length} subtask(s) unfinished: ${open.map((task) => `${task.id} ${task.title}`).join("; ")}`;
+    },
+
+    snapshot: snapshotOf,
   };
 
   return [plan, todo, goal];

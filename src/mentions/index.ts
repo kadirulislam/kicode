@@ -1,5 +1,9 @@
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
+import { statSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { readConfigBrainSync } from "../config-file";
+import { resolveHome } from "../paths";
 import { walkFiles } from "../agent/tools/walk";
 
 /**
@@ -58,24 +62,100 @@ export function activeToken(text: string, cursor: number): { start: number; quer
   return { start, query: match[1] ?? "" };
 }
 
-/** Where the brain lives: explicit path first, then a walk upwards. */
-export async function resolveBrainDir(env: NodeJS.ProcessEnv, cwd: string): Promise<string | null> {
-  const explicit = env.KI_BRAIN_PATH?.trim();
-  if (explicit && (await isDir(explicit))) return explicit;
+/** The directory name a brain has always been found by, walking upwards. */
+export const BRAIN_DIR_NAME = "ki-agent-brain";
+/** Where a brain is created when nothing else points at one: `~/.kicode/brain`. */
+export const DEFAULT_BRAIN_DIRNAME = "brain";
 
+/**
+ * Where the brain lives, in the order the four ways to have one are considered:
+ *
+ * 1. `KI_BRAIN_PATH` — the explicit override, for a session that wants a
+ *    particular brain;
+ * 2. a `brain` path in `kicode.json` — global first, the project file after it;
+ * 3. `ki-agent-brain` at or above the working directory — the original layout,
+ *    kept so an existing brain is never abandoned;
+ * 4. `~/.kicode/brain` — where a fresh user's first save creates one.
+ *
+ * Synchronous because its other caller is not: the agent's system prompt is
+ * assembled the same way the directory's `AGENTS.md` is read — before the
+ * first request, with no promises in the path — so this has to be callable
+ * without awaiting. The async form is kept for the places that already await
+ * it, and both answer identically.
+ */
+export function resolveBrainDirSync(env: NodeJS.ProcessEnv, cwd: string): string | null {
+  const configured = configuredBrainPath(env, cwd);
+  if (configured && isDirSync(configured)) return configured;
+
+  const walked = walkForBrainSync(cwd);
+  if (walked) return walked;
+
+  const fallback = defaultBrainDir(env);
+  if (isDirSync(fallback)) return fallback;
+
+  return null;
+}
+
+/**
+ * The brain to write into, creating one when there is none.
+ *
+ * A read can honestly report that no brain exists; a save cannot, or a fresh
+ * user's first `remember` call would fail and nothing would ever accumulate.
+ * So a miss here becomes the configured path, or `~/.kicode/brain`, made on
+ * the spot. The `ki-agent-brain` walk is deliberately not a creation target:
+ * it is a way to keep using an existing brain, not a place to scatter new ones.
+ */
+export async function ensureBrainDir(env: NodeJS.ProcessEnv, cwd: string): Promise<string> {
+  const existing = resolveBrainDirSync(env, cwd);
+  if (existing) return existing;
+
+  const target = configuredBrainPath(env, cwd) ?? defaultBrainDir(env);
+  await mkdir(target, { recursive: true });
+  return target;
+}
+
+/** The one brain per user, inside KiCode's own home. */
+export function defaultBrainDir(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(resolveHome(env), DEFAULT_BRAIN_DIRNAME);
+}
+
+/** A brain named outright — `KI_BRAIN_PATH` first, then a `brain` config key. */
+function configuredBrainPath(env: NodeJS.ProcessEnv, cwd: string): string | null {
+  const explicit = env.KI_BRAIN_PATH?.trim();
+  if (explicit) return expandBrainPath(explicit, cwd);
+  const fromConfig = readConfigBrainSync(cwd, env);
+  return fromConfig ? expandBrainPath(fromConfig, cwd) : null;
+}
+
+/** `~` means home; a relative path is resolved against the working directory. */
+function expandBrainPath(value: string, cwd: string): string {
+  const trimmed = value.trim();
+  if (trimmed === "~" || trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+    return path.join(os.homedir(), trimmed.slice(1));
+  }
+  return path.isAbsolute(trimmed) ? path.normalize(trimmed) : path.resolve(cwd, trimmed);
+}
+
+/** The nearest `ki-agent-brain` at or above a directory, or null. */
+function walkForBrainSync(cwd: string): string | null {
   let dir = path.resolve(cwd);
   for (;;) {
-    const candidate = path.join(dir, "ki-agent-brain");
-    if (await isDir(candidate)) return candidate;
+    const candidate = path.join(dir, BRAIN_DIR_NAME);
+    if (isDirSync(candidate)) return candidate;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
   }
 }
 
-async function isDir(file: string): Promise<boolean> {
+/** Where the brain lives, for a caller that is already async. */
+export async function resolveBrainDir(env: NodeJS.ProcessEnv, cwd: string): Promise<string | null> {
+  return resolveBrainDirSync(env, cwd);
+}
+
+function isDirSync(file: string): boolean {
   try {
-    return (await stat(file)).isDirectory();
+    return statSync(file).isDirectory();
   } catch {
     return false;
   }
@@ -132,10 +212,16 @@ async function readFrontmatter(file: string): Promise<{ name: string; descriptio
   if (!head.startsWith("---")) return null;
   const end = head.indexOf("---", 3);
   const block = head.slice(3, end === -1 ? undefined : end);
-  const name = /^name:\s*(.+)$/m.exec(block)?.[1]?.trim();
-  const description = /^description:\s*(.+)$/m.exec(block)?.[1]?.trim()?.split("\n")[0] ?? "";
+  const name = unquote(/^name:\s*(.+)$/m.exec(block)?.[1]?.trim() ?? "");
+  const description = unquote(/^description:\s*(.+)$/m.exec(block)?.[1]?.trim()?.split("\n")[0] ?? "");
   if (!name) return null;
   return { name, description };
+}
+
+/** A frontmatter value without the quotes the writer puts around it. */
+function unquote(value: string): string {
+  const match = /^"([\s\S]*)"$/.exec(value) ?? /^'([\s\S]*)'$/.exec(value);
+  return match?.[1] ?? value;
 }
 
 async function indexProjects(root: string): Promise<MentionIndex["projects"]> {

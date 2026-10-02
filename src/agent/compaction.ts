@@ -140,6 +140,10 @@ export type CompactionPlan = {
  * so the session lands at the target rather than wherever a turn count happened
  * to leave it. A session already at or under the target has nothing to gain:
  * summarising it would spend a model call to make it bigger.
+ *
+ * The target is the whole session's, not the tail's: the system prompt and the
+ * briefing are kept whatever the cut, so their room is taken first. Otherwise a
+ * long prompt would leave the session a prompt's worth over target every time.
  */
 export function planCompaction(
   messages: readonly ChatMessage[],
@@ -150,7 +154,13 @@ export function planCompaction(
   if (estimateTokens(messages) <= target) return null;
 
   const summaryBudget = Math.max(Math.round(target * SUMMARY_SHARE), MIN_SUMMARY_TOKENS);
-  const tailBudget = Math.max(target - summaryBudget, 0);
+  // What survives the cut above it: the system prompt is never summarised and
+  // never cut, so it is spent out of the target before the tail is measured.
+  // Without this the plan aims at the target for the tail alone and the session
+  // lands at target-plus-the-prompt — a constant overshoot that grows with the
+  // prompt, which is exactly the kind of drift a size target exists to stop.
+  const prefix = messages[0] ? estimateTokens([messages[0]]) : 0;
+  const tailBudget = Math.max(target - summaryBudget - prefix, 0);
   const sizes = suffixSizes(messages);
 
   const cut =

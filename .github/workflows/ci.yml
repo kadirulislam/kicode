@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A superseded run on the same branch is noise: cancel it rather than pay for
+# a test run against code that has already been replaced.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # The floor from package.json's `engines`, plus the LTS lines a user is
+    # most likely to be on. Testing only the newest Node hides a break at the
+    # version a contributor actually has.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22, 24]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # `ci`, not `install`: it fails on a lockfile that disagrees with
+      # package.json instead of quietly resolving a different tree.
+      - run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      # The bin is the product. A typecheck and a green test suite do not prove
+      # `dist/cli.js` builds or runs; this does.
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the binary
+        run: node dist/cli.js --version

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createInterface } from "node:readline/promises";
+import { brainBriefing } from "../agent/brain";
 import { Agent, DEFAULT_SYSTEM_PROMPT, type AgentEvent, type ApproveFn } from "../agent/loop";
 import type { AskAnswer, AskFn } from "../agent/ask";
 import { createDefaultTools } from "../agent/tools";
@@ -188,8 +189,8 @@ const USAGE = [
   "Project settings:",
   "  kicode.json in the working directory, or in ~/.kicode/ for every project,",
   "  sets \"model\", \"provider\", \"providers\", \"fallbackModels\", \"fallback\",",
-  "  \"fallbackAuto\", \"maxTokens\", \"theme\", \"baseUrl\", \"compaction\", \"mcp\", and",
-  "  \"mock\": true. A provider declares a baseUrl and the environment",
+  "  \"fallbackAuto\", \"maxTokens\", \"theme\", \"baseUrl\", \"compaction\", \"brain\",",
+  "  \"mcp\", and \"mock\": true. A provider declares a baseUrl and the environment",
   "  variable holding its key (\"apiKeyEnv\"); the file has no place for a key.",
   "  A failed turn asks what to do next (retry / another model / dismiss).",
   "  \"fallbackAuto\": true, or KICODE_FALLBACK_AUTO=on, instead lets a free",
@@ -210,6 +211,9 @@ const USAGE = [
   "  KICODE_MAX_TOKENS       stop before this many session tokens (0 = no limit)",
   "  KICODE_THEME            colour theme by name (/themes lists them)",
   "  KICODE_HOME      optional, where sessions are stored (default ~/.kicode)",
+  "  KI_BRAIN_PATH    optional, where skills and memories are saved (default",
+  "                   ~/.kicode/brain, created on the first save; an existing",
+  "                   ki-agent-brain at or above the working directory is used)",
   "  KICODE_SHELL     optional, which shell the bash tool runs commands through",
   "                   (default: a Git Bash on Windows when one is installed,",
   "                   otherwise Node's own default — set it to cmd.exe to",
@@ -874,13 +878,33 @@ function mcpSummary(mcp: McpRuntime | null): string | null {
  * calls on every rebuild — and it is one small file, once per agent.
  */
 function instructionsFor(cwd: string): string | undefined {
+  const parts: string[] = [DEFAULT_SYSTEM_PROMPT];
+
+  // The directory's own notes, when it has any.
   try {
     const notes = readFileSync(path.join(cwd, "AGENTS.md"), "utf8").trim();
-    if (!notes) return undefined;
-    return [DEFAULT_SYSTEM_PROMPT, "", "# AGENTS.md", "Instructions for this directory, written by whoever works in it. Follow them unless the user says otherwise.", "", notes].join("\n");
+    if (notes) {
+      parts.push(
+        "",
+        "# AGENTS.md",
+        "Instructions for this directory, written by whoever works in it. Follow them unless the user says otherwise.",
+        "",
+        notes,
+      );
+    }
   } catch {
-    return undefined;
+    // No AGENTS.md: the built-in prompt already covers it.
   }
+
+  // What earlier sessions saved. Read here, where AGENTS.md is read, so a turn
+  // begins already knowing this project's memory and which skills exist —
+  // rather than being told to go and look for them.
+  const briefing = brainBriefing(cwd);
+  if (briefing) parts.push("", briefing);
+
+  // Nothing beyond the built-in prompt: return undefined, and the agent uses
+  // its own copy of the same words rather than a second, possibly-drifted one.
+  return parts.length > 1 ? parts.join("\n") : undefined;
 }
 
 /** One line about a model, for the `/models` picker. */
@@ -1110,7 +1134,9 @@ async function render(events: AsyncGenerator<AgentEvent, void, void>, io: Io): P
           `\u001b[2m${
             event.reason === "empty"
               ? "the model answered with nothing — asking again"
-              : "the reply was cut off — asking it to carry on"
+              : event.reason === "work"
+                ? "tracked work is not finished — asking it to carry on"
+                : "the reply was cut off — asking it to carry on"
           }\u001b[0m`,
         );
         break;

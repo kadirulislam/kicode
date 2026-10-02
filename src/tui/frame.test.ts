@@ -16,6 +16,7 @@ import {
   type TuiState,
   type Picker,
 } from "./frame";
+import type { PlanSnapshot } from "../agent/tools/types";
 import { defaultViewSettings, type Spacing } from "./settings";
 import { buildStyles, darkTheme } from "./theme";
 import type { Entry } from "./transcript";
@@ -1483,6 +1484,114 @@ describe("the box's own two buttons", () => {
   });
 });
 
+describe("the queue above the box", () => {
+  it("shows the add button only while there is a turn to queue behind", () => {
+    // Idle, enter already sends, so the button would take width from every
+    // prompt to say something the keyboard already does.
+    expect(draw({}).plain.join("\n")).not.toContain("ADD[+]");
+
+    const running = draw({ busy: "thinking…" });
+    expect(running.plain.join("\n")).toContain("ADD[+]");
+    const box = running.frame.prompt!;
+    const row = running.plain[box.addButton.row - 1] ?? "";
+    expect(row.slice(box.addButton.colStart - 1, box.addButton.colEnd)).toBe("ADD[+]");
+    // It leads the right-hand controls and stays clear of the words.
+    expect(box.addButton.colEnd).toBeLessThan(box.uploadButton.colStart);
+    expect(box.addButton.colStart).toBeGreaterThan(box.textLeft);
+  });
+
+  it("draws each queued message with an [x] the app can hit", () => {
+    const { frame, plain } = draw({ busy: "thinking…", queue: ["first one", "second one"] });
+    const tiles = frame.rows.filter((row) => row.kind === "queued");
+
+    expect(tiles).toHaveLength(2);
+    expect(plain.join("\n")).toContain("Queued (2)");
+    for (const [index, hit] of tiles.entries()) {
+      const line = plain[hit.row - 1] ?? "";
+      // The reported columns are the `[x]` itself, so a mis-click is the only
+      // way the wrong message could be dropped.
+      expect(line.slice(hit.colStart! - 1, hit.colEnd!)).toBe("[x]");
+      expect(hit.index).toBe(index);
+      expect(line).toContain(["first one", "second one"][index]!);
+    }
+  });
+});
+
+describe("the plan button and its panel", () => {
+  const plan: PlanSnapshot = {
+    todos: [
+      { text: "read the code", done: true },
+      { text: "change the loop", done: false, inProgress: true },
+      { text: "write the tests", done: false },
+    ],
+    goal: null,
+  };
+
+  it("shows a TODO chip with its progress, and no chip without tracked work", () => {
+    const withPlan = draw({ plan });
+    expect(withPlan.plain.join("\n")).toContain("[TODO 1/3]");
+
+    // The chip reports the columns it was drawn in, so the press lands on it.
+    const hit = withPlan.frame.rows.find((row) => row.kind === "todo_button");
+    expect(hit).toBeDefined();
+    const line = withPlan.plain[hit!.row - 1] ?? "";
+    expect(line.slice(hit!.colStart! - 1, hit!.colEnd!)).toBe("[TODO 1/3]");
+
+    // Nothing tracked (or no plan at all) means no button: `TODO [0/0]` on a
+    // quiet session is a button for nothing.
+    expect(draw({}).frame.rows.some((row) => row.kind === "todo_button")).toBe(false);
+    expect(draw({ plan: { todos: [], goal: null } }).frame.rows.some((row) => row.kind === "todo_button")).toBe(false);
+  });
+
+  it("prefers the goal's own progress while one is running", () => {
+    const withGoal: PlanSnapshot = {
+      todos: plan.todos,
+      goal: {
+        title: "ship it",
+        status: "running",
+        tasks: [
+          { id: "t1", title: "build", status: "done" },
+          { id: "t2", title: "test", status: "open" },
+        ],
+      },
+    };
+    expect(draw({ plan: withGoal }).plain.join("\n")).toContain("[TODO 1/2]");
+  });
+
+  it("draws the checklist and the goal in a panel, right-aligned above the box", () => {
+    const withGoal: PlanSnapshot = {
+      todos: plan.todos,
+      goal: {
+        title: "ship it",
+        status: "running",
+        tasks: [
+          { id: "t1", title: "build", status: "done" },
+          { id: "t2", title: "test", status: "open" },
+        ],
+        current: "t2 · test",
+      },
+    };
+
+    // Shut, the panel is not on screen at all.
+    expect(draw({ plan: withGoal }).plain.join("\n")).not.toContain("write the tests");
+
+    const open = draw({ plan: withGoal, todoPanel: true });
+    const screen = open.plain.join("\n");
+    expect(screen).toContain("write the tests");
+    expect(screen).toContain("ship it");
+    expect(screen).toContain("t2");
+
+    // Right-aligned: the panel's border starts inside the terminal's edge.
+    const titleRow = open.plain.findIndex((line) => line.includes(" TODO ") && line.includes("[×]"));
+    expect(titleRow).toBeGreaterThanOrEqual(0);
+    expect((open.plain[titleRow] ?? "").search(/\S/)).toBeGreaterThan(0);
+
+    // And its close chip is a target on the row it was drawn in.
+    const close = open.frame.rows.find((row) => row.kind === "close" && row.row === titleRow + 1);
+    expect(close).toBeDefined();
+  });
+});
+
 describe("the transcript column", () => {
   it("starts a request block at the column's edge, not the terminal's", () => {
     const { frame, plain } = draw({ entries: [{ kind: "user", text: "hi" }] }, { cols: 80, rows: 24 });
@@ -1852,11 +1961,9 @@ describe("picker close chip", () => {
   it("generates a close chip hit target on the picker title row", () => {
     const p: Picker = {
       title: "Models",
-      all: [{ label: "Model A", value: "a" }],
       items: [{ label: "Model A", value: "a" }],
       query: "",
       selected: 0,
-      pick: () => {},
     };
     const { frame } = draw({ picker: p });
     const closeHit = frame.rows.find((r) => r.kind === "close");

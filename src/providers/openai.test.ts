@@ -196,6 +196,18 @@ describe("OpenAIProvider.stream", () => {
     await expect(collect(provider)).rejects.toThrow(/restricted to the OpenCode client/);
   });
 
+  it("names the client restriction on a bare 403, whatever the body says", async () => {
+    // What the free models answer now: a 403 with no OpenCode-shaped body at
+    // all. A 403 is not a rejected key — that is a 401 — so the note must not
+    // wait for the body to confirm it, or the user goes hunting for a key that
+    // is fine.
+    const fetchImpl = (async () =>
+      new Response(JSON.stringify({ error: { message: "Forbidden" } }), { status: 403 })) as unknown as typeof fetch;
+    const provider = new OpenAIProvider({ apiKey: "sk-opencode-real", baseUrl: "https://opencode.ai/zen/v1", fetchImpl });
+
+    await expect(collect(provider)).rejects.toThrow(/restricted to the OpenCode client/);
+  });
+
   it("does not blame opencode's client restriction on another gateway", async () => {
     // "Invalid API key" is a generic message; the hint is about the endpoint,
     // not the words.

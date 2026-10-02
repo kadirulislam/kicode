@@ -11,19 +11,29 @@ import { rememberTool } from "./remember";
  * writes.
  */
 let dir = "";
+let home = "";
 let savedBrainPath: string | undefined;
+let savedHome: string | undefined;
 
 beforeEach(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "kicode-remember-"));
+  home = await mkdtemp(path.join(tmpdir(), "kicode-remember-home-"));
   await mkdir(path.join(dir, "ki-agent-brain", "memories", "projects"), { recursive: true });
   savedBrainPath = process.env.KI_BRAIN_PATH;
   delete process.env.KI_BRAIN_PATH;
+  // Park KICODE_HOME too, so the default brain a fresh user would get lands in
+  // the fixture rather than the machine's real ~/.kicode.
+  savedHome = process.env.KICODE_HOME;
+  process.env.KICODE_HOME = home;
 });
 
 afterEach(async () => {
   if (savedBrainPath === undefined) delete process.env.KI_BRAIN_PATH;
   else process.env.KI_BRAIN_PATH = savedBrainPath;
+  if (savedHome === undefined) delete process.env.KICODE_HOME;
+  else process.env.KICODE_HOME = savedHome;
   if (dir) await rm(dir, { recursive: true, force: true });
+  if (home) await rm(home, { recursive: true, force: true });
 });
 
 const skillFile = (name: string): string => path.join(dir, "ki-agent-brain", "skills", name, "SKILL.md");
@@ -53,6 +63,37 @@ describe("remember tool", () => {
     expect(result.isError).toBe(true);
     expect(result.content).toContain("already exists");
     expect(await readFile(skillFile("demo"), "utf8")).toContain("first body");
+  });
+
+  it("corrects a skill only when the update is explicit", async () => {
+    await rememberTool.run({ kind: "skill", name: "demo", description: "First.", text: "first body" }, { cwd: dir });
+
+    // A plain save still refuses: overwriting has to be asked for, so a skill
+    // is never replaced by a second model call that meant to add one.
+    const refused = await rememberTool.run(
+      { kind: "skill", name: "demo", description: "Second.", text: "second body" },
+      { cwd: dir },
+    );
+    expect(refused.isError).toBe(true);
+    expect(refused.content).toContain('action: "update"');
+
+    const updated = await rememberTool.run(
+      { kind: "skill", name: "demo", description: "Second.", text: "second body", action: "update" },
+      { cwd: dir },
+    );
+    expect(updated.isError).toBeUndefined();
+    expect(updated.content).toContain("Updated");
+    const saved = await readFile(skillFile("demo"), "utf8");
+    expect(saved).toContain("second body");
+    expect(saved).not.toContain("first body");
+
+    // And updating something that is not there says so rather than creating it.
+    const missing = await rememberTool.run(
+      { kind: "skill", name: "ghost", description: "x", text: "y", action: "update" },
+      { cwd: dir },
+    );
+    expect(missing.isError).toBe(true);
+    expect(missing.content).toContain("no skill");
   });
 
   it("rejects names that are not slugs, and writes nothing outside the brain", async () => {
@@ -116,13 +157,19 @@ describe("remember tool", () => {
     expect(saved).toContain("truncated");
   });
 
-  it("says how to point at a brain when none is found", async () => {
+  it("creates a default brain on the first save when none exists", async () => {
     const bare = await mkdtemp(path.join(tmpdir(), "kicode-remember-bare-"));
     try {
-      const result = await rememberTool.run({ kind: "skill", name: "x", description: "x", text: "x" }, { cwd: bare });
-      // Passes only when no ki-agent-brain sits above the tmp dir and no env
-      // override points at one — the normal case on any machine.
-      if (result.isError === true) expect(result.content).toContain("KI_BRAIN_PATH");
+      const result = await rememberTool.run(
+        { kind: "skill", name: "fresh-start", description: "The very first save.", text: "body" },
+        { cwd: bare },
+      );
+
+      // No ki-agent-brain above the tmp dir and no override: the save creates
+      // one under KICODE_HOME instead of failing — the fresh-user case.
+      expect(result.isError).toBeUndefined();
+      const created = path.join(home, "brain", "skills", "fresh-start", "SKILL.md");
+      expect(await readFile(created, "utf8")).toContain("name: fresh-start");
     } finally {
       await rm(bare, { recursive: true, force: true });
     }

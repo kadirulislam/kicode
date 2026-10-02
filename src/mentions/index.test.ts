@@ -1,8 +1,17 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { activeToken, buildMentionIndex, completeMention, expandMentions, type MentionIndex } from "./index";
+import {
+  activeToken,
+  buildMentionIndex,
+  completeMention,
+  defaultBrainDir,
+  ensureBrainDir,
+  expandMentions,
+  resolveBrainDirSync,
+  type MentionIndex,
+} from "./index";
 
 const index: MentionIndex = {
   cwd: "/work",
@@ -88,7 +97,7 @@ describe("buildMentionIndex", () => {
       await mkdir(path.join(root, "ki-agent-brain", "memories", "projects"), { recursive: true });
       await writeFile(path.join(root, "ki-agent-brain", "memories", "projects", "demo.md"), "# demo\n");
 
-      const built = await buildMentionIndex(path.join(root, "proj"), {});
+      const built = await buildMentionIndex(path.join(root, "proj"), { KICODE_HOME: path.join(root, "home") });
 
       expect(built.files).toContain("src/a.ts");
       expect(built.dirs).toContain("src");
@@ -106,7 +115,7 @@ describe("buildMentionIndex", () => {
     const root = await mkdtemp(path.join(tmpdir(), "kicode-mentions-"));
     try {
       await writeFile(path.join(root, "a.txt"), "hi\n");
-      const built = await buildMentionIndex(root, {});
+      const built = await buildMentionIndex(root, { KICODE_HOME: path.join(root, "home") });
 
       expect(built.brain).toBeNull();
       expect(built.files).toContain("a.txt");
@@ -123,6 +132,97 @@ describe("buildMentionIndex", () => {
       const built = await buildMentionIndex(root, { KI_BRAIN_PATH: path.join(root, "custom") });
 
       expect(built.brain).toBe(path.join(root, "custom"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+/** A tmp root with a `home/` (the KICODE_HOME) and a `proj/` to work in. */
+async function scaffold(): Promise<{ root: string; home: string; cwd: string; env: NodeJS.ProcessEnv }> {
+  const root = await mkdtemp(path.join(tmpdir(), "kicode-brain-"));
+  const home = path.join(root, "home");
+  const cwd = path.join(root, "proj");
+  await mkdir(home, { recursive: true });
+  await mkdir(cwd, { recursive: true });
+  // KICODE_HOME parks the default brain in the fixture, and keeps the test from
+  // reading the machine's real ~/.kicode/kicode.json or ~/.kicode/brain.
+  return { root, home, cwd, env: { KICODE_HOME: home } };
+}
+
+describe("brain resolution", () => {
+  it("uses a brain path declared in kicode.json, relative to the working directory", async () => {
+    const { root, cwd, env } = await scaffold();
+    try {
+      await mkdir(path.join(cwd, "mybrain"), { recursive: true });
+      await writeFile(path.join(cwd, "kicode.json"), JSON.stringify({ brain: "./mybrain" }));
+
+      expect(resolveBrainDirSync(env, cwd)).toBe(path.join(cwd, "mybrain"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("lets KI_BRAIN_PATH beat the config and an existing ki-agent-brain", async () => {
+    const { root, cwd, env } = await scaffold();
+    try {
+      await mkdir(path.join(root, "ki-agent-brain"), { recursive: true });
+      await mkdir(path.join(cwd, "mybrain"), { recursive: true });
+      await writeFile(path.join(cwd, "kicode.json"), JSON.stringify({ brain: "./mybrain" }));
+      await mkdir(path.join(root, "explicit"), { recursive: true });
+
+      expect(resolveBrainDirSync({ ...env, KI_BRAIN_PATH: path.join(root, "explicit") }, cwd)).toBe(
+        path.join(root, "explicit"),
+      );
+      expect(resolveBrainDirSync(env, cwd)).toBe(path.join(cwd, "mybrain"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still finds an existing ki-agent-brain above the directory", async () => {
+    const { root, cwd, env } = await scaffold();
+    try {
+      await mkdir(path.join(root, "ki-agent-brain"), { recursive: true });
+
+      expect(resolveBrainDirSync(env, cwd)).toBe(path.join(root, "ki-agent-brain"));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses the default brain once it exists, and reports none before that", async () => {
+    const { root, cwd, env } = await scaffold();
+    try {
+      expect(resolveBrainDirSync(env, cwd)).toBeNull();
+
+      await mkdir(defaultBrainDir(env), { recursive: true });
+      expect(resolveBrainDirSync(env, cwd)).toBe(defaultBrainDir(env));
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates the default brain on the first save when there is none", async () => {
+    const { root, cwd, env } = await scaffold();
+    try {
+      const dir = await ensureBrainDir(env, cwd);
+
+      expect(dir).toBe(path.join(env.KICODE_HOME as string, "brain"));
+      expect((await stat(dir)).isDirectory()).toBe(true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("creates a configured brain that does not exist yet", async () => {
+    const { root, cwd, env } = await scaffold();
+    try {
+      await writeFile(path.join(cwd, "kicode.json"), JSON.stringify({ brain: "../newbrain" }));
+
+      const dir = await ensureBrainDir(env, cwd);
+      expect(dir).toBe(path.join(root, "newbrain"));
+      expect((await stat(dir)).isDirectory()).toBe(true);
     } finally {
       await rm(root, { recursive: true, force: true });
     }

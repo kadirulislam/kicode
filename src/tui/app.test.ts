@@ -5,6 +5,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import type { Agent, AgentEvent, ApprovalDecision, ApproveFn } from "../agent/loop";
 import type { AskAnswer, AskFn, AskQuestion } from "../agent/ask";
+import type { PlanSnapshot } from "../agent/tools/types";
 import type { PastedImage } from "../clipboard";
 import type { ChatMessage } from "../types";
 import { bg } from "./ansi";
@@ -68,7 +69,7 @@ type Harness = {
  */
 function harness(
   over: Partial<TuiOptions> = {},
-  flags: { slow?: number; approve?: boolean; questions?: AskQuestion[]; failWith?: Error } = {},
+  flags: { slow?: number; approve?: boolean; questions?: AskQuestion[]; failWith?: Error; plan?: PlanSnapshot } = {},
 ): Harness {
   const { slow = 0, approve = false, questions, failWith } = flags;
   const input = new PassThrough();
@@ -167,6 +168,8 @@ function harness(
         abortIfStopped();
         yield { type: "text", delta: `echo: ${prompt}` };
         messages.push({ role: "assistant", content: `echo: ${prompt}` });
+        // A turn that ran a plan tool hands its state over as data too.
+        if (flags.plan) yield { type: "plan", snapshot: flags.plan };
         yield { type: "done", reason: "complete" };
       },
     } as unknown as Agent;
@@ -1093,6 +1096,188 @@ async function drive(
   }
   return { app, done };
 }
+
+describe("the queue and the commands that fill it", () => {
+  it("fills the box for a command that needs an argument instead of running it", async () => {
+    const app = harness();
+    const done = runTui(app.options);
+    await tick(20);
+
+    // `/go` narrows the palette to /goal, which needs an objective. Choosing it
+    // must not run it — a usage line in the transcript is a dead end, while
+    // `/goal ` with the cursor waiting is the next step.
+    app.input.write("/go");
+    await tick(20);
+    app.input.write("\r");
+    await tick(20);
+
+    expect(app.lastFrame()).toContain("/goal ");
+    expect(app.sentPrompts).toHaveLength(0);
+
+    // The argument finishes the command, and enter runs it.
+    app.input.write("ship it\r");
+    await tick(60);
+    expect(app.sentPrompts.at(-1)).toContain("Execute this goal autonomously");
+    expect(app.sentPrompts.at(-1)).toContain("ship it");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("runs /insert at once when no turn is running", async () => {
+    const app = harness();
+    const done = runTui(app.options);
+    await tick(20);
+
+    // With nothing in flight there is nothing to insert ahead of, so the
+    // message is simply the next turn — not a queue entry no turn will drain.
+    app.input.write("/insert do the thing\r");
+    await tick(60);
+
+    expect(app.sentPrompts.at(-1)).toBe("do the thing");
+    expect(app.screen()).not.toContain("[queued in conversation]");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("runs a slash command that was queued behind a turn", async () => {
+    const app = harness({}, { slow: 250 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    // Typed while the first turn runs, so it goes into the queue as given.
+    app.input.write("/goal ship it\r");
+    await tick(40);
+    expect(app.screen()).toContain("queued");
+
+    await tick(500);
+    await tick(500);
+
+    // The queued line ran as a command when its turn came, not as prose handed
+    // to the model to read out.
+    expect(app.sentPrompts.at(-1)).toContain("Execute this goal autonomously");
+    expect(app.sentPrompts.at(-1)).toContain("ship it");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("queues the box's text when ADD[+] is pressed", async () => {
+    const app = harness({}, { slow: 300 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    app.input.write("staged message");
+    await tick(40);
+
+    // The button rides the first text row, so its own reported columns are
+    // where the press goes.
+    const lines = app.lastFrame().split(/\r?\n/);
+    const promptRow = lines.findIndex((line) => line.includes("ADD[+]"));
+    expect(promptRow).toBeGreaterThanOrEqual(0);
+    const col = (lines[promptRow] ?? "").indexOf("ADD[+]") + 4;
+    app.input.write(clickAt(promptRow + 1, col));
+    await tick(40);
+
+    expect(app.screen()).toContain("[queued in conversation] staged message");
+    // The box was cleared, so what is queued is not also what is typed — the
+    // row the button rides carries the placeholder again, not the message.
+    const after = app.lastFrame().split(/\r?\n/);
+    const afterRow = after.findIndex((line) => line.includes("ADD[+]"));
+    expect((after[afterRow] ?? "").includes("staged message")).toBe(false);
+    expect(after[afterRow] ?? "").toContain("Ask anything");
+
+    await tick(700);
+    await tick(700);
+    expect(app.sentPrompts).toContain("staged message");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("drops one queued message when its [x] is clicked", async () => {
+    const app = harness({}, { slow: 300 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    app.input.write("second\r");
+    await tick(40);
+    app.input.write("third\r");
+    await tick(40);
+    expect(app.lastFrame()).toContain("Queued (2)");
+
+    // The `[x]` of the first tile only, not the whole queue. The tile is the
+    // row under the panel's own header, which is where the queue begins.
+    const lines = app.lastFrame().split(/\r?\n/);
+    const header = lines.findIndex((line) => line.includes("Queued ("));
+    expect(header).toBeGreaterThanOrEqual(0);
+    const tileRow = header + 1;
+    expect(lines[tileRow] ?? "").toContain("[x]");
+    const col = (lines[tileRow] ?? "").indexOf("[x]") + 2;
+    app.input.write(clickAt(tileRow + 1, col));
+    await tick(60);
+
+    // The first tile is gone and the second has moved up: the count and the
+    // remaining message both say one was dropped, not the whole queue.
+    expect(app.lastFrame()).toContain("Queued (1)");
+    const after = app.lastFrame().split(/\r?\n/);
+    const afterHeader = after.findIndex((line) => line.includes("Queued ("));
+    const remaining = after[afterHeader + 1] ?? "";
+    expect(remaining).toContain("[x]");
+    expect(remaining).toContain("third");
+    expect(remaining).not.toContain("second");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+});
+
+describe("the plan panel", () => {
+  const plan: PlanSnapshot = {
+    todos: [
+      { text: "read the code", done: true },
+      { text: "change the loop", done: false },
+    ],
+    goal: null,
+  };
+
+  it("opens from the TODO chip and closes with escape", async () => {
+    const app = harness({}, { plan });
+    const done = runTui(app.options);
+    await tick(20);
+
+    // The chip only exists once a plan tool has run, so the turn comes first.
+    app.input.write("go\r");
+    await tick(60);
+    expect(app.lastFrame()).toContain("[TODO 1/2]");
+    // Shut, the panel is not drawn: its rows are not on screen.
+    expect(app.lastFrame()).not.toContain("change the loop");
+
+    // The chip is a button on the state row; press the middle of it.
+    const lines = app.lastFrame().split(/\r?\n/);
+    const row = lines.findIndex((line) => line.includes("[TODO 1/2]"));
+    const col = (lines[row] ?? "").indexOf("[TODO 1/2]") + 3;
+    app.input.write(clickAt(row + 1, col));
+    await tick(40);
+    expect(app.lastFrame()).toContain("change the loop");
+
+    // Escape closes the most recent thing that was opened. A bare ESC is held
+    // for the decoder's grace window before it is read as Escape at all.
+    app.input.write("\u001b");
+    await tick(90);
+    expect(app.lastFrame()).not.toContain("change the loop");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+});
 
 describe("the tab bar", () => {
   /** Two sessions for this directory, the first of them current. */

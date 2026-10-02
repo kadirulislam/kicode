@@ -4,7 +4,7 @@ import { imageUrl, type PastedImage } from "../clipboard";
 import type { AssistantMessage, ChatMessage, ContentPart, FinishReason, Provider, Usage } from "../types";
 import type { QuotaReading } from "../routes/quota";
 import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions } from "./compaction";
-import type { ToolRegistry } from "./tools/types";
+import type { PlanSnapshot, ToolRegistry } from "./tools/types";
 
 /**
  * A user turn's content: the words, and any pasted images beside them.
@@ -49,7 +49,16 @@ export type AgentEvent =
    * mid-sentence, and "the cap did that" is not the same news as "the model
    * was finished".
    */
-  | { type: "continued"; reason: "truncated" | "empty"; attempt: number }
+  | { type: "continued"; reason: "truncated" | "empty" | "work"; attempt: number }
+  /**
+   * The plan or goal tools' own state, as data, after they ran.
+   *
+   * The text they return is what the model reads and the transcript shows;
+   * this is the same state as plain data, so a screen can draw a checklist's
+   * progress instead of parsing the tree the model was handed. Only tools that
+   * hold such state emit it.
+   */
+  | { type: "plan"; snapshot: PlanSnapshot }
   /**
    * The model thinking, before it answered. Only from endpoints that stream it.
    *
@@ -119,8 +128,12 @@ export const DEFAULT_SYSTEM_PROMPT = [
   "- Inspect the real files with the read tool before answering questions about code. Never guess at file contents.",
   "- Prefer small, targeted changes over broad rewrites.",
   "- After using a tool, explain what you found or did in one or two sentences.",
-  "- When you verify something reusable — a procedure that worked, a gotcha with its fix — save it with the remember tool (a skill for procedures, a memory for project facts) and say what you saved. Never save secrets.",
+  "- When the system prompt shows a brain (a project memory, a skills list), read it before you plan: it is what earlier sessions learned, and using it is cheaper than rediscovering it. Load a full skill or memory with the recall tool when a name looks relevant.",
+  "- Save with the remember tool when the session produced something durable: the user stated a preference or made a decision (\"use pnpm\", \"never touch X\"); you hit a non-obvious gotcha and found the fix; you learned a project convention the code does not show (how to build, test or deploy it, a required env var); or you finished a procedure of three or more steps you would plausibly run again (a skill). When the briefing already showed this project's memory, add to it rather than repeating what is there.",
+  "- Do not save one-off command output, file contents, code restated back, speculation, or transient errors (network, rate limits). Never save secrets, keys or tokens. When you do save, say in one sentence what you saved and where.",
   "- For work that spans several steps, track the steps with the todo tool: add them up front and mark each one done as it finishes, so the user watches the list move as you work.",
+  "- Work to the end of the task in one turn: keep using tools until every tracked step is done, then answer. Do not stop mid-task to report progress or to ask whether to continue.",
+  "- Ask the user (ask tool) only when the decision is genuinely theirs — a preference, a trade-off, a name, or how far a destructive change should reach. When a reasonable default exists, choose it, say in one sentence what you assumed, and continue. Use the ask tool over ending your turn with a prose question.",
   "- When the task is done, stop and wait for the user. Do not invent follow-up work.",
   "- If the user says 'pause' or requests a pause, immediately stop what you are doing, acknowledge that execution is paused, and wait for further instructions.",
   "- Responses go to a terminal: keep them concise and skip decorative formatting.",
@@ -175,6 +188,20 @@ function abortError(): Error {
 /** Whether an error is a cancellation, which is a decision and not a failure. */
 function isAbort(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+/**
+ * What the tracked work still has outstanding, or null when there is none.
+ *
+ * The plan tools (todo, goal) know what they are holding; the loop only asks.
+ * A registry with no such tool answers null, so this costs nothing by default.
+ */
+function pendingWork(tools: ToolRegistry): string | null {
+  for (const tool of tools.list()) {
+    const pending = tool.pendingWork?.();
+    if (pending) return pending;
+  }
+  return null;
 }
 
 export class Agent {
@@ -380,6 +407,9 @@ export class Agent {
     // How many replies in a row were not answers. Reset by any turn that ran a
     // tool, because that is progress — the thing this counter exists to bound.
     let continuations = 0;
+    // The same bound on "stopped while tracked work was still open": a model
+    // that keeps declining the work is asked three times, then the turn ends.
+    let workNudges = 0;
 
     for (let turn = 0; turn < this.maxTurns; turn++) {
       yield* this.maybeCompact();
@@ -460,13 +490,40 @@ export class Agent {
       }
 
       // Progress, so the allowance is fresh for whatever comes next.
-      if (calls.length > 0) continuations = 0;
+      if (calls.length > 0) {
+        continuations = 0;
+        workNudges = 0;
+      }
 
       if (calls.length === 0) {
         // The words, when there were any, are the answer and are kept. An
         // empty reply that has run out of allowances is dropped rather than
         // recorded as a turn that said nothing.
         if (said) this.messages.push(assistant);
+
+        // A turn ends at an answer — unless the work being tracked is not
+        // finished. A reply that stops mid-task is not the end of the task,
+        // and "the agent stopped" is the single loudest complaint there is.
+        // Plan mode is exempt: an open list there is the plan itself, whose
+        // deliverable is stopping for review. The nudge is bounded the same
+        // way the re-ask is — a model that refuses the work gets three tries,
+        // not an infinite loop — and any tool call hands the allowance back,
+        // because that is progress.
+        const pending = this.readOnly ? null : pendingWork(this.tools);
+        if (pending && workNudges < MAX_CONTINUATIONS) {
+          workNudges += 1;
+          this.messages.push({
+            role: "user",
+            content:
+              `The task is not finished: ${pending}.\n` +
+              "Continue working on it now — do not stop to report progress. " +
+              "If the user's request is actually complete, or the remaining steps are no longer wanted, mark them done or clear the list with the todo tool and say what changed. " +
+              "If you are blocked on a decision only the user can make, use the ask tool instead of stopping.",
+          });
+          yield { type: "continued", reason: "work", attempt: workNudges };
+          continue;
+        }
+
         yield done("complete");
         return;
       }
@@ -570,6 +627,11 @@ export class Agent {
 
         this.messages.push({ role: "tool", tool_call_id: call.id, content });
         yield { type: "tool-result", id: call.id, name, content, isError };
+
+        // A tool with state of its own (the plan tools) hands it over as data
+        // too, so the screen can show progress without reading the text.
+        const snapshot = tool.snapshot?.();
+        if (snapshot) yield { type: "plan", snapshot };
 
         // The tool may have been stopped by the cancellation it was just
         // handed — a killed command still owes the model its result, but the

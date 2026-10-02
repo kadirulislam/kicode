@@ -164,6 +164,14 @@ describe("fileSettingsFromEntries", () => {
     expect(result.warnings.join("\n")).toContain('"maxTokens"');
   });
 
+  it("reads a brain path, and warns about one that is not a path", () => {
+    expect(fileSettingsFromEntries([entry({ brain: "~/.kicode/brain" })]).settings.brain).toBe("~/.kicode/brain");
+
+    const bad = fileSettingsFromEntries([entry({ brain: 7 })]);
+    expect(bad.settings.brain).toBeUndefined();
+    expect(bad.warnings.join("\n")).toContain('"brain"');
+  });
+
   it("reads a spacing block, one number at a time", () => {
     const result = fileSettingsFromEntries([entry({ spacing: { block: 0, turn: 3 } })]);
 

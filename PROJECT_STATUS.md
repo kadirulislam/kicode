@@ -1,13 +1,45 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 1005 Tests Passing (49 test suites)  
+**Build Status:** Stable, All 1043 Tests Passing (50 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~480 KB) via `npm run build`
+**Binary Distribution:** Built (`dist/cli.js`, ~517 KB) via `npm run build`
 
 ---
 
 ## 🚀 Key Features Implemented
+
+### 0. A Fresh User's Brain Is Created, Not Demanded (ADR-031)
+- **The bootstrap that was missing.** Before this, a brain was found only via `KI_BRAIN_PATH` or an upward walk for `ki-agent-brain`, and `remember` *refused* when neither existed — so a new user's first save failed and nothing ever accumulated. Now the resolution order is **`KI_BRAIN_PATH` → `brain` in `kicode.json` → existing `ki-agent-brain` → `~/.kicode/brain`**, and the first `remember` **creates** the configured path or the default `~/.kicode/brain`.
+- **Existing brains are untouched**: the `ki-agent-brain` walk is kept, so a brain in use is never abandoned; it is only a read fallback, never a creation target.
+- **`brain` is a validated config key** (`~` means home, a relative path resolves against the working directory), read synchronously because the briefing has no `await` on its path.
+
+### 0. The Brain Is Read Back, and the Agent Knows When to Write (ADR-030)
+- **Recall — the half that was missing.** The brain used to be write-only: `remember` saved skills and project memories, but nothing reached the next session unless the user typed `@project:…` by hand. Now a bounded **brain briefing** (this project's memory text, plus skill names and descriptions) is folded into the system prompt at session start, and a new **`recall` tool** loads a full skill or memory body on demand — by exact name or by the words you remember.
+- **A write policy instead of one vague line.** The prompt now states exactly *when* to save (a user's stated preference or decision; a non-obvious gotcha with its fix; a project convention the code does not show; a ≥3-step procedure worth repeating) and *when not to* (one-off output, code restated, speculation, transient errors, secrets, anything already recorded), and tells the model to add to this project's memory rather than repeat it.
+- **Skills are correctable.** `remember` gained `action: "update"`, so a skill can be fixed deliberately; a plain save still refuses to overwrite one. Frontmatter quotes are stripped, so descriptions read cleanly in the briefing and the `@skill:` list.
+- **The reader is recursive**, so a maintained brain's categorised skills (`skills/android/adb-automation/SKILL.md`) are found, not just the flat ones `remember` writes.
+
+### 0. The TODO Button and Its Plan Panel (ADR-029)
+- **Tracked work is a button**: the state row carries a `[TODO n/m]` chip whenever the `todo` or `goal` tool is holding work — pressing it opens a panel, and the chip only exists when there is something to show. A running goal's own subtask progress is preferred in the label.
+- **The panel is a narrow card on the right, above the box**: checklist rows with `✓`/`◐`/`○`, a 10-cell progress bar, and — when a goal is running — its status, title, subtasks and current task. `esc` or the `[×]` closes it.
+- **The state travels as data, not text**: `Tool` gained an optional `snapshot()`, implemented by the plan tools; the loop forwards it as a new `plan` event, so the panel draws a structure instead of parsing the checklist the model was handed. The app holds the snapshot, so it survives a model switch.
+
+### 0. OpenCode 403 Is Diagnosed as a Client Restriction (ADR-029)
+- **A bare 403 on opencode.ai now says what it is.** Credentials are a 401, so a 403 is the client gate — the note no longer waits for the body to carry an OpenCode-shaped `AuthError`, which newer responses do not always send. A 401 still needs the body to confirm it, since it can also be a wrong key. `kicode --probe` picks this up through the same message.
+
+### 0. The Turn Continues While Tracked Work Remains (ADR-028)
+- **The stop is enforced, not just requested**: a turn that answers while the `todo` or `goal` tool still holds open work is nudged to carry on instead of ending — "the agent stopped mid-task" was the loop's rule, and the rule is now the other way round. `Tool` gained an optional `pendingWork()` (the plan tools implement it), and `loop.ts` reads it before accepting an answer.
+- **The nudge is bounded like the re-ask**: at most three in a row (`MAX_CONTINUATIONS`), and any tool call hands the allowance back, because progress is what the bound protects. Plan mode is exempt — an open list there *is* the plan, whose deliverable is stopping for review.
+- **The system prompt now draws the line between asking and continuing**: work to the end of the task in one turn (don't stop to report progress), and use the `ask` tool only when the decision is genuinely the user's — pick a reasonable default and say what was assumed otherwise.
+- **The stop is said out loud**: the `continued` event gained a third reason, `work`, rendered as `tracked work is not finished — asking it to carry on` in both the TUI and one-shot mode.
+
+### 0. Queued Messages Are Tiles Above the Box, and Commands Run the Same Way (ADR-028)
+- **The queue is visible**: while a turn runs, each queued message is a tile above the input box, with its own `[x]` that drops just that one — a message queued by mistake is removed by clicking it, not by clearing the queue and retyping the rest. The renderer reports each `[x]`'s columns (`PanelKind: "queued"`), so a press can never land on the wrong tile.
+- **`ADD[+]` in the box queues what is typed**: shown only while a turn (or a paused session) gives the queue something to drain into, so the idle box keeps its full width for the words that enter already sends.
+- **A queued line that starts with `/` runs as a command** when its turn arrives (`runQueued`) — a `/goal …` typed mid-turn starts a goal, it is not handed to the model as prose.
+- **`/insert` and `/queue` with an argument run at once when idle** — with nothing in flight there is nothing to insert ahead of; a bare `/insert` fills `/insert ` into the box and waits rather than printing a dead-end usage line.
+- **Choosing a command that needs an argument fills the box and waits**: `/goal`, `/cd`, `/rename` (any `usage` written in angle brackets) put `/cmd ` in the box with the cursor waiting, instead of being submitted with the argument missing.
 
 ### 0. Clipboard Image Preview & Last-5 History
 - **Vivid True-Color Image Preview Before Pasting**: When copying an image (or selecting an image from history), the clipboard modal displays a real 24×6 true-color thumbnail rendered via terminal half-blocks (`▀`), with 24-bit RGB foreground and background sampling decoded directly from PNG via `node:zlib`. Colors are safely preserved across ANSI escape sanitization.

@@ -18,6 +18,7 @@ import {
 import { COMMAND_WIDTH, isAvailable, type Command } from "./commands";
 import { type LineEditor, editorRows } from "./editor";
 import { LOGO_TEXT, logoRows } from "./logo";
+import type { PlanSnapshot } from "../agent/tools/types";
 import type { MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
 import { blend, type Styles, type Theme } from "./theme";
@@ -251,6 +252,17 @@ export type TuiState = {
   isPaused?: boolean;
   /** Number of queued messages waiting to execute. */
   queuedCount?: number;
+  /** The plan tools' state, for the progress button and its panel. */
+  plan?: PlanSnapshot | null;
+  /** True while the plan panel is open above the box. */
+  todoPanel?: boolean;
+  /**
+   * The queued messages themselves, drawn as tiles above the box.
+   *
+   * The count says a queue exists; these say what is in it, so a message queued
+   * by mistake can be seen and dropped before it runs.
+   */
+  queue?: readonly string[];
   /** What the screen shows. Absent means the defaults, which a test relies on. */
   settings?: ViewSettings;
   /** Reasoning effort for this session, shown next to the model. */
@@ -326,6 +338,8 @@ export type PromptBox = {
   modeButton: { row: number; colStart: number; colEnd: number };
   /** The upload button at the box's right edge, in the columns it was drawn in. */
   uploadButton: { row: number; colStart: number; colEnd: number };
+  /** The add button beside it: the box's text joins the queue instead of sending. */
+  addButton: { row: number; colStart: number; colEnd: number };
 };
 
 export type RenderedFrame = {
@@ -377,7 +391,11 @@ export type PanelKind =
   /** A `[×]` chip: the escape key, somewhere a mouse can reach it. */
   | "close"
   /** One of a card's own decision chips, by its place in `Modal.choices`. */
-  | "modal_choice";
+  | "modal_choice"
+  /** The `[x]` on a queued message's tile, by its place in the queue. */
+  | "queued"
+  /** The `TODO [n/m]` chip on the state row, which opens the plan panel. */
+  | "todo_button";
 
 export type ClipboardMenuState = {
   items: readonly PickItem[];
@@ -616,9 +634,10 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
         top: bottom.prompt.top + tabRowCount + bodyRows + 1,
         bottom: bottom.prompt.bottom + tabRowCount + bodyRows + 1,
         rows: bottom.prompt.rows.map((row) => ({ ...row, row: row.row + tabRowCount + bodyRows + 1 })),
-        // The box's two buttons ride the same shift as its rows.
+        // The box's three buttons ride the same shift as its rows.
         modeButton: { ...bottom.prompt.modeButton, row: bottom.prompt.modeButton.row + tabRowCount + bodyRows + 1 },
         uploadButton: { ...bottom.prompt.uploadButton, row: bottom.prompt.uploadButton.row + tabRowCount + bodyRows + 1 },
+        addButton: { ...bottom.prompt.addButton, row: bottom.prompt.addButton.row + tabRowCount + bodyRows + 1 },
       }
     : null;
 
@@ -2047,6 +2066,71 @@ function renderBottom(
   // being on screen is also what decides whether the mode row under it has to
   // name the mode: the box's own pill says it whenever the box is there.
   const boxShown = !state.modal && !state.picker && !state.menu && !(state.ask && !state.askTyping);
+
+  // Messages queued while a turn was running wait here, above the box, so what
+  // will run next is visible without reaching for `/queue`. Each queued message
+  // is its own row with an `[x]` that removes just that one: a message queued
+  // by mistake is dropped by clicking it, not by clearing the queue and
+  // retyping the rest.
+  if (boxShown && state.queue && state.queue.length > 0) {
+    const queueWidth = Math.min(width, 76);
+    const inside = Math.max(queueWidth - 2, 20);
+    const borderStyle = styles.faint;
+    const leftPad = span(indent);
+    const chipWidth = textWidth("[x]");
+    const topContent = `─ Queued (${state.queue.length}) `;
+    push(
+      [
+        leftPad,
+        span("┌", borderStyle),
+        span(topContent, styles.bold),
+        span("─".repeat(Math.max(inside - textWidth(topContent), 0)), borderStyle),
+        span("┐", borderStyle),
+      ],
+      theme.bg,
+    );
+    state.queue.forEach((text, index) => {
+      const body = ` ${index + 1}. ${text}`;
+      const truncated = cut(body, Math.max(inside - chipWidth - 2, 4));
+      const truncWidth = textWidth(truncated);
+      const gap = Math.max(inside - truncWidth - chipWidth - 1, 0);
+      const row = rows.length;
+      const chipCol = margin + 2 + truncWidth + gap;
+      push(
+        [
+          leftPad,
+          span("│", borderStyle),
+          span(truncated, styles.text),
+          span(" ".repeat(gap)),
+          span("[x]", styles.hintKey),
+          span(" ", borderStyle),
+          span("│", borderStyle),
+        ],
+        theme.bg,
+      );
+      hits.push({ kind: "queued", row, index, colStart: chipCol, colEnd: chipCol + chipWidth - 1 });
+    });
+    push([leftPad, span("└", borderStyle), span("─".repeat(inside), borderStyle), span("┘", borderStyle)], theme.bg);
+  }
+
+  // The plan panel: the tracked checklist and any running goal, right-aligned
+  // just above the box. Narrow on purpose — it is a glance, not the transcript —
+  // and hidden with the box, so a card that owns the screen is not sharing it.
+  if (boxShown && state.todoPanel && state.plan) {
+    const panelWidth = clamp(Math.min(44, width - 2), 20, 44);
+    const panel = renderPlanPanel(state.plan, styles, panelWidth);
+    const left = Math.max(usable - panelWidth, 0);
+    const base = rows.length;
+    panel.rows.forEach((spans, offset) => {
+      const gap = Math.max(usable - left - spansWidth(spans), 0);
+      push([span(" ".repeat(left)), ...spans, span(" ".repeat(gap))], theme.bg);
+      if (offset === panel.closeRow) {
+        const colStart = left + panel.closeStart + 1;
+        hits.push({ kind: "close", row: base + offset, index: 0, colStart, colEnd: colStart + panel.closeWidth - 1 });
+      }
+    });
+  }
+
   if (boxShown) {
     const attachedCount = state.attachedImages ?? 0;
     const badges: Span[] = [];
@@ -2074,9 +2158,19 @@ function renderBottom(
     // either.
     const uploadText = "UPLOAD[+]";
     const uploadLen = textWidth(uploadText);
-    // The trailing space is part of the controls, so the gap arithmetic matches
-    // exactly what is drawn and the row never overflows.
-    const rightLen = uploadLen + 1;
+    // `ADD[+]` queues what is in the box instead of sending it, so a message
+    // can be lined up behind the running turn. It is shown only when there is a
+    // turn to queue behind — or a paused session to queue into — because while
+    // the box is idle enter already sends, and the button would take width from
+    // every prompt to say something the keyboard already does. It sits beside
+    // the upload button in the same idiom: a word and a `[+]`, so neither glyph
+    // is a riddle.
+    const showAdd = state.busy !== null || state.isPaused === true;
+    const addText = "ADD[+]";
+    const addLen = textWidth(addText);
+    // The trailing spaces are part of the controls, so the gap arithmetic
+    // matches exactly what is drawn and the row never overflows.
+    const rightLen = (showAdd ? addLen + 1 : 0) + uploadLen + 1;
 
     // The mode pill, on the box's own left edge.
     //
@@ -2105,6 +2199,7 @@ function renderBottom(
       span("]", styles.pillBorder),
     ];
     const rightControls: Span[] = [
+      ...(showAdd ? [span("ADD", styles.hintKey), span("[+]", styles.plusButton), span(" ")] : []),
       span("UPLOAD", styles.hintKey),
       span("[+]", styles.plusButton),
       span(" "),
@@ -2167,6 +2262,13 @@ function renderBottom(
       // presses, so neither it nor a future change has to redo this arithmetic.
       modeButton: { row: firstTextRow, colStart: margin + 3, colEnd: margin + 2 + pillWidth },
       uploadButton: { row: firstTextRow, colStart: usable - uploadLen, colEnd: usable - 1 },
+      // `ADD[+]` leads the right-hand controls, so it starts `rightLen` cells
+      // from the row's end. When it is not shown its box is put off to the side
+      // with no columns to hit, which is simpler than making the caller ask
+      // whether the button exists.
+      addButton: showAdd
+        ? { row: firstTextRow, colStart: usable - rightLen + 1, colEnd: usable - rightLen + addLen }
+        : { row: firstTextRow, colStart: -1, colEnd: -1 },
     };
   }
 
@@ -2188,7 +2290,22 @@ function renderBottom(
     : !state.picker && !state.ask && !state.menu
       ? boxBg
       : theme.bg;
-  push(modeSpans(state, styles, width, indent, !boxShown), stateRowBg);
+  // The tracked-work chip rides the state row's right end: it says how much of
+  // the checklist (or the goal) is done, and pressing it opens the panel. The
+  // row is what has the room, and the row is where a session's own status lives.
+  const stateSpans = modeSpans(state, styles, width, indent, !boxShown);
+  // Not while a card is up: the panel it opens is hidden then, and a button
+  // that visibly does nothing is worse than one that is not there.
+  const chipSpans = state.plan && !state.modal ? planChip(state.plan, styles) : null;
+  if (chipSpans) {
+    const chipWidth = spansWidth(chipSpans);
+    const gap = Math.max(usable - spansWidth(stateSpans) - chipWidth - 1, 1);
+    const colStart = spansWidth(stateSpans) + gap + 1;
+    hits.push({ kind: "todo_button", row: rows.length, index: 0, colStart, colEnd: colStart + chipWidth - 1 });
+    push([...stateSpans, span(" ".repeat(gap)), ...chipSpans], stateRowBg);
+  } else {
+    push(stateSpans, stateRowBg);
+  }
   // The footer's own chips close whatever is open, so escape is a mouse action
   // here too. Its columns are read off the packed row, which is the only place
   // that knows where they landed.
@@ -2288,6 +2405,114 @@ function modeSpans(state: TuiState, styles: Styles, width: number, indent: strin
     span(" · ", styles.faint),
     span(`${state.variant}${queueSuffix}`, state.variant === DEFAULT_VARIANT ? styles.faint : styles.warn),
   ];
+}
+
+/**
+ * The tracked-work chip for the state row, or null when nothing is tracked.
+ *
+ * A goal is the headline while it runs — the checklist beside it is a means to
+ * it — so the chip shows the goal's own subtask progress when one is active,
+ * and the checklist's otherwise. Nothing tracked means no chip at all: a
+ * `TODO [0/0]` on every quiet session is a button for nothing.
+ */
+function planChip(plan: PlanSnapshot, styles: Styles): Span[] | null {
+  const goalTasks = plan.goal?.tasks ?? [];
+  let done: number;
+  let total: number;
+  if (plan.goal && goalTasks.length > 0) {
+    done = goalTasks.filter((task) => task.status === "done").length;
+    total = goalTasks.length;
+  } else {
+    done = plan.todos.filter((todo) => todo.done).length;
+    total = plan.todos.length;
+  }
+  if (total === 0) return null;
+  return [span("[", styles.pillBorder), span(`TODO ${done}/${total}`, styles.accent), span("]", styles.pillBorder)];
+}
+
+/** One checklist row: `✓` done, `◐` the one in hand, `○` still to come. */
+function todoIcon(todo: PlanSnapshot["todos"][number], firstOpen: number, index: number): string {
+  if (todo.done) return "✓";
+  return todo.inProgress || index === firstOpen ? "◐" : "○";
+}
+
+/**
+ * The plan panel: a narrow card above the box, on the right.
+ *
+ * It shows the checklist and, when one is running, the goal's subtasks with a
+ * bar each. Rows are returned without their place on screen — the caller owns
+ * the right-alignment and the close chip's columns — so the geometry lives in
+ * one place the way the prompt box's does.
+ */
+function renderPlanPanel(
+  plan: PlanSnapshot,
+  styles: Styles,
+  width: number,
+): { rows: Span[][]; closeStart: number; closeWidth: number; closeRow: number } {
+  const inside = Math.max(width - 2, 16);
+  const border = styles.faint;
+  const rows: Span[][] = [];
+
+  const bar = (done: number, total: number): Span[] => {
+    const filled = total > 0 ? Math.round((done / total) * 10) : 0;
+    return [
+      span("[", styles.faint),
+      span("▓".repeat(filled), styles.accent),
+      span("░".repeat(Math.max(10 - filled, 0)), styles.faint),
+      span("]", styles.faint),
+      span(`  ${done}/${total}`, styles.dim),
+    ];
+  };
+
+  /** A bordered content row, padded out to the panel's inner width. */
+  const row = (inner: Span[]): void => {
+    const gap = Math.max(inside - spansWidth(inner), 0);
+    rows.push([span("│", border), ...inner, span(" ".repeat(gap)), span("│", border)]);
+  };
+
+  // The title row carries the `[×]`, so the caller can make it a target.
+  const title = " TODO ";
+  const close = `[${TAB_CLOSE}]`;
+  const closeWidth = textWidth(close);
+  const titleFiller = Math.max(inside - textWidth(title) - closeWidth, 0);
+  rows.push([
+    span("┌", border),
+    span(title, styles.bold),
+    span("─".repeat(titleFiller), border),
+    span(close, styles.hintKey),
+    span("┐", border),
+  ]);
+  const closeStart = 1 + textWidth(title) + titleFiller;
+  const closeRow = 0;
+
+  const todos = plan.todos;
+  const firstOpen = todos.findIndex((todo) => !todo.done);
+  if (todos.length > 0) {
+    const done = todos.filter((todo) => todo.done).length;
+    row([span(" "), ...bar(done, todos.length)]);
+    todos.forEach((todo, index) => {
+      const icon = todoIcon(todo, firstOpen, index);
+      const iconStyle = todo.done ? styles.dim : icon === "◐" ? styles.accent : styles.faint;
+      row([span(` ${icon} `, iconStyle), span(cut(todo.text, inside - 6), todo.done ? styles.dim : styles.text)]);
+    });
+  }
+
+  const goal = plan.goal;
+  if (goal && goal.tasks.length > 0) {
+    if (todos.length > 0) row([span(" "), span("─".repeat(Math.max(inside - 2, 1)), border)]);
+    const done = goal.tasks.filter((task) => task.status === "done").length;
+    row([span(" "), span(`Goal · ${goal.status}`, styles.bold), span(`  ${done}/${goal.tasks.length}`, styles.dim)]);
+    row([span(" "), span(cut(goal.title, inside - 4), styles.text)]);
+    for (const task of goal.tasks) {
+      const icon = task.status === "done" ? "✓" : task.status === "in_progress" ? "▸" : "·";
+      const iconStyle = task.status === "done" ? styles.dim : task.status === "in_progress" ? styles.accent : styles.faint;
+      row([span(` ${icon} `, iconStyle), span(cut(`${task.id}  ${task.title}`, inside - 6), task.status === "done" ? styles.dim : styles.text)]);
+    }
+    if (goal.current) row([span(" "), span(cut(`now  ${goal.current}`, inside - 4), styles.dim)]);
+  }
+
+  rows.push([span("└", border), span("─".repeat(inside), border), span("┘", border)]);
+  return { rows, closeStart, closeWidth, closeRow };
 }
 
 /**

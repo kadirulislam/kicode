@@ -321,6 +321,105 @@ describe("a reply that is not an answer", () => {
   });
 });
 
+describe("a turn that stopped before the tracked work was done", () => {
+  /**
+   * A stand-in for the todo tool.
+   *
+   * `pendingWork` reports whatever the model has left open, exactly the way the
+   * real tool reads its list — which is the whole contract the loop relies on.
+   */
+  const trackedTool = (state: { open: boolean }): Tool => ({
+    name: "todo",
+    description: "track tasks",
+    parameters: { type: "object", properties: { action: { type: "string" } }, required: ["action"] },
+    async run(args) {
+      state.open = args.action === "add";
+      return { content: "tracked" };
+    },
+    pendingWork: () => (state.open ? "1 tracked task(s) still open: finish it" : null),
+  });
+
+  it("nudges the model to carry on instead of ending mid-task", async () => {
+    const state = { open: false };
+    const tool = trackedTool(state);
+    const provider = new FakeProvider([
+      toolCallTurn("call_1", "todo", JSON.stringify({ action: "add" })),
+      answerTurn("I have done the first part."),
+      toolCallTurn("call_2", "todo", JSON.stringify({ action: "done" })),
+      answerTurn("All done."),
+    ]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([tool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "do the two things");
+
+    // The reply that stopped with work open is not the end of the task: the
+    // loop says so and asks for the rest.
+    expect(events).toContainEqual({ type: "continued", reason: "work", attempt: 1 });
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    expect(provider.requests).toHaveLength(4);
+    const nudge = provider.requests[2]?.messages.at(-1);
+    expect(nudge).toMatchObject({ role: "user" });
+    if (nudge?.role === "user") expect(String(nudge.content)).toContain("not finished");
+  });
+
+  it("is bounded: a model that ignores the list is not asked forever", async () => {
+    const tool = trackedTool({ open: true });
+    // Every reply answers without a tool call, so nothing ever clears the list.
+    const provider = new FakeProvider([answerTurn("one"), answerTurn("two"), answerTurn("three"), answerTurn("four"), answerTurn("five")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([tool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "do it");
+
+    expect(events.filter((event) => event.type === "continued" && event.reason === "work")).toHaveLength(3);
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    // The first request and three nudges; the fifth turn is never made.
+    expect(provider.requests).toHaveLength(4);
+  });
+
+  it("does not nudge in plan mode, where an open list is the plan", async () => {
+    const tool = trackedTool({ open: true });
+    const provider = new FakeProvider([toolCallTurn("call_1", "todo", JSON.stringify({ action: "add" })), answerTurn("Here is the plan.")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([tool]), model: "m", cwd: process.cwd(), readOnly: true });
+
+    const events = await collect(agent, "plan it");
+
+    expect(events.filter((event) => event.type === "continued")).toHaveLength(0);
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    expect(provider.requests).toHaveLength(2);
+  });
+});
+
+describe("a tool with state of its own", () => {
+  it("hands its state over as data as well as text", async () => {
+    const tool: Tool = {
+      name: "todo",
+      description: "track tasks",
+      parameters: { type: "object", properties: {}, required: [] },
+      async run() {
+        return { content: "● Todos (0/1)" };
+      },
+      snapshot: () => ({ todos: [{ text: "one", done: false }], goal: null }),
+    };
+    const provider = new FakeProvider([toolCallTurn("call_1", "todo", "{}"), answerTurn("done")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([tool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "go");
+
+    // The text goes to the model and the transcript; the same state arrives as
+    // data for a screen that wants to draw progress rather than parse it.
+    expect(events).toContainEqual({ type: "plan", snapshot: { todos: [{ text: "one", done: false }], goal: null } });
+  });
+
+  it("emits nothing for a tool that holds no state", async () => {
+    const provider = new FakeProvider([toolCallTurn("call_1", "read", "{}"), answerTurn("done")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "go");
+
+    expect(events.some((event) => event.type === "plan")).toBe(false);
+  });
+});
+
 describe("a pasted image", () => {
   const image = { data: "AAAA", mime: "image/png", bytes: 3 };
 

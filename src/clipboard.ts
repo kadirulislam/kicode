@@ -293,22 +293,22 @@ export function decodeImagePreview(image: PastedImage, targetCols = 24, targetRo
             let tR = 120, tG = 120, tB = 120;
             let bR = 120, bG = 120, bB = 120;
             if (topPx + 2 < raw.length) {
-              tR = raw[topPx];
-              tG = bpp >= 3 ? raw[topPx + 1] : tR;
-              tB = bpp >= 3 ? raw[topPx + 2] : tR;
+              tR = raw[topPx] ?? tR;
+              tG = bpp >= 3 ? raw[topPx + 1] ?? tG : tR;
+              tB = bpp >= 3 ? raw[topPx + 2] ?? tB : tR;
               if (bpp === 4) {
-                const a = raw[topPx + 3] / 255;
+                const a = (raw[topPx + 3] ?? 0) / 255;
                 tR = Math.round(tR * a + 26 * (1 - a));
                 tG = Math.round(tG * a + 27 * (1 - a));
                 tB = Math.round(tB * a + 38 * (1 - a));
               }
             }
             if (botPx + 2 < raw.length) {
-              bR = raw[botPx];
-              bG = bpp >= 3 ? raw[botPx + 1] : bR;
-              bB = bpp >= 3 ? raw[botPx + 2] : bR;
+              bR = raw[botPx] ?? bR;
+              bG = bpp >= 3 ? raw[botPx + 1] ?? bG : bR;
+              bB = bpp >= 3 ? raw[botPx + 2] ?? bB : bR;
               if (bpp === 4) {
-                const a = raw[botPx + 3] / 255;
+                const a = (raw[botPx + 3] ?? 0) / 255;
                 bR = Math.round(bR * a + 26 * (1 - a));
                 bG = Math.round(bG * a + 27 * (1 - a));
                 bB = Math.round(bB * a + 38 * (1 - a));
@@ -441,7 +441,7 @@ export function loadSavedClipboardHistory(): ClipboardHistoryItem[] {
     if (!Array.isArray(parsed)) return [];
     return parsed
       .slice(0, MAX_CLIPBOARD_HISTORY)
-      .map((entry) => {
+      .map((entry): ClipboardHistoryItem | null => {
         if (entry.kind === "text" && typeof entry.text === "string") {
           const textInfo = formatTextPreview(entry.text);
           return {

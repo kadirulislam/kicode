@@ -1,6 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { resolveBrainDir } from "../../mentions";
+import { ensureBrainDir } from "../../mentions";
 import type { Tool } from "./types";
 
 /**
@@ -15,9 +15,10 @@ import type { Tool } from "./types";
  * Deliberately not approval-gated: capturing learnings is the point, and a
  * prompt per save would train the user to stop saving. The guardrails are
  * positional instead — writes land only inside the resolved brain directory
- * (never the checkout, never home), names are slugs so no path can escape it,
- * bodies are capped, and anything shaped like a secret is refused. In plan
- * mode the loop refuses the call outright, like every other writing tool.
+ * (KiCode's own home by default, or wherever the user pointed a brain, and
+ * never the checkout), names are slugs so no path can escape it, bodies are
+ * capped, and anything shaped like a secret is refused. In plan mode the loop
+ * refuses the call outright, like every other writing tool.
  */
 
 const MAX_SKILL_CHARS = 12_000;
@@ -48,6 +49,7 @@ export const rememberTool: Tool = {
     "Save something this session verified so future sessions know it — then tell the user what you saved, in one sentence.",
     "Use it sparingly, only for durable learnings: a procedure that worked and will be needed again (kind \"skill\"), or a project fact, decision, or gotcha with its fix (kind \"memory\"). Do not save guesses, one-off outputs, or anything already in the skill or memory you read.",
     "A skill needs a short slug name, a one-line description, and the procedure as markdown. A memory needs the project slug and the entry text. Never include secrets, keys, or tokens.",
+    'Use action \"update\" to correct a skill that already exists; a plain save never overwrites one.',
   ].join(" "),
   parameters: {
     type: "object",
@@ -69,6 +71,12 @@ export const rememberTool: Tool = {
         type: "string",
         description: "The skill body as markdown, or the memory entry text.",
       },
+      action: {
+        type: "string",
+        enum: ["create", "update"],
+        description:
+          'Skills only. \"create\" (the default) adds a new skill and refuses to overwrite one; \"update\" replaces the body of a skill that already exists. Ignored for a memory.',
+      },
     },
     required: ["kind", "name", "text"],
   },
@@ -87,16 +95,22 @@ export const rememberTool: Tool = {
       if (pattern.test(text) || pattern.test(textOf(args.description))) return secretError();
     }
 
-    const brain = await resolveBrainDir(process.env, context.cwd);
-    if (!brain) {
+    // A brain is created on the first save when there is none: a fresh user has
+    // no skills and no brain, and a save that refused to make one would mean
+    // nothing ever accumulated. `~/.kicode/brain` by default; `KI_BRAIN_PATH` or
+    // a `brain` key in kicode.json says somewhere else.
+    let brain: string;
+    try {
+      brain = await ensureBrainDir(process.env, context.cwd);
+    } catch (error) {
       return {
-        content:
-          "Error: no brain found above this directory (looked for ki-agent-brain upwards, and KI_BRAIN_PATH). Tell the user to set KI_BRAIN_PATH to their brain directory, then retry.",
+        content: `Error: could not create a brain directory — ${(error as Error).message}. Set KI_BRAIN_PATH, or a "brain" path in kicode.json, to a writable directory and retry.`,
         isError: true,
       };
     }
 
-    if (kind === "skill") return saveSkill(brain, name, textOf(args.description).trim(), text);
+    const action = textOf(args.action) === "update" ? "update" : "create";
+    if (kind === "skill") return saveSkill(brain, name, textOf(args.description).trim(), text, action);
     return saveMemory(brain, name, text);
   },
 };
@@ -106,6 +120,7 @@ async function saveSkill(
   name: string,
   description: string,
   body: string,
+  action: "create" | "update",
 ): Promise<{ content: string; isError?: boolean }> {
   if (!SKILL_NAME.test(name)) {
     return {
@@ -117,14 +132,27 @@ async function saveSkill(
     return { content: "Error: a skill needs a one-line \"description\" — it is what /skills lists.", isError: true };
   }
   const file = path.join(brain, "skills", name, "SKILL.md");
+  let exists = false;
   try {
     await readFile(file, "utf8");
+    exists = true;
+  } catch {
+    // Missing is the expected case for a new skill.
+  }
+
+  // A skill is never overwritten by accident: the default refuses, and only an
+  // explicit `update` replaces one — the correction has to be deliberate.
+  if (exists && action !== "update") {
     return {
-      content: `Error: skill "${name}" already exists at ${file} — pick another name, or save this as a memory instead. I never overwrite a skill.`,
+      content: `Error: skill "${name}" already exists at ${file} — pass action: "update" to correct it deliberately, pick another name, or save this as a memory instead.`,
       isError: true,
     };
-  } catch {
-    // Missing is the expected case: a new skill to create.
+  }
+  if (!exists && action === "update") {
+    return {
+      content: `Error: there is no skill "${name}" to update. Save it without an action to create it.`,
+      isError: true,
+    };
   }
 
   const cappedBody =
@@ -133,7 +161,7 @@ async function saveSkill(
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, `${front}${cappedBody}\n`, "utf8");
   return {
-    content: `Saved skill "${name}" to ${file} — /skills lists it and @skill:${name} expands it. Tell the user you saved it, in one sentence.`,
+    content: `${exists ? "Updated" : "Saved"} skill "${name}" at ${file} — /skills lists it and @skill:${name} expands it. Tell the user you ${exists ? "updated" : "saved"} it, in one sentence.`,
   };
 }
 
