@@ -179,6 +179,9 @@ describe("RouteHealth store", () => {
     expect(store.get(ref)?.lastReason).toBeUndefined();
     expect(store.get(ref)?.retryAfterMs).toBeUndefined();
     expect(store.get(ref)?.consecutiveFailures).toBe(0);
+    // Drain the write before the directory goes: it is fire-and-forget, and a
+    // late one recreates the directory after removal (ENOTEMPTY).
+    await store.flush();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -273,6 +276,7 @@ describe("RouteHealth store", () => {
     expect(lines[0]?.detail).toContain("the key was refused (HTTP 403)");
     expect(lines[1]?.detail).toContain("0 of 50 requests left");
     expect(lines[1]?.detail).toContain("resets in 1h 0m");
+    await store.flush();
     await rm(dir, { recursive: true, force: true });
   });
 
@@ -299,6 +303,7 @@ describe("RouteHealth store", () => {
     for (let index = 0; index < 40; index++) store.record(ref, { ok: index % 2 === 0, at: NOW + index });
 
     expect(store.get(ref)?.recent).toHaveLength(32);
+    await store.flush();
     await rm(dir, { recursive: true, force: true });
   });
 });
