@@ -1,0 +1,21 @@
+version: 2
+
+updates:
+  # Every action in .github/workflows is pinned to a commit rather than a tag,
+  # which is what stops anyone but us from changing what runs. The cost is that
+  # a fixed version of the action is also something we no longer get on our own,
+  # so this is the other half of that bargain.
+  #
+  # Dependabot rewrites the commit and the `# vX.Y.Z` comment beside it
+  # together — and only while that comment is in that shape. Editing one of
+  # those comments by hand is how the pin silently stops being updated.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    # One pull request for the week's bumps rather than one per action: the
+    # review is the same either way, and CI is what actually checks them.
+    groups:
+      actions:
+        patterns:
+          - "*"

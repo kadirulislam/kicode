@@ -18,13 +18,14 @@ jobs:
     # A GitHub-hosted runner specifically. Provenance cannot be generated from
     # a self-hosted runner, and a build that did not happen inside the provider
     # is not something the attestation can vouch for.
-    # Pinned, for the reason ci.yml gives: a release should not be built on an
-    # image that changed while nobody was looking.
+    # Pinned, for the reasons ci.yml gives — and both matter more here: a
+    # release should not be built on an image or an action that changed while
+    # nobody was looking.
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
@@ -69,9 +70,9 @@ jobs:
     needs: publish
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24.x'
           package-manager-cache: false
