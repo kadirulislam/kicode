@@ -18,11 +18,13 @@ jobs:
     # A GitHub-hosted runner specifically. Provenance cannot be generated from
     # a self-hosted runner, and a build that did not happen inside the provider
     # is not something the attestation can vouch for.
-    runs-on: ubuntu-latest
+    # Pinned, for the reason ci.yml gives: a release should not be built on an
+    # image that changed while nobody was looking.
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24.x'
           registry-url: 'https://registry.npmjs.org'
@@ -65,11 +67,11 @@ jobs:
     # a tarball whose bin file is not executable once installed, and a missing
     # provenance attestation.
     needs: publish
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24.x'
           package-manager-cache: false
