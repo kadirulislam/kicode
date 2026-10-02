@@ -90,6 +90,24 @@ describe("fileSettingsFromEntries", () => {
     }
   });
 
+  it("refuses a key on a provider, at any scope, and names the variable to use", () => {
+    // The global file is on the same disk as a project one — it is not more
+    // private, so a key stored there is refused and reported the same way.
+    for (const scope of ["global", "project"] as const) {
+      const result = fileSettingsFromEntries([
+        entry(
+          { providers: { openrouter: { baseUrl: "https://openrouter.ai/api/v1", apiKey: "sk-or-secret" } } },
+          scope,
+        ),
+      ]);
+
+      expect(result.warnings.join("\n")).toContain("OPENROUTER_API_KEY");
+      expect(JSON.stringify(result.settings)).not.toContain("sk-or-secret");
+      // The endpoint itself is still read — only the credential is dropped.
+      expect(result.settings.providers?.openrouter?.baseUrl).toBe("https://openrouter.ai/api/v1");
+    }
+  });
+
   it("warns and ignores malformed values instead of failing", () => {
     const result = fileSettingsFromEntries([
       entry({

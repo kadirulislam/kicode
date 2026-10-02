@@ -1,7 +1,6 @@
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
-  DEFAULT_BASE_URL,
   DEFAULT_COMPACT_AT_TOKENS,
   DEFAULT_COMPACT_TARGET_PERCENT,
   DEFAULT_CONTEXT_TOKENS,
@@ -93,8 +92,11 @@ export async function writeProjectConfig(cwd: string, config: Config): Promise<I
 function project(config: Config): Record<string, unknown> {
   const settings: Record<string, unknown> = { model: config.model };
 
+  // Any non-empty endpoint was declared somewhere and is worth recording; `""`
+  // means no provider is declared yet, and writing that back would freeze an
+  // empty endpoint into the file — the one state `--init` must not create.
   if (config.baseUrl === MOCK_BASE_URL) settings.mock = true;
-  else if (config.baseUrl !== DEFAULT_BASE_URL) settings.baseUrl = config.baseUrl;
+  else if (config.baseUrl) settings.baseUrl = config.baseUrl;
 
   // Only when it has been chosen: writing the default would pin a project to
   // today's default theme, which is the one thing a theme should not be.

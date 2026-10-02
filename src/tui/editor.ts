@@ -57,6 +57,27 @@ export class LineEditor {
     this.recalling = null;
   }
 
+  /**
+   * A literal line break, for Shift+Enter.
+   *
+   * Deliberately not `insert("\n")`: `insert` flattens newlines so that a
+   * pasted prompt cannot smuggle in a submit, and that rule must not be
+   * loosened to serve the one key whose whole meaning is "break here".
+   */
+  insertNewline(): void {
+    const at = this.cursor;
+    if (this.hasSelection()) {
+      const [start, end] = this.selectionRange();
+      this.text = `${this.text.slice(0, start)}\n${this.text.slice(end)}`;
+      this.cursor = start + 1;
+      this.clearSelection();
+    } else {
+      this.text = `${this.text.slice(0, at)}\n${this.text.slice(at)}`;
+      this.cursor = at + 1;
+    }
+    this.recalling = null;
+  }
+
   backspace(): void {
     if (this.hasSelection()) {
       this.deleteSelection();
@@ -216,6 +237,17 @@ function breakRows(text: string, width: number): { start: number; end: number }[
 
   for (let index = 0; index < text.length; ) {
     const char = String.fromCodePoint(text.codePointAt(index) ?? 0);
+    // A newline is a break the user asked for rather than a character: the row
+    // ends before it and the next begins after it, however short the line was.
+    // Without this a Shift+Enter would land in the text and render as a gap.
+    if (char === "\n") {
+      rows.push({ start, end: index });
+      index += 1;
+      start = index;
+      used = 0;
+      space = -1;
+      continue;
+    }
     const cells = textWidth(char);
     // A character too wide for a row still has to be shown, so an empty row is
     // never broken off to make room for it.

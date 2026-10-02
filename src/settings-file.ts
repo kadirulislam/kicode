@@ -1,3 +1,4 @@
+import { apiKeyEnvFor } from "./config";
 import type { ConfigFileEntry } from "./config-file";
 import { MAX_SPACING, SETTING_KEYS, SPACING_KEYS, settingOptions, type Spacing, type ViewOverrides } from "./tui/settings";
 
@@ -35,9 +36,12 @@ export type FileCompactionSettings = {
 
 export type FileProvider = {
   baseUrl: string;
-  /** Direct API key for this provider. */
-  apiKey?: string;
-  /** The environment variable holding this provider's key. */
+  /**
+   * The environment variable holding this provider's key.
+   *
+   * There is no `apiKey` field on purpose: a key found in a file is reported
+   * and ignored, and nothing here writes one (`settings-write.ts`).
+   */
   apiKeyEnv?: string;
   /** Only these models, instead of asking the endpoint. For a local server. */
   models?: string[];
@@ -53,7 +57,6 @@ export type FileFallbackRoute = {
 };
 
 export type FileSettings = {
-  apiKey?: string;
   model?: string;
   /** The colour theme by name, e.g. `tokyo-night`. `/themes` lists them. */
   theme?: string;
@@ -75,6 +78,16 @@ export type FileSettings = {
   fallbackAuto?: boolean;
   /** Session token ceiling. Omitted or 0 means no ceiling. */
   maxTokens?: number;
+  /** Requests one turn may spend before it stops and asks to carry on. */
+  maxTurns?: number;
+  /**
+   * Command prefixes that never ask for approval, per tool.
+   *
+   * `{ "bash": ["npm test", "git status"] }` — a prefix match against the
+   * command, checked before the prompt. Deliberately explicit and short: this
+   * is the one setting that can run something without being read first.
+   */
+  allow?: Record<string, string[]>;
   /**
    * Whether a finished turn runs the automatic learning pass. `"auto"` (the
    * default) or `"off"`. It costs one extra request per turn, so it is a
@@ -189,6 +202,17 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
       }
     }
 
+    if (json.maxTurns !== undefined) {
+      const value = positiveInt(json.maxTurns);
+      if (value === null) warnings.push(`Ignoring "maxTurns" in ${entry.file}: expected a positive whole number.`);
+      else settings.maxTurns = value;
+    }
+
+    if (json.allow !== undefined) {
+      const parsed = readAllow(json.allow, entry.file, warnings);
+      if (parsed) settings.allow = { ...settings.allow, ...parsed };
+    }
+
     if (json.mock !== undefined) {
       if (typeof json.mock === "boolean") settings.mock = json.mock;
       else warnings.push(`Ignoring "mock" in ${entry.file}: expected true or false.`);
@@ -237,15 +261,15 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
       }
     }
 
+    // A key in a file is reported and never used — at any scope. The global
+    // file sits on the same disk as the project one and is just as easy to
+    // sync, back up, or paste into an issue, so "it is only mine" is not a
+    // property of a file and there is no scope where this is allowed.
     const rawKey = json.apiKey ?? json.key ?? json.token;
     if (rawKey !== undefined) {
-      if (entry.scope === "global" && typeof rawKey === "string" && rawKey.trim() !== "") {
-        settings.apiKey = rawKey.trim();
-      } else {
-        warnings.push(
-          `Ignoring the API key in ${entry.file} — KiCode reads keys from the environment (KICODE_API_KEY) so a committed config can never leak one.`,
-        );
-      }
+      warnings.push(
+        `Ignoring the API key in ${entry.file} — KiCode never takes a key from a config file. Set the provider's apiKeyEnv in the environment instead.`,
+      );
     }
   }
 
@@ -262,6 +286,39 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
  * Every entry is validated on its own: one malformed provider is a warning and
  * a dropped row, never a reason to lose the rest of the block.
  */
+/**
+ * The `allow` block: command prefixes that skip the approval prompt, per tool.
+ *
+ * `{ "bash": ["npm test", "git status"] }`. A bad entry is dropped with a
+ * warning rather than refusing the whole block, so one typo cannot silently
+ * disable every rule the user wrote — and an empty list is dropped too, because
+ * a rule that matches nothing reads as if it were working.
+ */
+function readAllow(value: unknown, file: string, warnings: string[]): Record<string, string[]> | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    warnings.push(`Ignoring "allow" in ${file}: expected an object of tool → [prefix, …].`);
+    return null;
+  }
+
+  const allow: Record<string, string[]> = {};
+  for (const [tool, prefixes] of Object.entries(value as Record<string, unknown>)) {
+    if (!Array.isArray(prefixes)) {
+      warnings.push(`Ignoring "allow.${tool}" in ${file}: expected a list of command prefixes.`);
+      continue;
+    }
+    const list = prefixes
+      .filter((prefix): prefix is string => typeof prefix === "string" && prefix.trim() !== "")
+      .map((prefix) => prefix.trim());
+    if (list.length === 0) {
+      warnings.push(`Ignoring "allow.${tool}" in ${file}: expected at least one non-empty prefix.`);
+      continue;
+    }
+    allow[tool] = list;
+  }
+
+  return Object.keys(allow).length > 0 ? allow : null;
+}
+
 function readProviders(value: unknown, file: string, warnings: string[]): Record<string, FileProvider> | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     warnings.push(`Ignoring "providers" in ${file}: expected an object of name → { baseUrl }.`);
@@ -300,11 +357,12 @@ function readProviders(value: unknown, file: string, warnings: string[]): Record
       else warnings.push(`Ignoring "models" on "${name}" in ${file}: expected a non-empty array of names.`);
     }
 
+    // The same rule as a key at the top level, named rather than read. The
+    // value is never echoed — the variable to use instead is what is useful.
     if (source.apiKey !== undefined || source.key !== undefined || source.token !== undefined) {
-      const directKey = source.apiKey ?? source.key ?? source.token;
-      if (typeof directKey === "string" && directKey.trim() !== "") {
-        provider.apiKey = directKey.trim();
-      }
+      warnings.push(
+        `Ignoring the API key stored on provider "${name}" in ${file} — KiCode never takes a key from a config file. Set ${provider.apiKeyEnv ?? apiKeyEnvFor(name)} in the environment instead.`,
+      );
     }
 
     providers[name] = provider;

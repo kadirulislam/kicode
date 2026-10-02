@@ -77,6 +77,31 @@ describe("session store", () => {
     expect(loaded?.messages[0]).toEqual({ role: "user", content: "hello from s1" });
   });
 
+  it("keeps a session's mode and variant, and tolerates a record without them", async () => {
+    // Its own home: the counts above are about the shared one.
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-mode-"));
+    const onlyVisible = { ...process.env, KICODE_HOME: own };
+
+    try {
+      await saveSession(
+        { ...record("s-mode", "/project/one", "2026-01-01T00:00:00.000Z"), mode: "plan", variant: "high" },
+        onlyVisible,
+      );
+      const loaded = await loadSession("s-mode", onlyVisible);
+      expect(loaded?.mode).toBe("plan");
+      expect(loaded?.variant).toBe("high");
+
+      // A record written before these existed simply has neither, and reads
+      // back with neither rather than with a placeholder.
+      await saveSession(record("s-old", "/project/one", "2026-01-01T00:00:00.000Z"), onlyVisible);
+      const older = await loadSession("s-old", onlyVisible);
+      expect(older?.mode).toBeUndefined();
+      expect(older?.variant).toBeUndefined();
+    } finally {
+      await rm(own, { recursive: true, force: true });
+    }
+  });
+
   it("returns null for an unknown id", async () => {
     expect(await loadSession("nope", env())).toBeNull();
   });

@@ -81,6 +81,39 @@ describe("parseKeys", () => {
     expect(parseKeys("\n").map((key) => key.type)).toEqual(["enter"]);
   });
 
+  it("reads Shift+Enter from every encoding a terminal might use for it", () => {
+    // modifyOtherKeys — xterm, and the mode Windows Terminal, VS Code and
+    // iTerm2 implement.
+    expect(parseKeys("\u001b[27;2;13~").map((key) => key.type)).toEqual(["newline"]);
+    // kitty / CSI-u, with and without the event-type suffix.
+    expect(parseKeys("\u001b[13;2u").map((key) => key.type)).toEqual(["newline"]);
+    expect(parseKeys("\u001b[13;2:1u").map((key) => key.type)).toEqual(["newline"]);
+    // `ESC` then Enter: alt+enter in most terminals, shift+enter in some.
+    expect(parseKeys("\u001b\r").map((key) => key.type)).toEqual(["newline"]);
+    expect(parseKeys("\u001b\n").map((key) => key.type)).toEqual(["newline"]);
+  });
+
+  it("keeps unmodified Enter a submit, so the newline stays the exception", () => {
+    expect(parseKeys("\r").map((key) => key.type)).toEqual(["enter"]);
+    expect(parseKeys("\u001b[13u").map((key) => key.type)).toEqual(["enter"]);
+    expect(parseKeys("\u001b[13;1u").map((key) => key.type)).toEqual(["enter"]);
+  });
+
+  it("puts the other modified keys back where they were, so nothing is lost", () => {
+    // A terminal switched into a reporting mode must not break ctrl and alt.
+    expect(parseKeys("\u001b[27;5;97~")).toEqual([{ type: "ctrl", key: "a" }]);
+    expect(parseKeys("\u001b[97;3u")).toEqual([{ type: "alt", key: "a" }]);
+    expect(parseKeys("\u001b[9;2u").map((key) => key.type)).toEqual(["backtab"]);
+    expect(parseKeys("\u001b[27;5;13~")).toEqual([{ type: "ctrl", key: "j" }]);
+  });
+
+  it("holds a half-arrived modifier sequence instead of leaking it as text", () => {
+    const decoder = new KeyDecoder();
+
+    expect(decoder.push("\u001b[13;2")).toEqual([]);
+    expect(decoder.push("u").map((key) => key.type)).toEqual(["newline"]);
+  });
+
   it("reads backspace and delete separately", () => {
     expect(parseKeys("\u007f").map((key) => key.type)).toEqual(["backspace"]);
     expect(parseKeys("\b").map((key) => key.type)).toEqual(["backspace"]);

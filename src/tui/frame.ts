@@ -31,7 +31,7 @@ import { type Entry, entrySpans } from "./transcript";
  * which matters for a UI that cannot be checked by refreshing a browser.
  */
 
-export type TabInfo = { id: string; title: string; current: boolean };
+export type TabInfo = { id: string; title: string; current: boolean; busy?: boolean };
 
 /**
  * Where a tab sits on the first row, in columns, so a click can be placed.
@@ -461,6 +461,8 @@ const BLOCK_PAD = 2;
 const MODAL_BODY_LINES = 6;
 /** The glyph in a tab that closes it. */
 export const TAB_CLOSE = "×";
+/** Marks a tab with a turn running in it — the session working in the background. */
+const TAB_BUSY = "◐ ";
 /** A tab title longer than this is cut, so one name cannot push the rest off. */
 const TAB_TITLE_MAX = 18;
 /** Stands in for "a new session" in the tab bar, and is clickable too. */
@@ -718,7 +720,7 @@ function renderTabs(state: TuiState, styles: Styles, usable: number): { spans: S
   for (const tab of state.tabs) {
     const isHovered = state.hoverTabId === tab.id;
     const isCloseHovered = isHovered && Boolean(state.hoverClose);
-    const title = ` ${cut(tab.title, TAB_TITLE_MAX)}  `;
+    const title = `${tab.busy && !tab.current ? TAB_BUSY : " "}${cut(tab.title, TAB_TITLE_MAX)}  `;
     const body = tab.current ? styles.tabActive : isHovered ? styles.tabHover : styles.tabInactive;
     const close = isCloseHovered
       ? styles.tabCloseHover

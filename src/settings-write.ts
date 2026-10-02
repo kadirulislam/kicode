@@ -93,7 +93,7 @@ export async function writeGlobalSettings(
  */
 export async function addGlobalProvider(
   name: string,
-  provider: { baseUrl: string; apiKey?: string; apiKeyEnv?: string; models?: string[] },
+  provider: { baseUrl: string; apiKeyEnv?: string; models?: string[] },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<SettingsWriteResult> {
   const file = globalConfigPath(env);
@@ -117,13 +117,30 @@ export async function addGlobalProvider(
       ? (existing.providers as Record<string, unknown>)
       : {};
 
+  // Never destroy a key this program did not write.
+  //
+  // KiCode does not *add* a key to a config file, which is the rule stated
+  // everywhere — but rewriting an entry is not the same as deciding what may
+  // live in it, and dropping a credential because the writer stopped writing
+  // them would lose something no one can get back. So an entry that already
+  // holds one keeps it, and the reader goes on reporting and ignoring it.
+  const prior = block[name];
+  const priorKey =
+    prior !== null && typeof prior === "object" && !Array.isArray(prior) && typeof (prior as Record<string, unknown>).apiKey === "string"
+      ? ((prior as Record<string, unknown>).apiKey as string)
+      : undefined;
+
   const next = {
     ...existing,
     providers: {
       ...block,
       [name]: {
         baseUrl: provider.baseUrl,
-        ...(provider.apiKey ? { apiKey: provider.apiKey } : {}),
+        ...(priorKey ? { apiKey: priorKey } : {}),
+        // No `apiKey`, and no way to pass one: a credential on disk is the
+        // thing every claim about this file says cannot happen. The key itself
+        // is held in memory for the session and read from the variable named
+        // here on the next run.
         ...(provider.apiKeyEnv ? { apiKeyEnv: provider.apiKeyEnv } : {}),
         ...(provider.models && provider.models.length > 0 ? { models: [...provider.models] } : {}),
       },

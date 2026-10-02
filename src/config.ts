@@ -1,8 +1,21 @@
 /**
- * Configuration resolution: CLI flags > environment > defaults.
+ * Configuration resolution: flags > `kicode.json` > defaults.
+ *
+ * The environment is not a provider. It can only hold the *key* for a provider
+ * the config already declares, in the variable that provider names as its
+ * `apiKeyEnv`. Nothing in the environment — `OPENAI_API_KEY`, `OPENAI_BASE_URL`
+ * or KiCode's own `KICODE_*` names — can call an endpoint into existence,
+ * because an ambient variable belongs to whatever else set it: a first run that
+ * silently borrowed one talked to a gateway its owner never chose, and could
+ * not say why it worked. A fresh install has no provider until its owner adds
+ * one with `/connect`.
  *
  * The key is deliberately environment-only — `kicode.json` carries settings but
- * never a credential, so there is no on-disk secret to leak or commit.
+ * never a credential, so there is no on-disk secret to leak or commit. That is
+ * enforced in both directions: nothing writes one (`settings-write.ts` has no
+ * field for it) and one found in a file is reported and ignored
+ * (`settings-file.ts`), which is what makes the sentence above true rather
+ * than aspirational.
  */
 
 import { COMPACT_TARGET_PERCENT } from "./agent/compaction";
@@ -11,8 +24,15 @@ import type { FileSettings } from "./settings-file";
 import { DEFAULT_THEME } from "./tui/theme";
 import { type ViewSettings, viewFrom } from "./tui/settings";
 
-export const DEFAULT_BASE_URL = "https://api.openai.com/v1";
-export const DEFAULT_MODEL = "deepseek-v4-flash";
+/**
+ * The model a session starts on before anything names one.
+ *
+ * There is no default *endpoint* to pair it with any more — a provider has to be
+ * declared (ADR-041) — so this is a first guess rather than a promise. It is
+ * what the box shows until `/models` reads the endpoint's own list, and
+ * `KICODE_MODEL` or `"model"` in `kicode.json` replace it.
+ */
+export const DEFAULT_MODEL = "gpt-4o-mini";
 /**
  * The turn budget, owned by the loop that spends it.
  *
@@ -111,6 +131,15 @@ export type Config = {
   /** Session token ceiling. 0 means no ceiling. */
   maxTokens: number;
   /**
+   * Command prefixes that skip the approval prompt, per tool name.
+   *
+   * Checked before the prompt, and only for a tool that is gated at all. This
+   * is the one setting that can let something run without being read first, so
+   * it is an exact, explicit prefix match and nothing cleverer — and the prompt
+   * it skips is the only place the command would have been shown.
+   */
+  allow: Record<string, string[]>;
+  /**
    * Whether a finished turn runs the learning pass over the transcript.
    *
    * On by default: a brain that only fills when the model remembers to call
@@ -132,12 +161,14 @@ export type ConfigOverrides = Partial<
 };
 
 /**
- * Resolution order: flags > `kicode.json` > environment > defaults.
+ * Resolution order: flags > `kicode.json` > defaults.
  *
- * A config file beats the environment deliberately. An ambient variable like
- * `OPENAI_BASE_URL` is usually there for some other tool, and silently
- * redirecting KiCode to a different gateway is a confusing failure — an
- * explicit project file is the thing that should win.
+ * A provider has to be *declared* to exist. The environment cannot add one and
+ * cannot redirect the one in use: `OPENAI_BASE_URL` is usually set for some
+ * other tool, and a first run that quietly borrowed it talked to a gateway its
+ * owner never chose. Declaring a provider is one deliberate act — `/connect`
+ * writes it, or the file is edited — and until that happens there is nothing to
+ * talk to.
  */
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
@@ -150,21 +181,34 @@ export function loadConfig(
   const providers = readProviders(env, file.providers ?? {}, mock);
   // The named provider is picked before anything else is looked at, so
   // `providers` is what selects an endpoint and `baseUrl` stays an override.
-  const chosen = selectProvider(providers, overrides.provider ?? undefined, file.provider, env.KICODE_PROVIDER);
+  const asked = overrides.provider ?? file.provider ?? env.KICODE_PROVIDER;
+  const picked = selectProvider(providers, overrides.provider ?? undefined, file.provider, env.KICODE_PROVIDER);
+  // One declared provider and no name given is not ambiguous: it is the only
+  // place to go. It is also exactly the shape `/connect` leaves behind — it
+  // declares a provider and does not name one — so a service added from the UI
+  // is in use as soon as it is added, rather than leaving the session
+  // configured and still unstartable.
+  const only = providers.length === 1 ? providers[0] : undefined;
+  const chosen =
+    picked.name === null && only && !asked
+      ? { name: only.name, baseUrl: only.baseUrl, apiKey: only.apiKey }
+      : picked;
 
+  // No environment fallback, on purpose: an endpoint KiCode was never told
+  // about is not a configured endpoint. Empty means "no provider yet", which
+  // `validateConfig` reports as its own problem with its own remedy.
   const baseUrl = stripTrailingSlashes(
-    overrides.baseUrl ??
-      file.baseUrl ??
-      chosen.baseUrl ??
-      (mock ? MOCK_BASE_URL : env.KICODE_BASE_URL ?? env.OPENAI_BASE_URL ?? DEFAULT_BASE_URL),
+    overrides.baseUrl ?? file.baseUrl ?? chosen.baseUrl ?? (mock ? MOCK_BASE_URL : ""),
   );
 
   // The mock gets a placeholder key rather than a real one, so a real key can
   // never be sent to a local server by accident.
-  const apiKey = (
-    overrides.apiKey ??
-    (mock ? MOCK_API_KEY : file.apiKey ?? chosen.apiKey ?? env.KICODE_API_KEY ?? env.OPENAI_API_KEY ?? "")
-  ).trim();
+  // No `file.apiKey` in this chain, deliberately: a key found in a config file
+  // is reported and ignored (`settings-file.ts`). Only a declared provider's own
+  // `apiKeyEnv` — read in `readProviders` — or an explicit flag supplies one, so
+  // a key in the environment is only ever used because a provider asked for it
+  // by name.
+  const apiKey = (overrides.apiKey ?? (mock ? MOCK_API_KEY : chosen.apiKey ?? "")).trim();
 
   const compaction = file.compaction ?? {};
   const model = (overrides.model ?? file.model ?? env.KICODE_MODEL ?? DEFAULT_MODEL).trim();
@@ -182,10 +226,15 @@ export function loadConfig(
     // ours is reported at startup and never blocks the run — see `run.ts`.
     theme,
     view: viewFrom(theme, file.view ?? {}),
-    maxTurns: overrides.maxTurns ?? DEFAULT_MAX_TURNS,
+    // How many requests one turn may spend. A real task can run long, so this
+    // is a settable ceiling rather than a constant: `kicode.json` `maxTurns`,
+    // then `KICODE_MAX_TURNS`, then the default. Hitting it is not a failure —
+    // the turn stops and says so, and anything sent next carries on.
+    maxTurns: overrides.maxTurns ?? file.maxTurns ?? intFrom(env.KICODE_MAX_TURNS, DEFAULT_MAX_TURNS),
     fallback: readFallback(env, file, providers, chosen.name, baseUrl, apiKey, model),
     fallbackAuto: readFallbackAuto(env, file),
     maxTokens: overrides.maxTokens ?? file.maxTokens ?? intFrom(env.KICODE_MAX_TOKENS, 0),
+    allow: file.allow ?? {},
     learning: readLearning(env, file),
     compaction: {
       enabled: overrides.compact === false ? false : compaction.enabled !== false,
@@ -302,6 +351,15 @@ function intFrom(value: string | undefined, fallback: number): number {
 
 /** Returns a human-readable problem, or null when the config is usable. */
 export function validateConfig(config: Config): string | null {
+  // Two different first-run states with two different remedies — declaring an
+  // endpoint, and setting the key for one that exists. Collapsing them would
+  // send someone to fix the wrong thing; and with no endpoint there is no
+  // variable to name, so the key message has to come second.
+  if (!config.baseUrl) {
+    return config.providers.length
+      ? 'No provider is selected — name the one to use with "provider" in kicode.json.'
+      : "No provider is configured yet.";
+  }
   if (!config.apiKey) {
     // A named provider knows which variable it wanted, so it says so: "no key"
     // and "the wrong variable name in kicode.json" are different problems.
@@ -329,16 +387,27 @@ function stripTrailingSlashes(url: string): string {
  * key is kept: it belongs in the list so the model picker can say which one is
  * missing a credential rather than quietly omitting it.
  */
+/**
+ * The environment variable a provider's key is read from.
+ *
+ * One rule, one place: the name the provider declared, or the one its own name
+ * suggests. `run.ts` names the variable to the user after `/key`, and the
+ * settings reader uses the same rule to reject a key written into a file.
+ */
+export function apiKeyEnvFor(name: string): string {
+  return `${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
+}
+
 function readProviders(
   env: NodeJS.ProcessEnv,
-  declared: Record<string, { baseUrl: string; apiKey?: string; apiKeyEnv?: string; models?: string[] }>,
+  declared: Record<string, { baseUrl: string; apiKeyEnv?: string; models?: string[] }>,
   mock: boolean,
 ): ProviderConfig[] {
   const providers: ProviderConfig[] = [];
 
   for (const [name, entry] of Object.entries(declared)) {
-    const apiKeyEnv = entry.apiKeyEnv ?? `${name.toUpperCase().replace(/[^A-Z0-9]/g, "_")}_API_KEY`;
-    let apiKey = (entry.apiKey ?? env[apiKeyEnv] ?? "").trim();
+    const apiKeyEnv = entry.apiKeyEnv ?? apiKeyEnvFor(name);
+    let apiKey = (env[apiKeyEnv] ?? "").trim();
     if (!apiKey && (name === "tokenharbor" || name === "tokenharbour")) {
       apiKey = (env.TOKENHARBOR_API_KEY ?? env.TOKENHARBOUR_API_KEY ?? "").trim();
     }

@@ -8,6 +8,30 @@ import { INVERSE, spansWidth } from "./ansi";
 const styles = buildStyles(darkTheme);
 
 describe("LineEditor", () => {
+  it("keeps a Shift+Enter line break, and gives it a row of its own", () => {
+    const editor = new LineEditor();
+    editor.insert("first");
+    editor.insertNewline();
+    editor.insert("second");
+
+    expect(editor.text).toBe("first\nsecond");
+    expect(editor.cursor).toBe(12);
+
+    const wrap = editorRows(editor, styles, 40, "");
+    expect(wrap.rows).toHaveLength(2);
+    expect(wrap.caretRow).toBe(1);
+    expect(wrap.caretCol).toBe(6);
+  });
+
+  it("still flattens a pasted newline, which Shift+Enter is the exception to", () => {
+    // A pasted prompt must not submit itself; the key that means "break here"
+    // is the one case that may keep the break.
+    const editor = new LineEditor();
+    editor.insert("first\nsecond");
+
+    expect(editor.text).toBe("first second");
+  });
+
   it("inserts at the caret", () => {
     const editor = new LineEditor();
     editor.insert("ac");

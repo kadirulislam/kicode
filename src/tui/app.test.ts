@@ -5,8 +5,8 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
 import { projectSlug } from "../agent/brain";
 import type { LearnResult } from "../agent/learn";
-import type { Agent, AgentEvent, ApprovalDecision, ApproveFn } from "../agent/loop";
-import type { AskAnswer, AskFn, AskQuestion } from "../agent/ask";
+import type { Agent, AgentEvent, ApprovalDecision } from "../agent/loop";
+import type { AskAnswer, AskQuestion } from "../agent/ask";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { PastedImage } from "../clipboard";
 import type { ChatMessage } from "../types";
@@ -130,12 +130,15 @@ function harness(
   let tokenBudget = 0;
   /** Set by the fake agent's `cancel()`, to stand in for an aborted request. */
   let stopped = false;
-  let approval: ApproveFn | undefined;
-  let asking: AskFn | undefined;
 
-  const makeAgent = (history: ChatMessage[]): Agent => {
+  const makeAgent = (history: ChatMessage[], agentSettings: AgentSettings): Agent => {
     const messages: ChatMessage[] = [...history];
     built.push(history);
+    // This agent's own channels, bound when it was built — as in the real app,
+    // and the reason a turn left running in one session can never reach the
+    // prompt of another. Held per agent, not on the harness, for that reason.
+    const approves = agentSettings.approve;
+    const asks = agentSettings.ask;
 
     /** What a real provider does when its request is aborted. */
     const abortIfStopped = (): void => {
@@ -195,14 +198,14 @@ function harness(
         if (slow > 0) await tick(slow);
         if (failWith) throw failWith;
         abortIfStopped();
-        if (approve && approval) {
+        if (approve && approves) {
           decisions.push(
-            await approval({ id: "1", name: "bash", args: { command: "npm test" }, preview: "+ npm test" }),
+            await approves({ id: "1", name: "bash", args: { command: "npm test" }, preview: "+ npm test" }),
           );
         }
-        if (questions && asking) {
+        if (questions && asks) {
           asked.push(questions);
-          replies.push(await asking({ questions }));
+          replies.push(await asks({ questions }));
         }
         // A turn stopped while a prompt was up sees it here, the way a real
         // request sees its signal aborted.
@@ -255,10 +258,8 @@ function harness(
     listSessions: async () => [],
     loadSession: async () => null,
     createAgent: (history, agentSettings) => {
-      approval = agentSettings.approve;
-      asking = agentSettings.ask;
       settings.push(agentSettings);
-      return makeAgent(history);
+      return makeAgent(history, agentSettings);
     },
     saveSession: async ({ id, messages, cwd, title }) => {
       saves.push({ id, messages, cwd, title });
@@ -322,6 +323,20 @@ describe("runTui", () => {
       { role: "user", content: "hello" },
       { role: "assistant", content: "echo: hello" },
     ]);
+  });
+
+  it("shows the caller's notice on the screen it opens, so a first run knows what to do", async () => {
+    // The case this exists for: no key, so `run.ts` opens the UI instead of
+    // exiting — the UI is where `/connect` and `/key` are.
+    const app = harness({ notice: "No API key found. Add one with /connect, or /key to paste it for this session." });
+    const done = runTui(app.options);
+    await tick();
+
+    expect(app.screen()).toContain("No API key found");
+    expect(app.screen()).toContain("/connect");
+
+    app.input.write("/exit\r");
+    expect(await done).toBe(0);
   });
 
   it("takes over the alternate screen and hands it back", async () => {
@@ -1712,7 +1727,7 @@ describe("the tab bar", () => {
   });
 
   it("does not carry one session's queue into the next", async () => {
-    const app = harness({ ...twoSessions }, { slow: 2000 });
+    const app = harness({ ...twoSessions }, { slow: 150 });
     const done = runTui(app.options);
     await tick(20);
 
@@ -1721,6 +1736,13 @@ describe("the tab bar", () => {
     app.input.write("queued for the first\r");
     await tick(30);
     expect(app.lastFrame()).toContain("Queued (1)");
+
+    // Let the turn and the queued prompt behind it run out first: a switch made
+    // under a running turn is now deferred so the turn is not abandoned
+    // (ADR-039), and what this test is about is the queue's isolation rather
+    // than how fast the machine switched.
+    await until(app, "echo: queued for the first");
+    await tick(300);
 
     // What was queued behind this session's turn belongs to this session: the
     // one being opened must not inherit it.
@@ -1776,6 +1798,256 @@ describe("the tab bar", () => {
     await done;
   });
 
+  it("keeps a running turn going in the background when a new session is opened", async () => {
+    // Generous for the same reason the queue tests are: what matters is a turn
+    // still running when the click arrives, which is the one thing a loaded
+    // machine cannot be trusted to hold to.
+    const app = harness({}, { slow: 1_200 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("hello\r");
+    await tick(40);
+
+    // `+NEW` mid-turn. This used to wait for the turn to finish before moving.
+    // Now the turn belongs to the session that started it, so the old session
+    // is parked and finishes there while the user works on the new one.
+    app.input.write(click(19));
+    await tick(40);
+
+    // The switch happened at once — no waiting — and the tab shows the session
+    // still working behind the new one.
+    expect(app.lastFrame()).not.toContain("switching when it finishes");
+    expect(app.lastFrame()).not.toContain("echo: hello");
+    expect(app.lastFrame()).toContain("◐");
+
+    await tick(1_600);
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+
+    // The turn finished and its own session kept the answer.
+    expect(
+      app.saves.some((save) =>
+        save.messages.some(
+          (message) => message.role === "assistant" && String(message.content).includes("echo: hello"),
+        ),
+      ),
+    ).toBe(true);
+  });
+
+  it("drains a background session's queue without waiting for a visit", async () => {
+    const app = harness({}, { slow: 250 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    // Queued while the first turn runs, so it belongs to session-1's queue.
+    app.input.write("second\r");
+    await tick(20);
+
+    // Leave for a new session; session-1 keeps its turn and its queue, and works
+    // through both on its own.
+    app.input.write(click(19));
+    await tick(1_400);
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+
+    // Both answers were saved under session-1, while the user was in
+    // session-new the whole time.
+    const text = app.saves
+      .filter((save) => save.id === "session-1")
+      .flatMap((save) => save.messages.map((message) => String(message.content)))
+      .join("\n");
+    expect(text).toContain("echo: first");
+    expect(text).toContain("echo: second");
+  });
+
+  it("marks only the session running a goal as Goal", async () => {
+    // A goal belongs to one session. A global flag made a second session show
+    // [GOAL] for work it had nothing to do with.
+    const app = harness({}, { slow: 500 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("/goal ship it\r");
+    await tick(60);
+    expect(app.lastFrame()).toContain("[GOAL]");
+
+    // Leave while the goal runs: this session is not the one in a goal.
+    app.input.write(click(19));
+    await tick(40);
+    expect(app.lastFrame()).not.toContain("[GOAL]");
+
+    // The goal finishes off screen. Coming back, it is a session again — not
+    // stuck as Goal forever, which a flag only cleared on screen would do.
+    await tick(900);
+    app.input.write(click(24));
+    await tick(40);
+    expect(app.lastFrame()).not.toContain("[GOAL]");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
+  it("does not drain a paused session's queue while it is in the background", async () => {
+    const app = harness({}, { slow: 250 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    app.input.write("second\r");
+    await tick(20);
+    // Pausing stops the turn and holds what was queued behind it.
+    app.input.write("pause\r");
+    await tick(20);
+
+    // Leave the paused session: a pause is a decision, wherever you are looking.
+    app.input.write(click(19));
+    await tick(600);
+
+    expect(app.sentPrompts).not.toContain("second");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
+  it("auto-denies an approval for a turn in a background session", async () => {
+    const app = harness({}, { slow: 400, approve: true });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("hello\r");
+    await tick(40);
+    // Leave mid-turn, before the approval the turn is about to ask for.
+    app.input.write(click(19));
+
+    await until(app, "bash needs approval, denied");
+
+    // Denied, not raised: the session on screen must never see a card meant for
+    // the one left running behind it.
+    expect(app.decisions).toContain("deny");
+    expect(app.screen()).not.toContain("wants to run");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
+  it("skips a question asked by a turn in a background session", async () => {
+    const question: AskQuestion = { header: "Pick", question: "Which one?", options: [{ label: "A" }, { label: "B" }] };
+    const app = harness({}, { slow: 400, questions: [question] });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("hello\r");
+    await tick(40);
+    app.input.write(click(19));
+
+    await until(app, "a question was skipped");
+
+    // Dismissed rather than shown: the turn carries on with no answer instead
+    // of stalling on a prompt nobody can see.
+    expect(app.replies.some((reply) => reply.every((answer) => answer.dismissed))).toBe(true);
+    expect(app.screen()).not.toContain("Which one?");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
+  it("keeps a parked session's own mode when another session changes its own", async () => {
+    const app = harness();
+    const done = runTui(app.options);
+    await tick(20);
+
+    // Session-1 goes to plan mode.
+    app.input.write("\u001b[Z");
+    await tick(20);
+    expect(app.lastFrame()).toContain("[PLAN]");
+
+    // A new session inherits what was on screen…
+    app.input.write(click(19));
+    await tick(30);
+    expect(app.lastFrame()).toContain("[PLAN]");
+
+    // …and moving its mode must not reach back into the parked session.
+    app.input.write("\u001b[Z");
+    await tick(20);
+    expect(app.lastFrame()).toContain("[BUILD]");
+
+    // Back to session-1 — its own mode, not the one session-new moved to.
+    app.input.write(click(24));
+    await tick(30);
+    expect(app.lastFrame()).toContain("[PLAN]");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
+  it("keeps a parked session's own directory when another session changes its own", async () => {
+    const home = await mkdtemp(path.join(tmpdir(), "kicode-cwd-"));
+    await mkdir(path.join(home, "inner"));
+    const app = harness({ cwd: home });
+    const done = runTui(app.options);
+    await tick(20);
+
+    // Session-1 moves into a subdirectory.
+    app.input.write("/cd inner\r");
+    await tick(30);
+    expect(app.lastFrame()).toContain("inner");
+
+    // A new session inherits the directory…
+    app.input.write(click(19));
+    await tick(30);
+
+    // …leaves it, and session-1 must still be inside it on return.
+    app.input.write("/cd ..\r");
+    await tick(30);
+    expect(app.lastFrame()).not.toContain("inner");
+
+    app.input.write(click(24));
+    await tick(30);
+    expect(app.lastFrame()).toContain("inner");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it("restores a session's own settings when switching to it", async () => {
+    const app = harness({
+      listSessions: async () => [
+        {
+          id: "session-2",
+          title: "second",
+          model: "other-model",
+          baseUrl: "https://other.example/v1",
+          mode: "plan",
+          variant: "high",
+        },
+      ],
+      loadSession: async () => [{ role: "user", content: "hi" }],
+    });
+    const done = runTui(app.options);
+    await tick(20);
+
+    // ` new session  ×  ` is 17 columns, so the second tab starts at column 17.
+    app.input.write(click(24));
+    await tick(30);
+
+    // The session came back on the settings it was saved with, not the ones this
+    // run started on — model, endpoint, mode and variant all of them.
+    expect(app.settings.at(-1)?.model).toBe("other-model");
+    expect(app.settings.at(-1)?.baseUrl).toBe("https://other.example/v1");
+    expect(app.settings.at(-1)?.mode).toBe("plan");
+    expect(app.settings.at(-1)?.variant).toBe("high");
+    expect(app.lastFrame()).toContain("[PLAN]");
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
   it("scrolls the transcript with the wheel", async () => {
     const app = harness();
     const done = runTui(app.options);
@@ -1821,6 +2093,58 @@ describe("the tab bar", () => {
 
     app.input.write("\u0015/exit\r");
     await done;
+  });
+
+  it("stops a running turn when the session it is in is deleted", async () => {
+    const app = harness(twoSessions, { slow: 1_200 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("hello\r");
+    await tick(40);
+
+    // Right-click the current tab, move to Delete Session, and pick it.
+    app.input.write("\u001b[<2;5;1M");
+    await tick(30);
+    for (let i = 0; i < 4; i += 1) {
+      app.input.write("\u001b[B");
+      await tick(10);
+    }
+    app.input.write("\r");
+    await tick(60);
+
+    // The work stopped: there is no file left for its answer to go to.
+    expect(app.cancels).toBe(1);
+
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+  });
+
+  it("keeps a running turn's answer when its tab is closed", async () => {
+    const app = harness(twoSessions, { slow: 1_200 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("hello\r");
+    await tick(40);
+
+    // Right-click the current tab and choose Close Tab (the first row).
+    app.input.write("\u001b[<2;5;1M");
+    await tick(30);
+    app.input.write("\r");
+    await tick(60);
+
+    await tick(1_600);
+    app.input.write("\u0015/exit\r");
+    expect(await done).toBe(0);
+
+    // Closing hides a tab; it does not throw the work away — the answer still
+    // lands in the session that was closed.
+    const closed = app.saves
+      .filter((save) => save.id === "session-1")
+      .flatMap((save) => save.messages.map((message) => String(message.content)))
+      .join("\n");
+    expect(closed).toContain("echo: hello");
   });
 
   it("updates hover state when moving mouse over tabs", async () => {
@@ -2560,13 +2884,15 @@ describe("the slash commands", () => {
       await tick(120);
 
       app.input.write("/skills demo-skill\r");
-      await tick(60);
+      // Polled, not slept on: the walk to read the skill is the thing being
+      // waited for, and a fixed sleep is a bet on how loaded the machine is.
+      await until(app, "skill:demo-skill");
       expect(app.screen()).toContain("skill:demo-skill");
       expect(app.screen()).toContain("Demo skill body.");
 
       // An unknown name explains itself rather than failing silently.
       app.input.write("/skills nope\r");
-      await tick(60);
+      await until(app, 'no skill named "nope"');
       expect(app.screen()).toContain('no skill named "nope"');
 
       await finish(app, done);
@@ -2601,9 +2927,11 @@ describe("the slash commands", () => {
     await finish(app, done);
 
     expect(app.screen()).toContain("forked into a new session · 2 messages");
-    expect(app.saves.at(-1)?.id).toBe("session-new");
-    expect(app.saves.at(-1)?.messages).toHaveLength(2);
-    expect(app.saves.at(-1)?.title).toContain("fork");
+    // The fork's own save, not the last save overall: the session it was forked
+    // from is parked and flushed on the way out, which lands after this one.
+    const forked = app.saves.filter((save) => save.id === "session-new").at(-1);
+    expect(forked?.messages).toHaveLength(2);
+    expect(forked?.title).toContain("fork");
   });
 
   it("renames the session, and keeps the name on the next save", async () => {

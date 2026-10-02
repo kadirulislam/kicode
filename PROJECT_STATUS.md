@@ -1,11 +1,22 @@
 # KiCode Project Status
 
-**Current Version:** 0.1.0  
-**Build Status:** Stable, All 1083 Tests Passing (51 test suites)  
+**Current Version:** 0.1.1  
+**Build Status:** Stable, All 1118 Tests Passing (52 test suites)  
+**Release readiness:** see [`LAUNCH.md`](LAUNCH.md) — artifacts and paths verified end to end; publishing runs from CI with provenance, so the owner must first rotate the leaked keys, scrub history and make the repository public  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~543 KB) via `npm run build`  
+**Binary Distribution:** Built (`dist/cli.js`, ~300 KB **minified**, ADR-037) via `npm run build`  
+**Per-session settings:** model, endpoint, directory, mode and variant belong to the session; all five persist in the session file and are restored on a switch, and a resumed run opens on its own saved model/mode/variant (ADR-040)  
+**Distribution & License:** Publishable to npm under a **proprietary** (`UNLICENSED`) licence; the tarball ships the minified bundle + README/CHANGELOG/LICENSE only — source, tests and history are not published. Publication runs in CI (`.github/workflows/publish.yml`) with an npm **provenance** attestation, which requires the repository to be public  
 **Auto-compaction:** Fires at **150K** estimated tokens (`compactAt`), inside a 200K default window  
-**Credential guard:** `npm run check:secrets` (also a git pre-commit hook, and the first CI step)
+**Credential guard:** `npm run check:secrets` (also a git pre-commit hook, and the first CI step)  
+**Keys on disk:** none, in either direction — nothing writes one (`settings-write.ts` has no field) and one found in a config file is reported and ignored at any scope (ADR-038)  
+**Providers are declared, never inherited (ADR-041):** the environment supplies a key only to a provider that names it (`apiKeyEnv`); a fresh install has no endpoint at all and says so — `No provider is configured yet.` — because an ambient `OPENAI_BASE_URL`/`OPENAI_API_KEY` used to become the session's provider invisibly  
+**First run with no key:** opens the full-screen UI so `/connect` and `/key` are reachable; `--tui-preview` needs no key at all (ADR-038)  
+**Turn ceiling:** settable (`kicode.json` `maxTurns` / `KICODE_MAX_TURNS`), default **100** (was 40) (ADR-039)  
+**Approvals:** read-only calls do not prompt, "always" outlives the agent rebuild, and `kicode.json` `allow` rules skip the prompt (ADR-039)  
+**Shift+Enter:** inserts a line break, decoded from modifyOtherKeys, the kitty protocol (CSI-u) and `ESC CR`/`ESC LF` (ADR-039, ADR-040)  
+**Background turns:** a running turn keeps going when you switch sessions — the session is parked, its answer is saved under its own id, its queue drains on its own, and its tab shows `◐`; an off-screen approval is auto-denied with a notice and an off-screen question is skipped (ADR-040)  
+**Skills:** `/skills delete <name>` retires a skill into `<brain>/.trash/` (ADR-039)
 
 ---
 

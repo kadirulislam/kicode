@@ -5,66 +5,90 @@ endpoint, give it a key in the environment, and it reads your files and answers
 questions about them — with six tools, MCP support, sessions, and compaction
 around a streaming agent loop that stays short enough to read in one sitting.
 
-## Quick start
+## Install
 
 ```sh
-npm install
-npm run build
+npm install -g @kadirulislam/kicode
+kicode --version
 ```
 
-Set the key in the environment (PowerShell on the left, bash on the right — the
-key is deliberately the one thing that never goes in a config file):
+That is the whole install: KiCode has no runtime dependencies and no account,
+and the `bin` entry resolves to a single bundled file. To run it without
+installing globally, `npx @kadirulislam/kicode "…"` works the same way.
+
+### Connect an endpoint, then set its key
+
+KiCode talks only to endpoints you declare, and it names the environment
+variable its key is read from. Nothing ambient counts: an `OPENAI_API_KEY` or
+`OPENAI_BASE_URL` sitting in your shell is deliberately **not** enough on its
+own, because a first run that silently borrowed one would be talking to a
+gateway you never chose, for reasons you cannot see.
+
+Start it with nothing configured and it says so. `/connect` inside the UI offers
+the endpoints already known to work:
+
+```sh
+kicode
+#  › /connect        pick a service, or type your own base URL
+```
+
+That writes a `providers` block into `kicode.json`. The key itself never goes in
+the file — only the name of the variable to read it from. PowerShell on the left,
+bash on the right:
 
 ```powershell
-$env:KICODE_API_KEY = "sk-..."
-node dist/cli.js "what does src/config.ts do?"
+$env:OPENAI_API_KEY = "sk-..."
+kicode "what does src/config.ts do?"
 ```
 
 ```sh
-export KICODE_API_KEY=sk-...
-node dist/cli.js "what does src/config.ts do?"
+export OPENAI_API_KEY=sk-...
+kicode "what does src/config.ts do?"
 ```
 
-To stop passing the model and endpoint on every run, drop them in `kicode.json`
-— see [Project settings](#project-settings-kicodejson).
+Or declare it by hand:
 
-## Install as a global command
+```json
+{ "providers": { "openai": { "apiKeyEnv": "OPENAI_API_KEY" } } }
+```
+
+Declare exactly one provider and it is used without being named. Declare several
+and name the one to run on with `"provider": "openai"` (or `--provider`). To try
+an endpoint without declaring anything at all, `--base-url` and `--api-key`
+configure a single run.
+
+To stop passing the model on every run, drop it in `kicode.json` — see
+[Project settings](#project-settings-kicodejson).
+
+### From a checkout (developing)
 
 ```sh
 npm install
-npm run build     # required if your npm blocks install scripts
+npm run build     # npm blocks install scripts, so build once by hand
 npm link          # symlinks this checkout, so rebuilds take effect immediately
 
 kicode --version
-kicode "what does this project do?"
 ```
 
 `npm link` is the right choice while developing — it points at this directory
 rather than copying it, so `npm run build` is the only step needed to publish a
 change. It drops a `kicode` shim into npm's global prefix (`npm prefix -g`); on
 Windows that is usually `%APPDATA%\npm`, which is already on `PATH`, so
-`kicode` works from PowerShell, `cmd`, and Git Bash in any directory. Run
-`kicode --version` from somewhere *other* than this folder to confirm.
+`kicode` works from PowerShell, `cmd`, and Git Bash in any directory. To install
+a standalone copy instead of a symlink, `npm install -g .`.
 
-npm blocks install scripts unless the package is allowed to run them, so the
-`prepare` hook does not fire here — build once by hand first. To install a
-standalone copy instead of a symlink:
-
-```sh
-npm install -g .
-```
-
-The package ships only `dist/` and `README.md`, and the `bin` entry resolves to
-a single bundled file, so there is nothing else to install at runtime.
+The published package ships a single **minified** `dist/cli.js` (plus the
+README, CHANGELOG and licence), so there is nothing else to install at runtime
+and the shipped bundle does not read as the source it was built from.
 
 ### Pointing it elsewhere
 
-`baseUrl` in `kicode.json` (or `KICODE_BASE_URL`) accepts any OpenAI-compatible
-endpoint:
+`baseUrl` on a declared provider accepts any OpenAI-compatible endpoint, and so
+does `--base-url` for a single run:
 
 | Provider | Base URL |
 | --- | --- |
-| OpenAI | `https://api.openai.com/v1` (default) |
+| OpenAI | `https://api.openai.com/v1` |
 | OpenRouter | `https://openrouter.ai/api/v1` |
 | Groq | `https://api.groq.com/openai/v1` |
 | Ollama (local) | `http://localhost:11434/v1` |
@@ -177,7 +201,17 @@ tab to switch to it, its `×` to close it**, click `+NEW` for a fresh
 one, and `Ctrl+W` closes the tab you are in. Closing a tab hides it — the
 transcript stays on disk and `/sessions` reopens it — because a stray click must
 never throw work away. Closing the last tab leaves you in a new session, since a
-tab bar with nothing in it has nothing to type into. The mouse wheel scrolls the
+tab bar with nothing in it has nothing to type into.
+
+**A session keeps working when you leave it.** Switching tabs does not wait for a
+turn in flight: the session you leave is parked, and its turn finishes there, in
+the background, while you use another one. Its answer is saved under its own
+session, a message queued behind it runs on its own, and its tab is marked `◐`
+so a session still working is visible from the one on screen. An approval a
+background turn needs is denied automatically, with a note — there is no screen
+to put the card on — and a question it asks is skipped.
+
+The mouse wheel scrolls the
 transcript, and the same click works on a row of any panel — see
 [Keys](#keys). KiCode asks the terminal for the mouse while it is on screen and
 uses the drag itself: **drag across the transcript to select it**, and the text
@@ -461,12 +495,11 @@ list stays open, the search that found the row is still there, and the
 `Favorites` group is rebuilt where it was made — so the row moves as you watch
 rather than on the next open, and the cursor follows the model it was on.
 
-`ctrl+a` in the model list moves the session to another endpoint. Only
-endpoints that already have a credential are offered — `KICODE_BASE_URL` /
-`KICODE_API_KEY` and `OPENAI_BASE_URL` / `OPENAI_API_KEY`, alongside the one in
-use — because a provider KiCode cannot authenticate to would only be a 401
-after the choice. The key moves with the endpoint, and the list is fetched again
-from the new one.
+`ctrl+a` in the model list moves the session to another endpoint. Only *declared*
+providers that already have a credential are offered — an endpoint KiCode cannot
+authenticate to would only be a 401 after the choice. Declaring one is `/connect`,
+and the key comes from the variable it names. The key moves with the endpoint, and
+the list is fetched again from the new one.
 
 ## Pasting from the clipboard
 
@@ -714,10 +747,10 @@ npm run build
 node dist/cli.js "read the package file"    # needs "mock": true — see below
 ```
 
-The `mock` shorthand is the point: instead of typing `KICODE_BASE_URL=…` (or
-`$env:KICODE_BASE_URL`) before every run, put this in the project's
-`kicode.json` and a plain `kicode` talks to the local mock — with the
-placeholder key `local`, so a real key is never sent to localhost.
+The `mock` shorthand is the point: instead of declaring a provider and an
+endpoint before every run, put this in the project's `kicode.json` and a plain
+`kicode` talks to the local mock — with the placeholder key `local`, so a real
+key is never sent to localhost.
 
 ```json
 { "mock": true, "model": "mock-model" }
@@ -777,6 +810,19 @@ mid-write cannot leave a session half-parsed. The store keeps the newest 50.
 Scripted one-shot runs (`kicode -p`, or a bare inline prompt) are **not**
 recorded, so a loop over `kicode -p` cannot evict your real sessions. Passing
 `--continue` or `--session` opts back in.
+
+### What a session keeps
+
+A session owns its own **model and endpoint, working directory, mode and
+reasoning variant**. `/models`, `/cd`, `Shift+Tab` and `/variants` change the
+conversation you are in, not the program: `/cd` in one tab leaves another where
+it was, and switching back restores what that conversation was using.
+
+All five are written to the session file, so `--continue` and `--session` reopen
+the conversation on the settings it was saved with rather than on whatever the
+config says now — the mode included, so a session left in Plan comes back in
+Plan (run `/mode build` before you leave if you would rather it did not). A
+brand-new session starts from what is configured.
 
 The system prompt is not saved with the transcript — it is code, not
 conversation — so upgrading KiCode cannot resurrect a stale prompt.
@@ -895,8 +941,10 @@ the pipeline was not recognised, which flag, which `git` subcommand — instead 
 only that it "would change something". A refusal the model can read is one it
 can act on rather than repeat.
 
-The mode is per session and starts at `Build`; it is deliberately not stored,
-so a resumed session never silently comes back unable to write.
+The mode belongs to the session and is saved with it, so a resumed conversation
+comes back in the mode it was using. A fresh session starts at `Build`; run
+`/mode build` before you leave if you would rather a Plan session did not resume
+read-only.
 
 ## The model can ask you
 
@@ -1101,7 +1149,9 @@ through named values.
 | Key | Equivalent environment variable |
 | --- | --- |
 | `model` | `KICODE_MODEL` |
-| `baseUrl` | `KICODE_BASE_URL` |
+| `providers` | — (the endpoints you declared, each with its `apiKeyEnv`) |
+| `provider` | `KICODE_PROVIDER` (which declared provider to use) |
+| `baseUrl` | — (a declared provider's endpoint; `--base-url` for one run) |
 | `fallbackModels` | `KICODE_FALLBACK_MODELS` (comma-separated) |
 | `fallback` | — (routes across providers; see [When a route runs out](#when-a-route-runs-out)) |
 | `maxTokens` | `KICODE_MAX_TOKENS` (or `--max-tokens`) |
@@ -1119,7 +1169,7 @@ through named values.
 | `spacing.block` | — (0–3: rows of padding inside a request block) |
 | `spacing.entry` | — (0–3: blank rows between two entries) |
 | `spacing.turn` | — (0–3: the extra rows on either side of a request) |
-| `mock` | `KICODE_BASE_URL=http://localhost:8787/v1` |
+| `mock` | — (the same as declaring `http://localhost:8787/v1` with a placeholder key) |
 | `compaction.contextTokens` | `KICODE_CONTEXT_TOKENS` |
 | `compaction.reserveTokens` | `KICODE_RESERVE_TOKENS` |
 | `compaction.targetPercent` | `KICODE_COMPACT_TARGET` |
@@ -1148,11 +1198,23 @@ to start.
 
 ## The key never touches disk
 
-KiCode reads `KICODE_API_KEY` (or `OPENAI_API_KEY`) from the environment and
-nothing else. `kicode.json` has no key field: setting `apiKey`, `key`, or
-`token` there gets you a warning and nothing more. A project config is committed
-and shared, which is exactly the wrong place for a secret, so there is no write
-path for one — nothing to leak and nothing to accidentally commit.
+KiCode reads a provider's key from the environment variable that provider names
+as its `apiKeyEnv`, and from nothing else — the endpoint comes from the
+declaration and the value from the shell. `kicode.json` has no key field:
+setting `apiKey`, `key`, or
+`token` there gets you a warning and nothing more — the warning names the
+variable to use instead. A config file is committed and shared, which is exactly
+the wrong place for a secret, so there is no write path for one — nothing to
+leak and nothing to accidentally commit. That holds at every scope: a key stored
+in the per-user file is refused on the same terms as one in a project file.
+
+Starting KiCode with no key at all opens the full-screen UI rather than exiting,
+because that is where the remedies are: `/connect` declares an endpoint and
+`/key` takes a key for the session. Neither writes the key to disk — the note
+after `/key` names the environment variable that would make it permanent. A run
+that cannot show a UI (a pipe, or `-p`) still stops with the hint above, and
+`--tui-preview` never stops on config at all: it is what you run when KiCode is
+misbehaving.
 
 ## How it works
 
@@ -1251,3 +1313,11 @@ around a failure — a rejected key, a cancellation, and an answer already begun
 
 Adding a tool is a single file plus one line in `createDefaultTools()`. Set
 `requiresApproval: true` and the gate, prompt, and refusal handling all apply.
+
+## License
+
+KiCode is **proprietary software**, not open source. See [`LICENSE`](LICENSE):
+installing and using it for your own personal or internal business purposes is
+permitted, but copying, redistributing, sublicensing, selling, or reverse
+engineering it is not — with the usual disclaimer of warranty. The npm package
+is published under the `UNLICENSED` identifier for exactly this reason.

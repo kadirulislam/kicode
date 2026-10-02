@@ -6,8 +6,9 @@ import { createInterface } from "node:readline/promises";
 import { brainBriefing } from "../agent/brain";
 import { Agent, DEFAULT_SYSTEM_PROMPT, type AgentEvent, type ApproveFn } from "../agent/loop";
 import type { AskAnswer, AskFn } from "../agent/ask";
+import { allowPredicate } from "../agent/allow";
 import { createDefaultTools } from "../agent/tools";
-import { loadConfig, validateConfig, type Config, type FallbackRoute } from "../config";
+import { apiKeyEnvFor, loadConfig, validateConfig, type Config, type FallbackRoute } from "../config";
 import { addGlobalProvider, writeGlobalSettings } from "../settings-write";
 import { type AddProviderResult, parseCustomService, serviceByName, serviceRows, SERVICES, serviceApiKey } from "../providers/services";
 import { readConfigFiles } from "../config-file";
@@ -174,13 +175,14 @@ const USAGE = [
   "      --probe                Test the endpoint: model list, then a tiny chat request,",
   "      --init                 Write the current settings to ./kicode.json",
   "      --no-tui               Use the plain prompt instead of the full-screen UI",
-  "      --tui-preview          Draw one frame of the UI and exit (for bug reports)",
+  "      --tui-preview          Draw one frame of the UI and exit (for bug reports);",
+  "                             needs no key and no valid config",
   "      --no-mcp               Do not start the MCP servers in kicode.json",
   "      --no-compact           Never summarise old turns, even when the context fills",
   "      --model <model>        Model id (default: kicode.json, then $KICODE_MODEL)",
   "      --provider <name>      Which kicode.json provider to use (default: $KICODE_PROVIDER)",
-  "      --base-url <url>       OpenAI-compatible base URL (default: kicode.json, then $KICODE_BASE_URL)",
-  "      --api-key <key>        Key override; prefer $KICODE_API_KEY",
+  "      --base-url <url>       OpenAI-compatible base URL for this run only",
+  "      --api-key <key>        Key for this run only; otherwise the provider's apiKeyEnv",
   "      --max-tokens <n>       Stop before this many session tokens (0 = no limit)",
   "      --theme <name>         Colour theme (/themes lists them; default: opencode)",
   "  -v, --version              Print the version",
@@ -189,27 +191,35 @@ const USAGE = [
   "Project settings:",
   "  kicode.json in the working directory, or in ~/.kicode/ for every project,",
   "  sets \"model\", \"provider\", \"providers\", \"fallbackModels\", \"fallback\",",
-  "  \"fallbackAuto\", \"maxTokens\", \"theme\", \"baseUrl\", \"compaction\", \"brain\",",
+  "  \"fallbackAuto\", \"maxTokens\", \"maxTurns\", \"allow\", \"theme\", \"baseUrl\",",
+  "  \"compaction\", \"brain\",",
   "  \"learning\" (\"auto\" or \"off\"), \"mcp\", and \"mock\": true. A provider declares a",
   "  baseUrl and the environment",
-  "  variable holding its key (\"apiKeyEnv\"); the file has no place for a key.",
+  "  variable holding its key (\"apiKeyEnv\"); the file has no place for a key,",
+  "  and one found in a file is reported and ignored.",
   "  A failed turn asks what to do next (retry / another model / dismiss).",
   "  \"fallbackAuto\": true, or KICODE_FALLBACK_AUTO=on, instead lets a free",
   "  model move to the endpoint's other free models on its own.",
-  "  Precedence: flags > kicode.json > environment > defaults.",
+  "  Precedence: flags > kicode.json > defaults. The environment holds a key,",
+  "  but it cannot declare an endpoint.",
   "",
   "Project instructions:",
   "  AGENTS.md in the working directory is read into the system prompt. The",
   "  /init command writes it (and kicode.json) from inside a session.",
   "",
   "Environment:",
-  "  KICODE_API_KEY   required (OPENAI_API_KEY is an accepted fallback)",
-  "  KICODE_BASE_URL  optional, e.g. https://openrouter.ai/api/v1",
+  "  Keys are read from the variable a provider names (\"apiKeyEnv\"), so e.g.",
+  "  an \"openai\" provider reads OPENAI_API_KEY. With no provider declared",
+  "  there is no endpoint at all: add one with /connect, or one-off with",
+  "  --base-url and --api-key. An ambient OPENAI_API_KEY or OPENAI_BASE_URL is",
+  "  never used on its own.",
   "  KICODE_PROVIDER  which declared provider to use, when the file names none",
   "  KICODE_MODEL     optional, and overridden by kicode.json",
   "  KICODE_FALLBACK_MODELS  comma-separated models to try when the one in use",
   "                   is rate-limited or out of credit (same endpoint)",
   "  KICODE_MAX_TOKENS       stop before this many session tokens (0 = no limit)",
+  "  KICODE_MAX_TURNS        requests one turn may spend (default 100; kicode.json",
+  "                   \"maxTurns\" wins over it)",
   "  KICODE_THEME            colour theme by name (/themes lists them)",
   "  KICODE_HOME      optional, where sessions are stored (default ~/.kicode)",
   "  KI_BRAIN_PATH    optional, where skills and memories are saved (default",
@@ -240,6 +250,29 @@ const setupHint = (variable: string): string =>
     "The endpoint and model can also live in kicode.json — but never the key.",
     "Any OpenAI-compatible endpoint works, including OpenRouter, Groq, and local Ollama.",
 ].join("\n");
+
+/**
+ * The remedy when there is no endpoint at all: a fresh install with nothing
+ * declared.
+ *
+ * It names `/connect` and the two flags rather than a variable, because with no
+ * provider declared there is no variable to set. Telling someone to export a key
+ * would send them to a value with nowhere to go — which is exactly how an
+ * ambient `OPENAI_API_KEY` came to look like configuration.
+ */
+const noProviderHint = (): string =>
+  [
+    "KiCode needs a declared endpoint to start — a key in the environment is not",
+    "enough on its own.",
+    "",
+    "  In the UI:  /connect                    (endpoints already known to work)",
+    "  One-off:    kicode --base-url <url> --api-key <key>",
+    '  In a file:  "providers": { "openai": { "apiKeyEnv": "OPENAI_API_KEY" } }',
+    '  Choosing:   "provider": "openai"       (when more than one is declared)',
+    "",
+    "The key itself stays in the environment — it is never written to kicode.json.",
+    "Any OpenAI-compatible endpoint works, including OpenRouter, Groq, and local Ollama.",
+  ].join("\n");
 
 export async function runCli(argv: string[], io: Io): Promise<number> {
   const parsed = parseArgs(argv);
@@ -301,14 +334,39 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
     return 0;
   }
 
+  // Whether the full-screen UI is about to run. Decided here because it changes
+  // what a missing key means below.
+  const tuiWanted = canUseTui(io) && flags.tui;
+
   const problem = validateConfig(config);
-  if (problem) {
-    const named = config.providers.find((provider) => provider.name === config.provider)?.apiKeyEnv;
+  // A missing provider, or a declared one with no key, is the kind of config
+  // problem the UI can fix by itself: `/connect` and `/key` are inside it.
+  // Refusing to open the screen that holds the remedy is a poor way to ask for a
+  // credential, so the run continues and the UI says what to do instead.
+  const tuiCanFixConfig = tuiWanted && (!config.baseUrl || !config.apiKey);
+  // `--tui-preview` draws a frame and exits. It needs no credential, and it is
+  // what someone runs when KiCode is misbehaving — so config never stops it.
+  if (problem && !flags.tuiPreview && !tuiCanFixConfig) {
+    const named = config.providers.find((provider) => provider.name === config.provider);
     io.writeError(problem);
     io.writeError("");
-    io.writeError(setupHint(named ?? "KICODE_API_KEY"));
+    // A declared provider knows which variable it wanted, so it is named. With
+    // no provider there is no variable to name, and pointing at one would send
+    // someone to export a key they have nowhere to send.
+    io.writeError(named?.apiKeyEnv ? setupHint(named.apiKeyEnv) : noProviderHint());
     return 1;
   }
+  /**
+   * Shown inside the UI, which is the only place it can be acted on.
+   *
+   * A fresh install gets the remedy and not just the complaint: "No provider is
+   * configured yet" is true but does not say what to do about it.
+   */
+  const configNotice = tuiCanFixConfig
+    ? !config.baseUrl
+      ? "No provider is configured yet. Add one with /connect — it declares the endpoint and names the environment variable your key is read from."
+      : problem
+    : null;
 
   // A diagnosis runs before anything session-shaped: it needs only the
   // endpoint and the key, and its whole point is to be read before a session
@@ -332,6 +390,12 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
   const persist = !oneShot || resuming;
 
   let restored: ChatMessage[] | null = null;
+  // The settings a resumed session was using. Carried out of the block below so
+  // the resume opens on them, rather than on whatever the config says now.
+  let restoredModel: string | undefined;
+  let restoredBaseUrl: string | undefined;
+  let restoredMode: "build" | "plan" | undefined;
+  let restoredVariant: string | undefined;
   let sessionId = newSessionId();
   let createdAt = new Date().toISOString();
 
@@ -343,6 +407,10 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       restored = record.messages;
       sessionId = record.id;
       createdAt = record.createdAt || createdAt;
+      restoredModel = record.model || undefined;
+      restoredBaseUrl = record.baseUrl || undefined;
+      restoredMode = record.mode === "plan" || record.mode === "build" ? record.mode : undefined;
+      restoredVariant = record.variant || undefined;
     } else if (requested) {
       io.writeError(`No session found with id "${requested}".`);
       return 1;
@@ -395,7 +463,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
   // A factory rather than one agent: the TUI swaps sessions, and each session
   // needs its own agent with its own history and its own approval channel.
-  const tui = canUseTui(io) && flags.tui;
+  const tui = tuiWanted;
   // Questions need somebody to answer them; a piped run has nobody, so the ask
   // tool is not registered at all rather than failing when it is called.
   const canAsk = tui || io.interactive;
@@ -521,6 +589,9 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       cwd,
       maxTurns: config.maxTurns,
       maxTokens: config.maxTokens,
+      // The `allow` rules from kicode.json. Read-only calls bypass the prompt on
+      // their own (`loop.ts`); these are the ones the user named explicitly.
+      allow: allowPredicate(config.allow),
       ...(instructions ? { systemPrompt: instructions } : {}),
       ...(settings.variant && settings.variant !== "default" ? { reasoningEffort: settings.variant } : {}),
       // Plan mode is enforced inside the agent: the approval-gated tools are
@@ -602,7 +673,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
         const written = await addGlobalProvider(service.name, {
           baseUrl: service.baseUrl,
-          ...(apiKey ? { apiKey } : {}),
+          // No key: it is read from `apiKeyEnv` on every run. `addService`
+          // returns the value for this session only.
           ...(service.apiKeyEnv ? { apiKeyEnv: service.apiKeyEnv } : {}),
         });
         if (!written.ok) return { ok: false, reason: written.reason };
@@ -631,10 +703,13 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
       return await runTui({
         cwd: io.cwd,
-        baseUrl: config.baseUrl,
+        ...(configNotice ? { notice: configNotice } : {}),
+        baseUrl: restoredBaseUrl ?? config.baseUrl,
         contextTokens: config.compaction.contextTokens,
         version: VERSION,
-        model: config.model,
+        model: restoredModel ?? config.model,
+        ...(restoredMode ? { mode: restoredMode } : {}),
+        ...(restoredVariant ? { variant: restoredVariant } : {}),
         compacting: config.compaction.enabled,
         newSessionId,
         themeName,
@@ -642,7 +717,15 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         /** `/settings` writes to the user's own kicode.json, one key at a time. */
         saveView: (patch) => writeGlobalSettings(patch),
         saveProvider: async (name, provider) => {
-          await addGlobalProvider(name, provider);
+          // The key is deliberately not persisted — `addGlobalProvider` has
+          // nowhere to put one. It stays in memory for this session, and the
+          // file records the variable to read it from next time.
+          const apiKeyEnv = provider.apiKeyEnv ?? apiKeyEnvFor(name);
+          await addGlobalProvider(name, {
+            baseUrl: provider.baseUrl,
+            apiKeyEnv,
+            ...(provider.models ? { models: provider.models } : {}),
+          });
           if (provider.apiKey) {
             endpoints.set(provider.baseUrl, provider.apiKey);
           }
@@ -651,20 +734,31 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
             name,
             baseUrl: provider.baseUrl,
             apiKey: provider.apiKey ?? "",
-            apiKeyEnv: provider.apiKeyEnv ?? "(saved key)",
+            apiKeyEnv,
             ...(provider.models ? { models: provider.models } : {}),
           });
           activeProvider = name;
         },
         saveApiKey: async (apiKey, baseUrl = config.baseUrl) => {
+          // Usable at once, but held in memory only: the endpoint is declared
+          // with the variable its key belongs in and the value is never
+          // written. Returns that variable so the UI can name it.
           endpoints.set(baseUrl, apiKey);
           const matched = providers.find((p) => p.baseUrl === baseUrl);
-          if (matched) {
-            matched.apiKey = apiKey;
-            await addGlobalProvider(matched.name, { baseUrl, apiKey, apiKeyEnv: matched.apiKeyEnv });
+          const name = matched?.name ?? providerNameFor(baseUrl);
+          const declared = matched?.apiKeyEnv;
+          const apiKeyEnv = declared && !declared.startsWith("(") ? declared : apiKeyEnvFor(name);
+          const written = await addGlobalProvider(name, { baseUrl, apiKeyEnv });
+          if (!written.ok) io.writeError(written.reason);
+          const entry = providers.find((p) => p.name === name);
+          if (entry) {
+            entry.baseUrl = baseUrl;
+            entry.apiKey = apiKey;
+            entry.apiKeyEnv = apiKeyEnv;
           } else {
-            await writeGlobalSettings({ apiKey, baseUrl });
+            providers.push({ name, baseUrl, apiKey, apiKeyEnv });
           }
+          return apiKeyEnv;
         },
         /**
          * `/connect` declares an endpoint, then the session moves to it.
@@ -689,6 +783,9 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
                 ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
                 messageCount: record.messages.length,
                 ...(record.model ? { model: record.model } : {}),
+                ...(record.baseUrl ? { baseUrl: record.baseUrl } : {}),
+                ...(record.mode === "plan" || record.mode === "build" ? { mode: record.mode } : {}),
+                ...(record.variant ? { variant: record.variant } : {}),
                 ...(preview ? { preview } : {}),
               };
             }),
@@ -734,9 +831,11 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
             } · ${provider.baseUrl}`,
           }));
           const known = new Set(named.map((provider) => provider.value));
-          // An ambient endpoint (a `--base-url` flag, `OPENAI_BASE_URL`) is a
-          // provider too: it is the one the session starts on.
-          return known.has(config.baseUrl)
+          // An endpoint passed with `--base-url` is a provider too: it is what
+          // this session starts on, and the list has to show it or the session
+          // would look like it is on nothing. There is no ambient equivalent any
+          // more — an endpoint exists only because something declared it.
+          return !config.baseUrl || known.has(config.baseUrl)
             ? named
             : [{ label: hostOf(config.baseUrl), value: config.baseUrl, description: config.baseUrl }, ...named];
         },
@@ -756,14 +855,19 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
             ...settings,
             approve: flags.yes ? async () => "always" : settings.approve,
           }),
-        saveSession: async ({ id, createdAt: created, cwd, messages, title }) => {
+        saveSession: async ({ id, createdAt: created, cwd, messages, title, model, baseUrl: endpoint, mode, variant }) => {
           await saveSession({
             id,
             createdAt: created,
             updatedAt: new Date().toISOString(),
             cwd,
-            model: config.model,
-            baseUrl: config.baseUrl,
+            // The session's own settings when it has them, so a later switch (or
+            // a restart) can restore them; the configured defaults only for a
+            // session that has never recorded any.
+            model: model ?? config.model,
+            baseUrl: endpoint ?? config.baseUrl,
+            ...(mode ? { mode } : {}),
+            ...(variant ? { variant } : {}),
             messages,
             ...(title ? { title } : {}),
           });
@@ -846,6 +950,17 @@ function hostOf(url: string): string {
 /** A base URL without a trailing slash, so two spellings of it compare equal. */
 function trimSlashes(url: string): string {
   return url.replace(/\/+$/, "");
+}
+
+/**
+ * A provider name derived from a base URL, matching the picker's own rule.
+ *
+ * Used when a key is entered for an endpoint that is not in `providers` yet, so
+ * the declared entry and the environment variable it names agree with what a
+ * user adding the same endpoint by hand would get.
+ */
+function providerNameFor(baseUrl: string): string {
+  return hostOf(baseUrl).replace(/\./g, "-").replace(/[^a-zA-Z0-9-]/g, "") || "custom";
 }
 
 /** The `@` index per directory, built once — the plain prompt has no `/cd`. */

@@ -8,10 +8,42 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.1.1] — 2026-10-02
+
+### Changed
+
+- **The environment can no longer declare an endpoint.** `OPENAI_BASE_URL`,
+  `OPENAI_API_BASE`, `KICODE_BASE_URL`, `OPENAI_API_KEY` and `KICODE_API_KEY` no
+  longer configure a session on their own. A provider has to be *declared* — by
+  `/connect`, or a `providers` block in `kicode.json` — and the environment only
+  supplies the key, in the variable that provider names as its `apiKeyEnv`. On a
+  machine whose shell already had `OPENAI_BASE_URL` set, a first run used to work
+  for a reason its owner could not see (and on a gateway they never chose); it
+  now says `No provider is configured yet.` and points at `/connect`.
+- **One declared provider is used without being named**, which is exactly the
+  shape `/connect` writes — so a service added from the UI is in use the moment
+  it is added. Several declared and none named reports
+  `No provider is selected — name the one to use with "provider" in kicode.json.`
+- **There is no default endpoint.** `DEFAULT_BASE_URL` is gone rather than left
+  in place as an unused constant that implied one. `--base-url` and `--api-key`
+  still configure a single run, and `baseUrl` in `kicode.json` still pins an
+  endpoint for a project.
+- **The first-run message names a remedy, not just a variable.** With nothing
+  declared there is no variable to set, so the hint offers `/connect`, the two
+  one-off flags, and the `providers` block instead.
+
+### Fixed
+
+- **`--init` records any configured endpoint**, and records nothing where none
+  is configured, instead of comparing against the removed default and writing an
+  empty `baseUrl` into the file.
+
 ## [0.1.0] — 2026-10-02
 
-The first release. Not published to a registry: `package.json` is still
-`"private": true`, so the distribution decision (npm vs. git) is open.
+The first release. Distributed from npm as a **proprietary** package
+(`"license": "UNLICENSED"`, `"private"` removed), shipped as a minified bundle —
+`dist/cli.js`, the README, this changelog and the licence. No source, no tests,
+no history.
 
 ### Added
 
@@ -40,13 +72,34 @@ The first release. Not published to a registry: `package.json` is still
 - **MCP support**, including an HTTP transport, so anything that speaks the
   protocol can contribute tools.
 - **Clipboard image preview** with a persistent last-5 history.
+- **Background turns.** Switching tabs does not cancel a turn: the session you
+  leave is parked and finishes there, its answer saved under its own id, its
+  queue drained on its own, and its tab marked `◐`. An approval a background
+  turn needs is denied with a note, and a question it asks is skipped.
+- **Per-session settings.** The model, endpoint, working directory, mode and
+  reasoning variant belong to the conversation, so `/models`, `/cd`, `Shift+Tab`
+  and `/variants` in one tab do not change another. All five are written to the
+  session file and restored on a switch — including by `--continue` on the next
+  run.
+- **Shift+Enter** inserts a line break, decoded from xterm's `modifyOtherKeys`,
+  the kitty keyboard protocol and bare `ESC`+`Enter`, all requested on entry and
+  released on exit.
 
 ### Changed
 
 - **Compaction now lands at its target** instead of at target-plus-the-system-
   prompt, which is what it claimed before.
-- **The turn budget is 40** (was 12), and reaching it says so rather than the
-  transcript simply ending.
+- **The turn budget is 100** (was 12), and reaching it says so rather than the
+  transcript simply ending. It is settable: `maxTurns` in `kicode.json`, then
+  `KICODE_MAX_TURNS`, then the default.
+- **The default endpoint and model are a pair.** `gpt-4o-mini` against
+  `https://api.openai.com/v1`, where the old default model did not exist on the
+  old default endpoint.
+- **The package is publishable and proprietary.** `"private": true` removed,
+  `"license": "MIT"` → `"UNLICENSED"`, and the bundle minified (543 KB → ~300 KB).
+- **`[a]lways` on an approval outlives a rebuild**, read-only `bash` calls no
+  longer prompt in either mode, and `allow` rules in `kicode.json` skip the
+  prompt for the commands you name.
 - **The plan tools hold the turn open**: a reply with an unfinished `todo` or
   `goal` is nudged to carry on, at most three times, and any tool call hands the
   allowance back. Plan mode is exempt — an open list there is the plan itself.
@@ -62,14 +115,32 @@ The first release. Not published to a registry: `package.json` is still
 - **Quoted frontmatter is unquoted** in the briefing and the `@skill:` list.
 - **A bare 403 from OpenCode** is reported as the server-side client restriction
   it is (a rejected key is a 401), rather than a generic failure.
+- **The published `bin` entry survives npm's publish normalization.** A
+  `./`-prefixed path is silently dropped on npm 11+ — the tarball is unaffected,
+  but the *published* manifest would have carried no `bin` at all, so
+  `npm install -g @kadirulislam/kicode` would have installed a package with no
+  `kicode` command. The path is written without the prefix now.
 - Mouse hit-detection for `[x]` / `[×]` close chips on modal pickers, and a
   caret-column off-by-one in the input box.
+- **A missing key opens the UI instead of refusing to start**, so `/connect` and
+  `/key` are reachable exactly when they are needed; `--tui-preview` needs no key
+  at all. A piped or `-p` run with no key still exits 1 with the environment hint.
+- **Switching sessions no longer throws away work.** A running turn keeps going
+  (see Background turns above); `[f]ork` parks the session it forks from, and
+  deleting the session on screen stops its turn rather than letting it run on.
+- **The queue and the pause are per session.** A paused session does not drain
+  its queue off screen, a goal is marked on the session running it and cleared
+  when it ends, and the steering list is no longer shared between sessions.
 
 ### Security
 
 - **`remember` refuses anything shaped like a secret** (private keys, API-key
   patterns) and writes only inside the resolved brain, with slug names that
   cannot escape it.
+- **An API key in a config file is refused and named, at every scope.** KiCode
+  never writes a key, and a key found in `kicode.json` — project, global or on a
+  provider entry — is reported and ignored, with the variable to set instead.
+  The value is never echoed.
 - **The tracked `.env.example` was found to contain three real provider keys.**
   The values were blanked and a warning added. **Those keys remain in the git
   history of this repository and must be rotated and scrubbed.**

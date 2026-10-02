@@ -8,9 +8,13 @@ import type { ChatMessage } from "../types";
 import {
   CLEAR_SCREEN,
   CURSOR_HOME,
+  DISABLE_KEY_MODIFIERS,
+  DISABLE_KITTY_KEYS,
   DISABLE_MOUSE,
   DISABLE_PASTE,
   DISABLE_WRAP,
+  ENABLE_KEY_MODIFIERS,
+  ENABLE_KITTY_KEYS,
   ENABLE_MOUSE,
   ENABLE_PASTE,
   ENABLE_WRAP,
@@ -89,7 +93,7 @@ import {
   type MentionIndex,
   type MentionItem,
 } from "../mentions";
-import { SKILLS_HEADING, brainBriefing, projectSlug, readBrain } from "../agent/brain";
+import { SKILLS_HEADING, brainBriefing, projectSlug, readBrain, trashSkill } from "../agent/brain";
 import { planFromHistory } from "../agent/tools/plan";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
@@ -113,8 +117,14 @@ export type SessionSummary = {
   updatedAt?: string;
   /** Turns in the session, for the picker's trailing note. */
   messageCount?: number;
-  /** Model the session used — searched, not shown. */
+  /** Model the session used — searched, and restored on a switch. */
   model?: string;
+  /** The endpoint that model was reached on, so restoring it points the same way. */
+  baseUrl?: string;
+  /** Session mode at its last save, so a switch (or a restart) restores it. */
+  mode?: SessionMode;
+  /** Reasoning variant at its last save, restored the same way. */
+  variant?: string;
   /** Opening request, capped — searched, not shown. */
   preview?: string;
 };
@@ -333,6 +343,15 @@ export type TuiOptions = {
   /** Whether a finished turn runs the automatic learning pass. `auto` unless `off`. */
   learning?: "off" | "auto";
   /**
+   * Session mode to start on, from a session being resumed. Defaults to build.
+   *
+   * An option rather than a constant because the mode is session state: a run
+   * that resumes a plan-mode conversation should open in plan mode.
+   */
+  mode?: SessionMode;
+  /** Reasoning variant to start on, from a resumed session. Defaults per model. */
+  variant?: string;
+  /**
    * Sessions for a directory, newest first. The directory is passed in because
    * `/cd` moves the session, and the tabs have to follow it.
    */
@@ -352,6 +371,12 @@ export type TuiOptions = {
     cwd: string;
     messages: ChatMessage[];
     title?: string;
+    /** The session's own model and endpoint, so a later switch restores them. */
+    model?: string;
+    baseUrl?: string;
+    /** The session's own mode and variant, restored with the rest. */
+    mode?: SessionMode;
+    variant?: string;
   }) => Promise<void>;
   newSessionId: () => string;
   initial: { id: string; createdAt: string; messages?: ChatMessage[] };
@@ -359,6 +384,12 @@ export type TuiOptions = {
   mcp?: string | null;
   /** Config files that were read, shown on the home screen. */
   config?: string | null;
+  /**
+   * A line shown when the session opens, for something that could not be fixed
+   * on the way in — a missing key, say, which `/connect` and `/key` fix from
+   * inside this screen. Shown as a warning, once.
+   */
+  notice?: string | null;
   theme?: Theme;
   /** Named theme to start with, when the caller has one. */
   themeName?: string;
@@ -375,7 +406,12 @@ export type TuiOptions = {
     name: string,
     provider: { baseUrl: string; apiKey?: string; apiKeyEnv?: string; models?: string[] },
   ) => Promise<void>;
-  saveApiKey?: (apiKey: string, baseUrl?: string) => Promise<void>;
+  /**
+   * Remembers a key for this session and returns the environment variable that
+   * would make it permanent, so the note can name it. The value is never
+   * written to a file (`settings-write.ts` has no field for one).
+   */
+  saveApiKey?: (apiKey: string, baseUrl?: string) => Promise<string | undefined>;
   /** The services `/connect` can add, and what adding one does. */
   connect?: {
     list: () => Promise<MenuRow[]>;
@@ -542,6 +578,44 @@ export async function runTui(options: TuiOptions): Promise<number> {
   return app.start();
 }
 
+/**
+ * A session the user has moved away from.
+ *
+ * Everything a turn writes to, plus the agent that runs it — held together so
+ * the session can keep working while another is on screen. The arrays inside
+ * are shared by reference with the live fields at park time, never copied, so a
+ * turn already running goes on appending to the very transcript the user will
+ * find on return.
+ */
+type ParkedSession = {
+  agent: Agent;
+  entries: Entry[];
+  plan: PlanSnapshot | null;
+  busy: string | null;
+  queuedPrompts: Array<{ prompt: string; images: PastedImage[] }>;
+  steering: Array<{ prompt: string; images: PastedImage[] }>;
+  recovery: { title: string; body: string; prompt: string; images: PastedImage[] } | null;
+  createdAt: string;
+  title: string | null;
+  isPaused: boolean;
+  /** True between Ctrl+C and that session's turn actually ending. */
+  stopping: boolean;
+  /**
+   * The session's own settings: which model it runs, on which endpoint, in
+   * which directory, and in which mode and variant.
+   *
+   * These were shared across every session, so `/models` or `/cd` in one tab
+   * silently changed all of them — the exact thing a per-session setting is for.
+   * A turn already running keeps the agent it was built with, so its own model
+   * was always right; what was wrong is a *new* turn, which is built from these.
+   */
+  model: string;
+  baseUrl: string;
+  cwd: string;
+  mode: SessionMode;
+  variant: string;
+};
+
 class TuiApp {
   private readonly options: TuiOptions;
   private readonly input: NodeJS.ReadStream;
@@ -573,8 +647,15 @@ class TuiApp {
   private selectable = { top: 0, bottom: 0 };
   /** The text dragged over since the button went down, if it went down on one. */
   private selection: Selection | null = null;
-  /** True while a `/goal` run is executing, so the mode row can say "Goal". */
-  private goalRun = false;
+  /**
+   * Sessions with a `/goal` run in flight.
+   *
+   * A set rather than a flag because a goal belongs to the session that started
+   * it. A flag would label whichever session is on screen "Goal", suppress that
+   * session's recovery card, and — because only the on-screen branch cleared it
+   * — stay stuck on forever once a goal session was backgrounded.
+   */
+  private goals = new Set<string>();
   /** True between a press that could select and the release that ends it. */
   private dragging = false;
   /** Scrollbar geometry from last draw for mouse scrolling */
@@ -620,9 +701,10 @@ class TuiApp {
   /** The failed turn `m` set aside, re-run the moment a picked model lands. */
   private pendingRetry: { prompt: string; images: PastedImage[] } | null = null;
   private cwd: string;
-  private variant = DEFAULT_VARIANT;
+  /** Reasoning variant in use; per session, and settable with `/variants`. */
+  private variant: string;
   /** Shift+Tab switches it; the agent is rebuilt because the mode is read then. */
-  private mode: SessionMode = "build";
+  private mode: SessionMode;
   private config: string | null;
   /** Entry pinned to the top of the view by `/timeline`, until the next scroll. */
   private anchor: number | null = null;
@@ -686,6 +768,33 @@ class TuiApp {
   private busy: string | null = null;
   /** True between Ctrl+C and the turn actually ending, so the key cannot double-cancel. */
   private stopping = false;
+  /**
+   * Tools the user has answered "always" for in this run.
+   *
+   * Kept on the app rather than in the agent because the agent is rebuilt for
+   * every model switch, `/cd`, session switch and mode change — which is what
+   * made "always" mean "until something unrelated happens". Per run, not per
+   * session: the answer is about the tool, and being asked again by a tab you
+   * just opened is the annoyance it exists to remove.
+   */
+  private approvedTools = new Set<string>();
+  /**
+   * The turns in flight, one per session.
+   *
+   * A turn belongs to the session that started it, and it keeps running when
+   * the user moves to another session: the switch parks the session it writes
+   * into rather than waiting for it. A promise per session, because a turn in a
+   * background session and the one on screen are both live at once.
+   */
+  private running = new Map<string, Promise<void>>();
+  /**
+   * Sessions the user has left, each with the state a turn keeps writing to.
+   *
+   * A session with nothing running is parked too, so coming back is instant and
+   * exact — but the reason this map exists is the running turn: parking is what
+   * lets it finish after the user has moved on.
+   */
+  private parked = new Map<string, ParkedSession>();
   private spinnerFrame = 0;
   private spinnerTimer: NodeJS.Timeout | null = null;
   private scroll = 0;
@@ -793,6 +902,10 @@ class TuiApp {
     this.cwd = options.cwd;
     this.config = options.config ?? null;
     this.learning = options.learning === "off" ? "off" : "auto";
+    // Session state, so a resumed conversation opens in the mode and variant it
+    // was using rather than in the defaults.
+    this.mode = options.mode === "plan" ? "plan" : "build";
+    this.variant = options.variant ?? DEFAULT_VARIANT;
     this.clipboardHistory = loadSavedClipboardHistory();
   }
 
@@ -809,6 +922,10 @@ class TuiApp {
     // large directories. Failures are ignored — the first keystroke rebuilds.
     void this.ensureMentionIndex().catch(() => undefined);
     await this.refreshTabs();
+
+    // Pushed before the first draw so it is the first thing read on the screen
+    // it applies to. A warning tone, because it is one.
+    if (this.options.notice) this.note(this.options.notice, "warn");
 
     this.enterTerminal();
 
@@ -857,7 +974,20 @@ class TuiApp {
     // Mouse reporting goes on with the alternate screen: without it there is no
     // way to click a tab, and clicking tabs is the point of the close box.
     this.output.write(
-      ENTER_ALT_SCREEN + DISABLE_WRAP + ENABLE_MOUSE + ENABLE_PASTE + CLEAR_SCREEN + CURSOR_HOME + HIDE_CURSOR,
+      ENTER_ALT_SCREEN +
+        DISABLE_WRAP +
+        ENABLE_MOUSE +
+        ENABLE_PASTE +
+        // So Shift+Enter can be told from Enter. Terminals that do not know it
+        // ignore it, and the decoder accepts what they send regardless. Both
+        // encodings are asked for — `modifyOtherKeys` for the older terminals,
+        // the kitty protocol for Windows Terminal 1.25+, Ghostty and friends —
+        // because a terminal answers at most one and ignores the other.
+        ENABLE_KEY_MODIFIERS +
+        ENABLE_KITTY_KEYS +
+        CLEAR_SCREEN +
+        CURSOR_HOME +
+        HIDE_CURSOR,
     );
   }
 
@@ -877,15 +1007,32 @@ class TuiApp {
     // And a turn in flight is stopped, so an abandoned request cannot keep the
     // process alive or repaint a terminal that has already been handed back.
     this.agent?.cancel();
+    // A background turn outlives the session on screen, so every parked agent is
+    // stopped too — otherwise its request would keep the process alive after
+    // the terminal has been handed back.
+    for (const state of this.parked.values()) state.agent.cancel();
 
     this.cleanup();
     this.input.setRawMode?.(false);
     this.input.pause();
-    this.output.write(DISABLE_PASTE + DISABLE_MOUSE + ENABLE_WRAP + SHOW_CURSOR + LEAVE_ALT_SCREEN);
+    this.output.write(
+      DISABLE_KITTY_KEYS +
+        DISABLE_KEY_MODIFIERS +
+        DISABLE_PASTE +
+        DISABLE_MOUSE +
+        ENABLE_WRAP +
+        SHOW_CURSOR +
+        LEAVE_ALT_SCREEN,
+    );
     setColorEnabled(true);
 
     try {
       await this.save();
+      // A background session's answer is still worth keeping even though the
+      // user never went back to look at it.
+      for (const [id, state] of this.parked) {
+        await this.saveParked(id, state).catch(() => undefined);
+      }
     } catch {
       // Nothing useful to do at exit; the plain CLI reports save failures.
     }
@@ -1061,6 +1208,12 @@ class TuiApp {
           if (key.key === "u") this.editor.killToStart();
           // Ctrl+W closes the tab, which is what it does in a browser.
           if (key.key === "w") await this.closeSession(this.sessionId);
+          break;
+        case "newline":
+          // Shift+Enter (or Alt+Enter). The whole point is that it does not
+          // submit — the box grows a line instead (ADR-020).
+          this.editor.insertNewline();
+          this.notice = null;
           break;
         case "enter":
           await this.submit();
@@ -1275,9 +1428,19 @@ class TuiApp {
    * its turn arrives, not be handed to the model as prose to read out. Anything
    * else is an ordinary turn.
    */
-  private runQueued(entry: { prompt: string; images: readonly PastedImage[] }): void {
-    if (entry.prompt.startsWith("/")) void this.command(entry.prompt);
-    else void this.runTurn(entry.prompt, entry.images);
+  private runQueued(entry: { prompt: string; images: readonly PastedImage[] }, sessionId = this.sessionId): void {
+    if (entry.prompt.startsWith("/")) {
+      // A command needs the screen it acts on. One left in a background session
+      // waits there rather than running against another transcript.
+      if (!this.isCurrent(sessionId)) {
+        this.parkedState(sessionId).queuedPrompts.unshift({ prompt: entry.prompt, images: [...entry.images] });
+        this.notifyBackground(`${this.sessionLabel(sessionId)} — a queued command is waiting for you`);
+        return;
+      }
+      void this.command(entry.prompt);
+      return;
+    }
+    void this.runTurn(entry.prompt, entry.images, sessionId);
   }
 
   /**
@@ -1469,6 +1632,9 @@ class TuiApp {
 
     // Keep the diff that was approved: `/diff` shows what actually changed, and
     // this is the only moment it is known for certain to have been applied.
+    // "always" is a decision about the tool, not about this one call.
+    if (pending && decision === "always") this.approvedTools.add(pending.request.name);
+
     if (pending && decision !== "deny" && pending.request.preview) {
       const args = summarizeArgs(pending.request.args, pending.request.name);
       this.changes.push({ label: `${pending.request.name}${args ? ` ${args}` : ""}`, preview: pending.request.preview });
@@ -1545,9 +1711,18 @@ class TuiApp {
   // ---- questions ---------------------------------------------------------------
 
   /** The channel the `ask` tool reaches the user through. */
-  private asker(): AskFn {
-    return (request) =>
-      new Promise<AskAnswer[]>((resolve) => {
+  private asker(sessionId = this.sessionId): AskFn {
+    return (request) => {
+      // A question in a background session cannot be shown: it is skipped, and
+      // the turn goes on with no answer rather than stalling on a prompt nobody
+      // can see.
+      if (!this.isCurrent(sessionId)) {
+        this.notifyBackground(`${this.sessionLabel(sessionId)} — a question was skipped`);
+        return Promise.resolve(
+          request.questions.map((question) => ({ header: question.header, answer: "", dismissed: true })),
+        );
+      }
+      return new Promise<AskAnswer[]>((resolve) => {
         this.askResolver = resolve;
         this.askState = {
           questions: request.questions,
@@ -1559,6 +1734,7 @@ class TuiApp {
         this.editor.clear();
         this.draw();
       });
+    };
   }
 
   /** The model's options, plus the UI's own free-text row. */
@@ -2211,15 +2387,23 @@ class TuiApp {
     this.draw();
   }
 
-  private async runTurn(prompt: string, images: readonly PastedImage[] = []): Promise<void> {
-    // A turn belongs to the session it started in. Its events are applied to
-    // whatever transcript is on screen, so without this a switch made while a
-    // turn is running would write one session's answer into another's — and
-    // `save()` would file the turn under whichever session happened to be
-    // current when it ended.
-    const turnSession = this.sessionId;
-    const agent = this.agent;
-    this.setBusy("thinking…");
+  /**
+   * Runs one turn, in the session it belongs to.
+   *
+   * `sessionId` defaults to the session on screen, but a queued prompt left in
+   * a session the user has moved away from passes its own id — that is what
+   * lets a background session keep working. Every piece of state the turn
+   * touches is resolved *per event* rather than captured once, because the user
+   * may leave the session while the turn is still running, and the answer must
+   * land in the session that asked for it either way.
+   */
+  private async runTurn(prompt: string, images: readonly PastedImage[] = [], sessionId = this.sessionId): Promise<void> {
+    let settle: () => void = () => {};
+    const finished = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    this.running.set(sessionId, finished);
+    this.setTurnBusy(sessionId, "thinking…");
 
     // Stamped once, here, because this is the only place that knows when the
     // user's request started — and the per-answer line is about the wait they
@@ -2227,26 +2411,31 @@ class TuiApp {
     const startedAt = Date.now();
     const turn = {
       startedAt,
-      mode: this.goalRun ? "Goal" : MODE_LABELS[this.mode],
+      mode: this.goals.has(sessionId) ? "Goal" : MODE_LABELS[this.mode],
       model: this.model,
       tps: this.view.tps === "on",
     };
 
     try {
-      for await (const event of agent.send(prompt, images)) {
-        // The session changed under us: stop reading and let the abandoned turn
-        // go. What it was working on belongs to the session that asked for it.
-        if (this.sessionId !== turnSession) break;
-        applyEvent(this.entries, event, { at: Date.now(), turn });
+      for await (const event of this.agentFor(sessionId).send(prompt, images)) {
+        const current = this.isCurrent(sessionId);
+        // Where this event belongs: on screen, or in the parked session that
+        // started the turn and is still working behind the user's back.
+        applyEvent(current ? this.entries : this.parkedState(sessionId).entries, event, { at: Date.now(), turn });
         // The plan tools' state as data, so the TODO chip and its panel read a
         // structure rather than parsing the checklist out of rendered text.
-        if (event.type === "plan") this.plan = event.snapshot;
+        if (event.type === "plan") {
+          if (current) this.plan = event.snapshot;
+          else this.parkedState(sessionId).plan = event.snapshot;
+        }
         // The words the user added have joined the transcript, so the wait the
         // spinner was describing is over.
-        if (event.type === "continued" && event.reason === "steered") this.steering.splice(0, event.attempt);
-        if (event.type === "tool-start") this.setBusy(`${event.name}…`);
-        else if (event.type === "route-wait") this.setBusy(`rate-limited on ${event.from} — waiting ${Math.ceil(event.ms / 1000)}s…`);
-        else if (event.type === "tool-result" || event.type === "text") this.setBusy("thinking…");
+        if (event.type === "continued" && event.reason === "steered") {
+          (current ? this.steering : this.parkedState(sessionId).steering).splice(0, event.attempt);
+        }
+        if (event.type === "tool-start") this.setTurnBusy(sessionId, `${event.name}…`);
+        else if (event.type === "route-wait") this.setTurnBusy(sessionId, `rate-limited on ${event.from} — waiting ${Math.ceil(event.ms / 1000)}s…`);
+        else if (event.type === "tool-result" || event.type === "text") this.setTurnBusy(sessionId, "thinking…");
         this.scheduleDraw();
       }
     } catch (error) {
@@ -2254,62 +2443,229 @@ class TuiApp {
       // instead of surfacing the AbortError underneath it.
       const failure = error as Error;
       const cancelled = failure.name === "AbortError";
-      this.note(
-        cancelled ? "stopped — that turn was cancelled" : failure.message,
-        cancelled ? "warn" : "error",
-        !cancelled,
-      );
-      // A dead turn is worth a decision, not just a red line: the transcript
-      // keeps the error, and the modal offers the three things that can
-      // actually happen next — run it again, move to another model, or let it
-      // go. Goal runs stay autonomous: a modal nobody is watching would stall
-      // the run, so they only get the note.
-      if (!cancelled && !this.goalRun && this.sessionId === turnSession) {
-        const limited = /rate.limit|429/i.test(failure.message);
-        this.recovery = {
-          title: limited ? "Rate limited — what now?" : "The turn failed — what now?",
-          body: failure.message,
-          prompt,
-          images: [...images],
-        };
-        this.modal = this.recoveryModal(this.recovery);
+      if (this.isCurrent(sessionId)) {
+        this.note(
+          cancelled ? "stopped — that turn was cancelled" : failure.message,
+          cancelled ? "warn" : "error",
+          !cancelled,
+        );
+        // A dead turn is worth a decision, not just a red line: the transcript
+        // keeps the error, and the modal offers the three things that can
+        // actually happen next — run it again, move to another model, or let it
+        // go. Goal runs stay autonomous: a modal nobody is watching would stall
+        // the run, so they only get the note.
+        if (!cancelled && !this.goals.has(sessionId)) {
+          const limited = /rate.limit|429/i.test(failure.message);
+          this.recovery = {
+            title: limited ? "Rate limited — what now?" : "The turn failed — what now?",
+            body: failure.message,
+            prompt,
+            images: [...images],
+          };
+          this.modal = this.recoveryModal(this.recovery);
+        }
+      } else if (!cancelled) {
+        // There is no screen for a background failure, so it is said as news
+        // rather than raised as a card the user would answer for a session
+        // they are not even in.
+        this.notifyBackground(`${this.sessionLabel(sessionId)} — turn failed: ${failure.message}`);
       }
     } finally {
-      this.stopBusy();
-      this.goalRun = false;
-      // Words added to this turn that never reached a request — it was cancelled,
-      // or it failed first. They are the user's, they were never answered, and
-      // the tile that carried them is already gone, so they go back to the front
-      // of the queue in the order they were added.
-      if (this.steering.length > 0) {
-        const unread = this.steering;
-        this.steering = [];
-        this.queuedPrompts.unshift(...unread);
-        const count = unread.length;
-        this.entries.push({
-          kind: "note",
-          text: `${count} message${count === 1 ? "" : "s"} added to that turn went unread — back in the queue`,
-          tone: "warn",
-        });
-      }
-      // Only the session that started the turn may be saved or have its queue
-      // drained here. Anything else belongs to a session the user has left, and
-      // writing into it is the leak this guard exists to stop.
-      if (this.sessionId === turnSession) {
+      const current = this.isCurrent(sessionId);
+      // A goal that ran here is over, whoever ended it and wherever the user is.
+      this.goals.delete(sessionId);
+      if (current) {
+        this.stopBusy();
+        // Words added to this turn that never reached a request — it was
+        // cancelled, or it failed first. They are the user's, they were never
+        // answered, and the tile that carried them is already gone, so they go
+        // back to the front of the queue in the order they were added.
+        if (this.steering.length > 0) {
+          const unread = this.steering.splice(0);
+          this.queuedPrompts.unshift(...unread);
+          const count = unread.length;
+          this.entries.push({
+            kind: "note",
+            text: `${count} message${count === 1 ? "" : "s"} added to that turn went unread — back in the queue`,
+            tone: "warn",
+          });
+        }
         await this.save().catch(() => undefined);
         this.draw();
         // Off the critical path: the pass exists to help a *future* session, so
         // the user's next message must not wait on it.
-        void this.learnAfterTurn(turnSession);
+        void this.learnAfterTurn(sessionId);
         // A failed turn holding the recovery modal also holds the queue: a turn
         // running behind the question would be a second thing deciding what the
         // screen is doing. The queue moves when the question is answered.
         if (!this.isPaused && !this.recovery && this.queuedPrompts.length > 0) {
           const next = this.queuedPrompts.shift();
-          if (next) this.runQueued(next);
+          if (next) this.runQueued(next, sessionId);
+        }
+      } else {
+        const state = this.parkedState(sessionId);
+        state.busy = null;
+        // The turn is over, so the session is no longer mid-cancel either —
+        // otherwise a return would look like a Ctrl+C that never landed.
+        state.stopping = false;
+        if (state.steering.length > 0) {
+          const unread = state.steering.splice(0);
+          state.queuedPrompts.unshift(...unread);
+          const count = unread.length;
+          state.entries.push({
+            kind: "note",
+            text: `${count} message${count === 1 ? "" : "s"} added to that turn went unread — back in the queue`,
+            tone: "warn",
+          });
+        }
+        // Saved under its own id: this is what makes the answer still be there
+        // when the user comes back to the session that was left running.
+        await this.saveParked(sessionId, state).catch(() => undefined);
+        this.notifyBackground(`${this.sessionLabel(sessionId)} — turn finished`);
+        // The queue was left behind to be worked through, not to wait for a
+        // visit, so a background session keeps going on its own — unless it was
+        // paused, which stays a pause wherever the user is looking.
+        if (!state.isPaused && state.queuedPrompts.length > 0) {
+          const next = state.queuedPrompts.shift();
+          if (next) this.runQueued(next, sessionId);
         }
       }
+      // Settled last, after a queued prompt has had its chance to start, so a
+      // waiter that loops sees the next turn rather than a moment of quiet.
+      settle();
+      if (this.running.get(sessionId) === finished) this.running.delete(sessionId);
     }
+  }
+
+  /** True when the session a turn belongs to is the one on screen. */
+  private isCurrent(id: string): boolean {
+    return this.sessionId === id;
+  }
+
+  /** The agent a session runs on, whether it is on screen or parked. */
+  private agentFor(id: string): Agent {
+    return this.isCurrent(id) ? this.agent : this.parkedState(id).agent;
+  }
+
+  /**
+   * The parked state for a session, created empty if there is none.
+   *
+   * A session is parked when the user leaves it, so this is normally a lookup.
+   * The empty case only covers a turn that outlived its park record, and is
+   * better than dropping its output on the floor.
+   */
+  private parkedState(id: string): ParkedSession {
+    let state = this.parked.get(id);
+    if (!state) {
+      state = {
+        agent: this.agent,
+        entries: [],
+        plan: null,
+        busy: null,
+        queuedPrompts: [],
+        steering: [],
+        recovery: null,
+        createdAt: this.createdAt,
+        title: this.title,
+        isPaused: false,
+        stopping: false,
+        model: this.model,
+        baseUrl: this.baseUrl,
+        cwd: this.cwd,
+        mode: this.mode,
+        variant: this.variant,
+      };
+      this.parked.set(id, state);
+    }
+    return state;
+  }
+
+  /**
+   * Moves the session on screen into the parked map.
+   *
+   * The arrays are stored by reference, not copied: a turn still running in
+   * this session holds those same objects, so it goes on appending to the
+   * transcript the user will find when they return, and the plan it updates is
+   * the plan that shows.
+   */
+  private parkCurrent(): void {
+    this.parked.set(this.sessionId, {
+      agent: this.agent,
+      entries: this.entries,
+      plan: this.plan,
+      busy: this.busy,
+      queuedPrompts: this.queuedPrompts,
+      steering: this.steering,
+      recovery: this.recovery,
+      createdAt: this.createdAt,
+      title: this.title,
+      isPaused: this.isPaused,
+      stopping: this.stopping,
+      model: this.model,
+      baseUrl: this.baseUrl,
+      cwd: this.cwd,
+      mode: this.mode,
+      variant: this.variant,
+    });
+  }
+
+  /** Pulls a parked session back onto the screen, keeping its running turn. */
+  private async unpark(id: string, state: ParkedSession): Promise<void> {
+    const movedDirectory = this.cwd !== state.cwd;
+    this.sessionId = id;
+    this.createdAt = state.createdAt;
+    this.title = state.title;
+    this.entries = state.entries;
+    this.plan = state.plan;
+    this.queuedPrompts = state.queuedPrompts;
+    this.steering = state.steering;
+    this.recovery = state.recovery;
+    this.isPaused = state.isPaused;
+    this.agent = state.agent;
+    // The session's own settings, not whichever session happened to be on
+    // screen when it was left. The agent above was built with these, so nothing
+    // is rebuilt here — restoring them keeps the screen honest about it.
+    this.model = state.model;
+    this.baseUrl = state.baseUrl;
+    this.cwd = state.cwd;
+    this.mode = state.mode;
+    this.variant = state.variant;
+    this.stopBusy();
+    // A turn still running there keeps the spinner going on return.
+    if (state.busy) this.setBusy(state.busy);
+    // `stopBusy` cleared the flag a moment ago; it belongs to the turn, not to
+    // the screen, so the session's own value is put back.
+    this.stopping = state.stopping;
+    if (movedDirectory) {
+      // The directory belongs to the session, and two things are per directory:
+      // the `@` index and the tab bar. Both follow it back.
+      this.mention = null;
+      void this.ensureMentionIndex().catch(() => undefined);
+      await this.refreshTabs().catch(() => undefined);
+    }
+  }
+
+  /** Says something about a background session without taking over the screen. */
+  private notifyBackground(text: string): void {
+    this.notice = span(text, this.styles.warn);
+    this.draw();
+  }
+
+  /**
+   * A short, readable name for a session in a notice.
+   *
+   * The parked title is consulted as well as the tab bar, because a tab that
+   * was closed (or a session being deleted) has no tab left to name it — and
+   * the raw id in a notice reads like an error rather than a name.
+   */
+  private sessionLabel(id: string): string {
+    return this.tabs.find((tab) => tab.id === id)?.title ?? this.parked.get(id)?.title ?? id;
+  }
+
+  /** Sets the busy label on whichever side of the screen the turn is on. */
+  private setTurnBusy(id: string, label: string): void {
+    if (this.isCurrent(id)) this.setBusy(label);
+    else this.parkedState(id).busy = label;
   }
 
   private setBusy(label: string): void {
@@ -2562,7 +2918,7 @@ class TuiApp {
         ].join("\n");
         this.entries.push({ kind: "user", text: `/goal ${argument}` });
         this.scroll = 0;
-        this.goalRun = true;
+        this.goals.add(this.sessionId);
         void this.runTurn(goalPrompt);
         break;
       }
@@ -3124,19 +3480,34 @@ class TuiApp {
    */
   private resetSessionState(): void {
     this.queuedPrompts = [];
-    this.attached = [];
-    this.attachedDocs = [];
+    // A fresh array, not a cleared one: the old array may be the very one a turn
+    // left running in the session being left holds, and sharing it would make
+    // this session's count move when that turn reads a message.
+    this.steering = [];
     this.plan = null;
-    this.todoPanel = false;
     this.recovery = null;
-    this.pendingRetry = null;
-    this.changes = [];
-    this.anchor = null;
-    this.notice = null;
     this.isPaused = false;
     // A turn running in the session being left is not this session's, so its
     // spinner must not keep ticking here.
     this.stopBusy();
+    this.resetTransientUi();
+  }
+
+  /**
+   * The parts of the screen that belong to no session on disk.
+   *
+   * Cleared on every move between sessions, whether the incoming session is
+   * loaded from disk or pulled back out of the parked map — a stray attachment
+   * or anchor carried over is how one session's state leaks into another.
+   */
+  private resetTransientUi(): void {
+    this.attached = [];
+    this.attachedDocs = [];
+    this.todoPanel = false;
+    this.pendingRetry = null;
+    this.changes = [];
+    this.anchor = null;
+    this.notice = null;
     this.scroll = 0;
   }
 
@@ -3144,32 +3515,55 @@ class TuiApp {
   private async switchSession(id: string): Promise<void> {
     if (id === this.sessionId) return;
 
-    const messages = await this.options.loadSession(id);
-    if (messages === null) {
-      this.note(`session ${id} could not be read`, "error");
-      return;
-    }
-
+    // The session being left keeps working: it is parked, not waited for. A
+    // turn still running there goes on writing into the very objects parked
+    // here, which is what makes the turn a *background* one rather than an
+    // abandoned one.
+    this.parkCurrent();
     await this.save().catch(() => undefined);
     // Explicitly switching to a session re-opens it
     this.closedSessions.delete(id);
     this.deletedSessions.delete(id);
 
-    // The record's own title and start time, rather than a fresh `null` and
-    // `now`: a session that was renamed has to come back renamed, and its age
-    // is part of what `/stats` and `[USAGE]` report. Reading the title here is
-    // also what stops `save()` from re-deriving one and overwriting the user's
-    // choice on the next turn.
-    const summaries = await this.options.listSessions(this.cwd).catch(() => []);
-    const record = summaries.find((session) => session.id === id);
+    const parked = this.parked.get(id);
+    if (parked) {
+      // Already in memory: it comes back exactly as it was left, including a
+      // transcript a running turn has been adding to since it was parked.
+      this.editor.clear();
+      this.resetTransientUi();
+      await this.unpark(id, parked);
+    } else {
+      const messages = await this.options.loadSession(id);
+      if (messages === null) {
+        this.note(`session ${id} could not be read`, "error");
+        return;
+      }
 
-    this.sessionId = id;
-    this.createdAt = record?.createdAt ?? new Date().toISOString();
-    this.title = record?.title ?? null;
-    this.resetSessionState();
-    this.entries = entriesFromHistory(messages);
-    this.rebuild(messages);
-    this.editor.clear();
+      // The record's own title and start time, rather than a fresh `null` and
+      // `now`: a session that was renamed has to come back renamed, and its age
+      // is part of what `/stats` and `[USAGE]` report. Reading the title here is
+      // also what stops `save()` from re-deriving one and overwriting the user's
+      // choice on the next turn.
+      const summaries = await this.options.listSessions(this.cwd).catch(() => []);
+      const record = summaries.find((session) => session.id === id);
+
+      this.sessionId = id;
+      this.createdAt = record?.createdAt ?? new Date().toISOString();
+      this.title = record?.title ?? null;
+      // A session that already exists comes back on the settings it was using,
+      // which is what makes them per-session across a restart too. A record with
+      // none of them keeps the configured defaults, for a brand new session.
+      if (record?.model) this.model = record.model;
+      if (record?.baseUrl) this.baseUrl = record.baseUrl;
+      if (record?.mode) this.mode = record.mode;
+      if (record?.variant) this.variant = record.variant;
+      this.editor.clear();
+      this.resetTransientUi();
+      this.resetSessionState();
+      this.entries = entriesFromHistory(messages);
+      this.rebuild(messages);
+      this.notice = span(`switched session · ${messages.length} messages`, this.styles.dim);
+    }
 
     for (const t of this.tabs) t.current = false;
     const existing = this.tabs.find((t) => t.id === id);
@@ -3178,17 +3572,18 @@ class TuiApp {
       if (this.title) existing.title = this.title;
     } else {
       this.tabs = [
-        { id, title: record?.title ?? "session", current: true },
+        { id, title: this.title ?? "session", current: true },
         ...this.tabs.filter((t) => !this.closedSessions.has(t.id) && !this.deletedSessions.has(t.id)),
       ];
       if (this.tabs.length > MAX_TABS) {
         this.tabs = this.tabs.slice(0, MAX_TABS);
       }
     }
-    this.notice = span(`switched session · ${messages.length} messages`, this.styles.dim);
   }
 
   private async newSession(): Promise<void> {
+    // The session being left keeps running: it is parked, not waited for.
+    this.parkCurrent();
     await this.save().catch(() => undefined);
     this.sessionId = this.options.newSessionId();
     this.createdAt = new Date().toISOString();
@@ -3233,6 +3628,11 @@ class TuiApp {
     }
 
     await this.save().catch(() => undefined);
+    // The session being forked from is a session of its own and keeps running:
+    // park it before the id moves, so a turn in flight goes on writing into
+    // *its* transcript rather than into a state invented after the switch — and
+    // with the right agent, since the fork rebuilds `this.agent` a line later.
+    this.parkCurrent();
     this.title = `${this.title ?? "session"} (fork)`;
     this.sessionId = this.options.newSessionId();
     this.createdAt = new Date().toISOString();
@@ -3448,7 +3848,65 @@ class TuiApp {
    * one writes `@skill:name` back into the prompt: the mention expands into
    * context on submit, the same as if it had been typed by hand.
    */
+  /**
+   * `/skills delete <name>` — retire a skill.
+   *
+   * Moves the skill's own folder into the brain's `.trash/` rather than
+   * removing it, so a mistaken name is recoverable, and reports where it went.
+   * The mention index is dropped afterwards: it holds the skill list for `@`
+   * and `/skills`, it is cached for a minute, and every consumer reads it — so
+   * without this the skill would still be offered after being retired.
+   */
+  private async retireSkill(name: string): Promise<void> {
+    if (!name) {
+      this.note("which skill? — /skills delete <name>, and /skills lists them", "warn");
+      this.draw();
+      return;
+    }
+
+    let index: MentionIndex;
+    try {
+      index = await this.ensureMentionIndex();
+    } catch {
+      this.note("could not read the skills directory", "warn");
+      this.draw();
+      return;
+    }
+
+    const found = index.skills.find((skill) => skill.name === name);
+    if (!found) {
+      this.note(`no skill named "${name}" — /skills lists the ones there are`, "warn");
+      this.draw();
+      return;
+    }
+
+    const brain = readBrain(this.cwd);
+    if (!brain) {
+      this.note("no brain to retire it from", "warn");
+      this.draw();
+      return;
+    }
+
+    try {
+      const moved = await trashSkill(brain.dir, found.file);
+      this.mentionIndex = null;
+      this.mentionIndexAt = 0;
+      this.mentionIndexPromise = null;
+      this.note(`retired skill:${name} → ${moved}`);
+    } catch (error) {
+      this.note(`could not retire ${name} — ${(error as Error).message}`, "error");
+    }
+    this.draw();
+  }
+
   private async skills(argument: string): Promise<void> {
+    // `/skills delete <name>` retires one; anything else reads.
+    const [verb, ...rest] = argument.trim().split(/\s+/);
+    if (verb === "delete") {
+      await this.retireSkill(rest.join(" ").trim());
+      return;
+    }
+
     let index: MentionIndex;
     try {
       index = await this.ensureMentionIndex();
@@ -3893,7 +4351,7 @@ class TuiApp {
    */
   private async chooseProvider(providers: readonly ProviderOption[]): Promise<void> {
     if (providers.length === 0) {
-      this.note("this run knows of one endpoint; change it with kicode.json or KICODE_BASE_URL", "warn");
+      this.note("this run knows of one endpoint; change it with kicode.json or /connect", "warn");
       return;
     }
 
@@ -4406,10 +4864,17 @@ class TuiApp {
         this.draw();
         return;
       }
-      if (this.options.saveApiKey) {
-        await this.options.saveApiKey(trimmed, targetBaseUrl);
-      }
-      this.note(`saved API key for ${name}`);
+      const envName = this.options.saveApiKey
+        ? await this.options.saveApiKey(trimmed, targetBaseUrl)
+        : undefined;
+      // The key works now but is held in memory, so say where it would live if
+      // it is to survive the next run — otherwise "saved" is a promise the
+      // next launch breaks.
+      this.note(
+        envName
+          ? `using this key for ${name} now — set ${envName} to keep it across runs`
+          : `using this key for ${name} now`,
+      );
       this.baseUrl = targetBaseUrl;
       this.rebuild(this.agent.turns);
       this.draw();
@@ -5612,6 +6077,11 @@ class TuiApp {
   private async deleteSession(id: string): Promise<void> {
     this.deletedSessions.add(id);
     this.closedSessions.add(id);
+    // A deleted session must not keep running: there is no file left for its
+    // answer to be written to. The turn in the session on screen holds the live
+    // agent, so that is the one to stop; a session already parked holds its own.
+    if (id === this.sessionId) this.agent.cancel();
+    this.parked.get(id)?.agent.cancel();
     this.tabs = this.tabs.filter((t) => t.id !== id);
 
     if (this.options.deleteSession) {
@@ -5673,7 +6143,46 @@ class TuiApp {
       createdAt: this.createdAt,
       cwd: this.cwd,
       messages: this.agent.turns,
+      model: this.model,
+      baseUrl: this.baseUrl,
+      mode: this.mode,
+      variant: this.variant,
       ...(this.title ? { title: this.title } : {}),
+    });
+  }
+
+  /**
+   * Saves a session the user is not looking at.
+   *
+   * The same file as `save`, but the agent and the id come from the turn's own
+   * session instead of whichever happens to be on screen — which is exactly
+   * what keeps a background answer from landing in the wrong transcript.
+   */
+  private async saveParked(
+    id: string,
+    state: {
+      agent: Agent;
+      createdAt: string;
+      title: string | null;
+      cwd: string;
+      model: string;
+      baseUrl: string;
+      mode: SessionMode;
+      variant: string;
+    },
+  ): Promise<void> {
+    if (this.deletedSessions.has(id)) return;
+    if (state.agent.turns.length === 0) return;
+    await this.options.saveSession({
+      id,
+      createdAt: state.createdAt,
+      cwd: state.cwd,
+      messages: state.agent.turns,
+      model: state.model,
+      baseUrl: state.baseUrl,
+      mode: state.mode,
+      variant: state.variant,
+      ...(state.title ? { title: state.title } : {}),
     });
   }
 
@@ -5685,8 +6194,11 @@ class TuiApp {
    */
   private settings(): AgentSettings {
     return {
-      approve: this.approver(),
-      ask: this.asker(),
+      // Bound to the session being built, not to whatever is on screen when a
+      // callback fires: a background turn must not raise a card against the
+      // session the user is actually looking at.
+      approve: this.approver(this.sessionId),
+      ask: this.asker(this.sessionId),
       model: this.model,
       baseUrl: this.baseUrl,
       cwd: this.cwd,
@@ -5708,9 +6220,20 @@ class TuiApp {
     this.plan = planFromHistory(history, this.cwd);
   }
 
-  private approver(): ApproveFn {
-    return (request) =>
-      new Promise<ApprovalDecision>((resolve) => {
+  private approver(sessionId = this.sessionId): ApproveFn {
+    return (request) => {
+      // Already answered in this run: asking again is the thing this removes.
+      if (this.approvedTools.has(request.name)) return Promise.resolve<ApprovalDecision>("always");
+
+      // A turn in a session the user is not looking at has no screen to put a
+      // card on. It is denied, and said so once, rather than hijacking the
+      // session that *is* on screen.
+      if (!this.isCurrent(sessionId)) {
+        this.notifyBackground(`${this.sessionLabel(sessionId)} — ${request.name} needs approval, denied`);
+        return Promise.resolve<ApprovalDecision>("deny");
+      }
+
+      return new Promise<ApprovalDecision>((resolve) => {
         this.pending = { request, resolve };
         this.modal = {
           title: `${request.name} wants to run`,
@@ -5730,6 +6253,7 @@ class TuiApp {
         };
         this.draw();
       });
+    };
   }
 
   private modalBody(request: ApprovalRequest): Span[] {
@@ -5813,7 +6337,9 @@ class TuiApp {
 
   private state(): TuiState {
     return {
-      tabs: this.tabs,
+      // A tab with a turn running in it is marked, so a session left working in
+      // the background is visible from whichever session is on screen.
+      tabs: this.tabs.map((tab) => ({ ...tab, busy: this.running.has(tab.id) })),
       hoverTabId: this.hoverTab?.id ?? null,
       hoverClose: this.hoverTab?.close ?? false,
       entries: this.entries,
@@ -5868,7 +6394,7 @@ class TuiApp {
         : null,
       variant: this.variant,
       mode: this.mode,
-      goalActive: this.goalRun,
+      goalActive: this.goals.has(this.sessionId),
       usage: { tokens: this.agent.contextTokens, budget: this.options.contextTokens, tools: this.toolCalls() },
       palette: this.paletteOpen() ? { items: this.paletteItems(), selected: this.paletteSelected } : null,
       mentions:

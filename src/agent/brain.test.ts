@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { brainBriefing, projectSlug, readBrain, recallFromBrain } from "./brain";
+import { brainBriefing, projectSlug, readBrain, recallFromBrain, trashSkill } from "./brain";
 import { createDefaultTools } from "./tools";
 
 /**
@@ -65,6 +65,37 @@ describe("the brain", () => {
 
     const brain = readBrain(cwd(), env());
     expect(brain?.skills.map((skill) => skill.name)).toEqual(["adb-automation", "release-check"]);
+  });
+
+  it("retires a skill into the trash, and the scan stops seeing it", async () => {
+    const brain = readBrain(cwd(), env());
+    const skill = brain?.skills.find((entry) => entry.name === "release-check");
+
+    const moved = await trashSkill(brain!.dir, skill!.file);
+
+    // Moved, not removed: the body is where the return value says it is.
+    expect(moved.startsWith(path.join(brain!.dir, ".trash"))).toBe(true);
+    expect(await readFile(path.join(moved, "SKILL.md"), "utf8")).toContain("release-check");
+
+    // And out of the index, which is what `@skill:` and `/skills` read. The
+    // trash sits outside `skills/`, so the walk never sees it again.
+    expect(readBrain(cwd(), env())?.skills.map((entry) => entry.name)).toEqual([]);
+  });
+
+  it("retires a nested skill by its own folder, leaving the category alone", async () => {
+    // The index hands back a file path. A delete that rebuilt the path from the
+    // name would move the whole category instead of the one skill.
+    const nested = path.join(root, "ki-agent-brain", "skills", "android", "adb-automation");
+    await mkdir(nested, { recursive: true });
+    await writeFile(path.join(nested, "SKILL.md"), '---\nname: adb-automation\ndescription: "Drive a device over adb"\n---\nbody\n');
+
+    const brain = readBrain(cwd(), env());
+    const skill = brain?.skills.find((entry) => entry.name === "adb-automation");
+    const moved = await trashSkill(brain!.dir, skill!.file);
+
+    expect(path.basename(moved)).toContain("adb-automation");
+    await expect(readFile(path.join(nested, "SKILL.md"), "utf8")).rejects.toThrow();
+    expect(readBrain(cwd(), env())?.skills.map((entry) => entry.name)).toEqual(["release-check"]);
   });
 
   it("briefs the model with this project's memory and the skills it has", () => {

@@ -55,6 +55,31 @@ export const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1003l\u001b[?1000l";
  * terminal wrap the whole thing in `ESC [ 200 ~ … ESC [ 201 ~`, which the key
  * decoder turns into one `paste` key that can carry newlines safely.
  */
+/**
+ * Ask the terminal to report the modifier on keys that would otherwise be
+ * ambiguous — the only way Shift+Enter can be told apart from Enter at all.
+ *
+ * `modifyOtherKeys` level 2 (xterm's, and what Windows Terminal, VS Code and
+ * iTerm2 implement): level 1 reports a handful of keys and level 2 reports
+ * every key that has one. A terminal that does not know the sequence ignores
+ * it, so asking costs nothing where it is not supported, and level 0 restores
+ * the default on the way out.
+ */
+export const ENABLE_KEY_MODIFIERS = "\u001b[>4;2m";
+export const DISABLE_KEY_MODIFIERS = "\u001b[>4;0m";
+
+/**
+ * The kitty keyboard protocol's "disambiguate escape codes" flag.
+ *
+ * The newer half of the same job: Windows Terminal 1.25+, Ghostty, kitty,
+ * WezTerm and foot answer this, while the xterm `modifyOtherKeys` above covers
+ * the older generation. Both are asked for because a terminal answers at most
+ * one of them, and the decoder accepts either encoding — a terminal that knows
+ * neither ignores both, which is the case that cannot be fixed from here.
+ */
+export const ENABLE_KITTY_KEYS = "\u001b[>1u";
+export const DISABLE_KITTY_KEYS = "\u001b[<u";
+
 export const ENABLE_PASTE = "\u001b[?2004h";
 export const DISABLE_PASTE = "\u001b[?2004l";
 export const ENABLE_WRAP = "\u001b[?7h";

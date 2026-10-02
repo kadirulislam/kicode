@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_BASE_URL,
   DEFAULT_COMPACT_AT_TOKENS,
   DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MAX_TURNS,
   DEFAULT_MODEL,
   MOCK_API_KEY,
   MOCK_BASE_URL,
@@ -22,26 +22,56 @@ const env = (): NodeJS.ProcessEnv => ({
 });
 
 describe("loadConfig defaults", () => {
-  it("falls back to the OpenAI defaults with an empty environment", () => {
+  it("declares nothing at all with an empty environment", () => {
+    // There is no ambient provider any more. An empty environment and an empty
+    // file mean there is nothing to talk to — which is what a fresh install
+    // looks like, and it says so instead of guessing (ADR-041).
     const config = loadConfig({}, {});
 
-    expect(config.baseUrl).toBe(DEFAULT_BASE_URL);
+    expect(config.baseUrl).toBe("");
+    expect(config.provider).toBeNull();
+    expect(config.providers).toEqual([]);
+    expect(validateConfig(config)).toBe("No provider is configured yet.");
+    // Settings that are not credentials still have defaults.
     expect(config.model).toBe(DEFAULT_MODEL);
     expect(config.compaction.enabled).toBe(true);
   });
 
-  it("still reads the environment when no file is present", () => {
+  it("does not take an endpoint or a key from the environment", () => {
+    // The machine-wide `OPENAI_BASE_URL`/`OPENAI_API_KEY` pair is the case this
+    // exists for: it belongs to whatever else set it, and borrowing it made a
+    // first run work for a reason its owner could not see.
     const config = loadConfig(env(), {});
 
-    expect(config.apiKey).toBe("env-key");
-    expect(config.baseUrl).toBe("https://gateway.example.com/v1");
+    expect(config.baseUrl).toBe("");
+    expect(config.apiKey).toBe("");
+    expect(config.provider).toBeNull();
+    // Settings that are not credentials are still read from it.
     expect(config.model).toBe("env-model");
   });
 
   it("gives a turn enough requests for a task, and still a bound", () => {
     // Ordinary work — look, read, change, verify — used to run into the twelve
-    // it was given, and a task that was not finished simply ended.
-    expect(loadConfig({}, {}).maxTurns).toBe(40);
+    // it was given, and a task that was not finished simply ended. Forty was
+    // still short for a long task, so the default moved again and the ceiling
+    // became settable (ADR-039).
+    expect(loadConfig({}, {}).maxTurns).toBe(DEFAULT_MAX_TURNS);
+    expect(DEFAULT_MAX_TURNS).toBeGreaterThanOrEqual(100);
+    expect(loadConfig({}, {}).maxTurns).toBeGreaterThan(40);
+  });
+
+  it("takes the turn ceiling from the file, then the environment", () => {
+    expect(loadConfig({}, { maxTurns: 250 }).maxTurns).toBe(250);
+    expect(loadConfig({ KICODE_MAX_TURNS: "250" }, {}).maxTurns).toBe(250);
+    // The file wins, as it does for every other setting.
+    expect(loadConfig({ KICODE_MAX_TURNS: "250" }, { maxTurns: 7 }).maxTurns).toBe(7);
+    // Nonsense is ignored rather than becoming the ceiling.
+    expect(loadConfig({ KICODE_MAX_TURNS: "lots" }, {}).maxTurns).toBe(DEFAULT_MAX_TURNS);
+  });
+
+  it("carries the allow rules through, and defaults to none", () => {
+    expect(loadConfig({}, {}).allow).toEqual({});
+    expect(loadConfig({}, { allow: { bash: ["npm test"] } }).allow).toEqual({ bash: ["npm test"] });
   });
 
   it("starts on the default theme, and takes one from the environment or the file", () => {
@@ -63,11 +93,13 @@ describe("loadConfig defaults", () => {
     expect(loadConfig({}, {}).view.spacing).toEqual({ block: 2, entry: 1, turn: 1 });
   });
 
-  it("accepts the OPENAI_* names as fallbacks", () => {
+  it("ignores the OPENAI_* names when no provider asks for them", () => {
+    // They still work *through* a provider that names one as its `apiKeyEnv` —
+    // that is a declaration, not an accident of the shell (see below).
     const config = loadConfig({ OPENAI_API_KEY: "k", OPENAI_BASE_URL: "https://x.example.com/v1" }, {});
 
-    expect(config.apiKey).toBe("k");
-    expect(config.baseUrl).toBe("https://x.example.com/v1");
+    expect(config.apiKey).toBe("");
+    expect(config.baseUrl).toBe("");
   });
 
   it("strips trailing slashes from the base URL", () => {
@@ -85,8 +117,17 @@ describe("config file beats the environment", () => {
     expect(config.baseUrl).toBe("https://file.example.com/v1");
   });
 
-  it("still leaves the key to the environment", () => {
-    expect(loadConfig(env(), { model: "file-model" }).apiKey).toBe("env-key");
+  it("still leaves the key to the environment, through a declared provider", () => {
+    // The file names the provider and the variable; the value stays a shell
+    // thing. That is the bargain, and the only way a key is ever read.
+    const file: FileSettings = {
+      model: "file-model",
+      providers: { gateway: { baseUrl: "https://gateway.example.com/v1", apiKeyEnv: "KICODE_API_KEY" } },
+    };
+
+    expect(loadConfig(env(), file).apiKey).toBe("env-key");
+    // Without the declaration the same environment supplies nothing.
+    expect(loadConfig(env(), { model: "file-model" }).apiKey).toBe("");
   });
 });
 
@@ -114,10 +155,12 @@ describe('the "mock" shorthand', () => {
   });
 
   it("lets an explicit baseUrl win instead", () => {
+    // The shorthand is dropped, and with it the placeholder key: an explicit
+    // endpoint with no declared provider has no key to borrow.
     const config = loadConfig(env(), { mock: true, baseUrl: "https://real.example.com/v1" });
 
     expect(config.baseUrl).toBe("https://real.example.com/v1");
-    expect(config.apiKey).toBe("env-key");
+    expect(config.apiKey).toBe("");
   });
 
   it("can be a flag too", () => {
@@ -243,7 +286,10 @@ describe("named providers", () => {
     const config = loadConfig({ KICODE_API_KEY: "k" }, { provider: "nope" });
 
     expect(config.provider).toBeNull();
-    expect(config.baseUrl).toBe(DEFAULT_BASE_URL);
+    // Nothing is guessed and nothing ambient is adopted: naming a provider that
+    // does not exist leaves the session with no endpoint, rather than quietly
+    // falling back to one nobody chose.
+    expect(config.baseUrl).toBe("");
   });
 
   it("keeps a provider with no key in the list, so it can be reported", () => {
@@ -337,7 +383,28 @@ describe("validateConfig with a named provider", () => {
     expect(validateConfig(config)).toBe('No API key for provider "tokenharbor" — set TH_KEY.');
   });
 
-  it("stays plain when no provider was named", () => {
-    expect(validateConfig(loadConfig({}, {}))).toBe("No API key found.");
+  it("asks for a provider when nothing is declared at all", () => {
+    // "No API key found" would send someone to set a variable with nowhere to
+    // send it; the remedy here is to declare an endpoint.
+    expect(validateConfig(loadConfig({}, {}))).toBe("No provider is configured yet.");
+  });
+
+  it("still reports a missing key once an endpoint exists", () => {
+    const config = loadConfig({}, { baseUrl: "https://gateway.example.com/v1" });
+
+    expect(validateConfig(config)).toBe("No API key found.");
+  });
+
+  it("asks which provider to use when several are declared and none is named", () => {
+    const both: FileSettings = {
+      providers: {
+        tokenharbor: { baseUrl: "https://tokenharbor.ai/v1", apiKeyEnv: "TH_KEY" },
+        local: { baseUrl: "http://localhost:11434/v1" },
+      },
+    };
+
+    expect(validateConfig(loadConfig({}, both))).toBe(
+      'No provider is selected — name the one to use with "provider" in kicode.json.',
+    );
   });
 });

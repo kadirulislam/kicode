@@ -20,6 +20,10 @@ export type SessionRecord = {
   cwd: string;
   model: string;
   baseUrl: string;
+  /** Session mode (`build`/`plan`) at the last save. Older records have none. */
+  mode?: string;
+  /** Reasoning variant at the last save. Older records have none. */
+  variant?: string;
   /** Short label for the TUI's session tabs. Older records have none. */
   title?: string;
   /** The conversation after the system prompt. */
@@ -158,6 +162,8 @@ async function readRecord(file: string): Promise<SessionRecord | null> {
       cwd: typeof parsed.cwd === "string" ? parsed.cwd : "",
       model: typeof parsed.model === "string" ? parsed.model : "",
       baseUrl: typeof parsed.baseUrl === "string" ? parsed.baseUrl : "",
+      ...(typeof parsed.mode === "string" ? { mode: parsed.mode } : {}),
+      ...(typeof parsed.variant === "string" ? { variant: parsed.variant } : {}),
       ...(typeof parsed.title === "string" ? { title: parsed.title } : {}),
       messages: parsed.messages as ChatMessage[],
     };

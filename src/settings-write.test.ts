@@ -118,6 +118,27 @@ describe("adding a provider", () => {
     expect(text).toContain("apiKeyEnv");
   });
 
+  it("keeps a credential already on the entry it rewrites", async () => {
+    // KiCode does not *add* a key, but rewriting an entry must not destroy one
+    // that is already there: that is a credential no one can get back.
+    await writeFile(
+      file(),
+      JSON.stringify({ providers: { groq: { baseUrl: "https://old/v1", apiKey: "sk-legacy" } } }),
+      "utf8",
+    );
+    await addGlobalProvider(
+      "groq",
+      { baseUrl: "https://api.groq.com/openai/v1", apiKeyEnv: "GROQ_API_KEY" },
+      env(),
+    );
+
+    expect(await read()).toEqual({
+      providers: {
+        groq: { baseUrl: "https://api.groq.com/openai/v1", apiKey: "sk-legacy", apiKeyEnv: "GROQ_API_KEY" },
+      },
+    });
+  });
+
   it("refuses a file it cannot parse", async () => {
     await writeFile(file(), "nope", "utf8");
     expect((await addGlobalProvider("groq", { baseUrl: "https://x/v1" }, env())).ok).toBe(false);

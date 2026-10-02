@@ -3,9 +3,15 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { listSessions } from "../sessions/store";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { listSessions, saveSession } from "../sessions/store";
+import type { ChatMessage } from "../types";
+import { runTui } from "../tui/app";
 import { runCli, type Io } from "./run";
+
+// The full-screen UI is replaced with a spy: this file is about the options
+// `runCli` assembles and hands to it, never about drawing a frame.
+vi.mock("../tui/app", () => ({ runTui: vi.fn(async () => 0) }));
 
 /**
  * Drives the real `runCli` against a local mock endpoint with a fake terminal.
@@ -92,20 +98,53 @@ beforeAll(async () => {
   dir = await mkdtemp(path.join(tmpdir(), "kicode-cli-"));
   home = await mkdtemp(path.join(tmpdir(), "kicode-cli-home-"));
 
-  process.env.KICODE_API_KEY = "test";
-  process.env.KICODE_BASE_URL = `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`;
-  // Keep sessions out of the real home directory.
+  // A provider has to be declared before anything will talk to it, so the
+  // harness declares one — the same shape `/connect` writes: an endpoint, and
+  // the name of the variable holding its key. It goes in the *global* file
+  // because the project file is rewritten per test below.
+  process.env.KICODE_TEST_KEY = "test";
+  // Keep sessions, and this global config, out of the real home directory.
   process.env.KICODE_HOME = home;
+  await writeFile(
+    path.join(home, "kicode.json"),
+    JSON.stringify({
+      providers: {
+        local: {
+          baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`,
+          apiKeyEnv: "KICODE_TEST_KEY",
+        },
+      },
+    }),
+    "utf8",
+  );
 });
 
 afterAll(async () => {
-  delete process.env.KICODE_API_KEY;
-  delete process.env.KICODE_BASE_URL;
+  delete process.env.KICODE_TEST_KEY;
   delete process.env.KICODE_HOME;
   await new Promise<void>((resolve) => server.close(() => resolve()));
   if (dir) await rm(dir, { recursive: true, force: true });
   if (home) await rm(home, { recursive: true, force: true });
 });
+
+/**
+ * Forces `process.stdin`/`stdout` to look like a terminal, returning a restore.
+ *
+ * `canUseTui` gates the full-screen UI on `isTTY`, which is absent under
+ * vitest — so the only way to reach the TUI branch at all is to pretend.
+ */
+function forceTty(value: boolean): () => void {
+  const streams = [process.stdin, process.stdout] as const;
+  const before = streams.map((stream) => Object.getOwnPropertyDescriptor(stream, "isTTY"));
+  for (const stream of streams) Object.defineProperty(stream, "isTTY", { value, configurable: true });
+  return () => {
+    streams.forEach((stream, index) => {
+      const descriptor = before[index];
+      if (descriptor) Object.defineProperty(stream, "isTTY", descriptor);
+      else delete (stream as { isTTY?: boolean }).isTTY;
+    });
+  };
+}
 
 function fakeIo(answers: string[]): { io: Io; output: string[] } {
   const output: string[] = [];
@@ -304,6 +343,49 @@ describe("session persistence", () => {
     expect(await runCli(["--session", "does-not-exist"], io)).toBe(1);
     expect(output.join("")).toContain("No session found");
   });
+
+  it("opens a resumed session in the TUI on its own saved settings", async () => {
+    // A home of its own, so the resume cannot pick up another test's session and
+    // this record cannot leak into theirs.
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-resume-"));
+    const previousHome = process.env.KICODE_HOME;
+    process.env.KICODE_HOME = own;
+    const restoreTty = forceTty(true);
+
+    try {
+      await saveSession({
+        id: "resume-me",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        cwd: own,
+        model: "saved-model",
+        baseUrl: "https://saved.example/v1",
+        mode: "plan",
+        variant: "high",
+        messages: [{ role: "user", content: "earlier" } as ChatMessage],
+      });
+
+      const mocked = vi.mocked(runTui);
+      mocked.mockClear();
+      const { io } = fakeIo([]);
+      io.cwd = own;
+
+      expect(await runCli(["--continue"], io)).toBe(0);
+
+      // The options the TUI was handed carry the session's own settings, not
+      // the configured defaults — which is what "it survives a restart" means.
+      const options = mocked.mock.calls.at(-1)?.[0];
+      expect(options?.model).toBe("saved-model");
+      expect(options?.baseUrl).toBe("https://saved.example/v1");
+      expect(options?.mode).toBe("plan");
+      expect(options?.variant).toBe("high");
+    } finally {
+      restoreTty();
+      if (previousHome === undefined) delete process.env.KICODE_HOME;
+      else process.env.KICODE_HOME = previousHome;
+      await rm(own, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
@@ -325,8 +407,9 @@ describe("project kicode.json", () => {
 
   it("takes model and endpoint from the file, beating the environment", async () => {
     const previousUrl = process.env.KICODE_BASE_URL;
-    // An ambient endpoint that would fail if it were used. The file must win,
-    // so a successful run is itself the evidence.
+    // An ambient endpoint that would fail if it were used. Nothing reads it any
+    // more, and the file's endpoint is what the session runs on — so a
+    // successful run is itself the evidence.
     process.env.KICODE_BASE_URL = "http://127.0.0.1:9/v1";
 
     try {
@@ -367,10 +450,9 @@ describe("project kicode.json", () => {
     });
   });
 
-  it("--init writes a usable file even with no API key set", async () => {
-    const previousKey = process.env.KICODE_API_KEY;
-    delete process.env.KICODE_API_KEY;
-
+  it("--init writes a usable file, and records no key", async () => {
+    // A declaration is worth recording before the credential exists: `--init`
+    // records where the endpoint is, and never the key for it.
     try {
       const { io, output } = fakeIo([]);
 
@@ -379,7 +461,6 @@ describe("project kicode.json", () => {
       expect(output.join("")).toContain("Wrote");
       expect(JSON.parse(await readFile(configPath(), "utf8"))).toEqual({ model: "flag-model", baseUrl: mockUrl() });
     } finally {
-      process.env.KICODE_API_KEY = previousKey;
       await rm(configPath(), { force: true });
     }
   });
@@ -415,10 +496,77 @@ describe("project kicode.json", () => {
 
       expect(await runCli([], io)).toBe(0);
       expect(output.join("")).toContain("not valid JSON");
-      // Falls back to the environment endpoint, which is the mock here.
+      // The declared provider is still there, so the run has somewhere to go
+      // even though this project file could not be read.
       expect(output.join("")).toContain(mockUrl());
     } finally {
       await rm(configPath(), { force: true });
     }
+  });
+});
+
+describe("the first run, with nothing configured", () => {
+  /**
+   * Runs `body` against a home with no `kicode.json` in it, so no provider is
+   * declared anywhere — the state a fresh install is in. A key in the
+   * environment is no longer configuration, which is the whole point.
+   */
+  const withNothingConfigured = async (body: () => Promise<void>): Promise<void> => {
+    const empty = await mkdtemp(path.join(tmpdir(), "kicode-first-run-"));
+    const previousHome = process.env.KICODE_HOME;
+    process.env.KICODE_HOME = empty;
+    try {
+      await body();
+    } finally {
+      if (previousHome === undefined) delete process.env.KICODE_HOME;
+      else process.env.KICODE_HOME = previousHome;
+      await rm(empty, { recursive: true, force: true });
+    }
+  };
+
+  it("refuses a one-shot run, and says how to declare an endpoint", async () => {
+    await withNothingConfigured(async () => {
+      const { io, output } = fakeIo([]);
+
+      expect(await runCli(["hello"], io)).toBe(1);
+      const text = output.join("");
+      // Not "set a variable": with no provider declared there is no variable
+      // to set, and pointing at one would send someone to export a key with
+      // nowhere to send it.
+      expect(text).toContain("No provider is configured yet.");
+      expect(text).toContain("/connect");
+    });
+  });
+
+  it("names the variable to set when a provider is declared but has no key", async () => {
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-declared-"));
+    const previousHome = process.env.KICODE_HOME;
+    process.env.KICODE_HOME = own;
+    await writeFile(
+      path.join(own, "kicode.json"),
+      JSON.stringify({ providers: { acme: { baseUrl: "https://acme.example/v1", apiKeyEnv: "ACME_API_KEY" } } }),
+      "utf8",
+    );
+
+    try {
+      const { io, output } = fakeIo([]);
+
+      expect(await runCli(["hello"], io)).toBe(1);
+      expect(output.join("")).toContain("Set ACME_API_KEY and try again");
+    } finally {
+      if (previousHome === undefined) delete process.env.KICODE_HOME;
+      else process.env.KICODE_HOME = previousHome;
+      await rm(own, { recursive: true, force: true });
+    }
+  });
+
+  it("still draws a --tui-preview frame, because a preview needs no credential", async () => {
+    // The preview is what someone runs when KiCode is misbehaving; config must
+    // not be able to stop it. Before this it exited with the key hint.
+    await withNothingConfigured(async () => {
+      const { io } = fakeIo([]);
+
+      expect(await runCli(["--tui-preview"], io)).toBe(0);
+    });
   });
 });

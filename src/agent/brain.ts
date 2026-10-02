@@ -1,4 +1,5 @@
 import { readdirSync, readFileSync, type Dirent } from "node:fs";
+import { mkdir, rename } from "node:fs/promises";
 import path from "node:path";
 import { resolveBrainDirSync } from "../mentions";
 
@@ -45,6 +46,26 @@ const MAX_CONTENT_SCAN = 20;
  * checkout would plausibly have saved under, and when it misses, the briefing
  * still lists the memories that do exist so the model can recall one by name.
  */
+/**
+ * Retires a skill by moving it out of the tree instead of deleting it.
+ *
+ * The skill's own directory is what moves — `skills/android/adb-webview/` for a
+ * nested one — because a skill is a folder with a `SKILL.md` in it, and the
+ * index hands back the file rather than a name that could be reassembled into
+ * the wrong path. It lands under `<brain>/.trash/`, which the skill scan never
+ * walks (it reads `<brain>/skills` only), so the retirement takes effect at once
+ * but is not final: a wrong guess is a move back, not a lost afternoon.
+ */
+export async function trashSkill(brainDir: string, file: string): Promise<string> {
+  const folder = path.dirname(file);
+  const trash = path.join(brainDir, ".trash");
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const target = path.join(trash, `${stamp}-${path.basename(folder)}`);
+  await mkdir(trash, { recursive: true });
+  await rename(folder, target);
+  return target;
+}
+
 export function projectSlug(cwd: string): string {
   return path
     .basename(path.resolve(cwd))

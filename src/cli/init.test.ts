@@ -3,7 +3,6 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
-  DEFAULT_BASE_URL,
   DEFAULT_COMPACT_AT_TOKENS,
   DEFAULT_CONTEXT_TOKENS,
   DEFAULT_MODEL,
@@ -27,7 +26,9 @@ afterEach(async () => {
 function config(overrides: Partial<Config> = {}): Config {
   return {
     apiKey: "test",
-    baseUrl: DEFAULT_BASE_URL,
+    // `""` is the fresh-install state: nothing declared yet. The tests that care
+    // about an endpoint pass one explicitly.
+    baseUrl: "",
     provider: null,
     providers: [],
     model: DEFAULT_MODEL,
@@ -37,6 +38,7 @@ function config(overrides: Partial<Config> = {}): Config {
     fallback: [],
     fallbackAuto: true,
     maxTokens: 0,
+    allow: {},
     learning: "auto",
     compaction: {
       enabled: true,
@@ -63,8 +65,9 @@ describe("--init creating a file", () => {
     expect(await readJson()).toEqual({ model: "some-model", baseUrl: "https://gw.example.com/v1" });
   });
 
-  it("leaves out the built-in base URL rather than pinning the default", async () => {
-    // Restating a default is noise that goes stale when the default changes.
+  it("writes no endpoint when none is configured yet", async () => {
+    // Recording `""` would freeze an empty endpoint into the file, which is
+    // worse than recording nothing at all.
     await writeProjectConfig(dir, config({ model: "m" }));
 
     expect(await readJson()).toEqual({ model: "m" });

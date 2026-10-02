@@ -1,0 +1,130 @@
+name: Publish
+
+on:
+  release:
+    types: [published]
+
+# Provenance is minted from an OIDC token, not from the npm credential: the
+# registry has to be able to see that the tarball was built on GitHub's runner
+# from this commit. `id-token: write` is what allows that token to be minted;
+# without it the publish fails outright rather than silently shipping an
+# unattested package.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    # A GitHub-hosted runner specifically. Provenance cannot be generated from
+    # a self-hosted runner, and a build that did not happen inside the provider
+    # is not something the attestation can vouch for.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          registry-url: 'https://registry.npmjs.org'
+
+          # Never cache on a release build: a poisoned or stale cache changes
+          # what lands in the tarball, which is the one thing provenance is
+          # supposed to make verifiable.
+          package-manager-cache: false
+
+      # `ci`, not `install`: it fails on a lockfile that disagrees with
+      # package.json instead of quietly resolving a different tree.
+      - run: npm ci
+
+      # The same gate main gets. A release tag is not a reason to skip it, and
+      # a key in the tree has to fail here too — this is the last checkpoint
+      # before those contents are frozen into a registry tarball that cannot be
+      # overwritten.
+      - run: npm run check:secrets
+      - run: npm run typecheck
+      - run: npm test
+
+      # `publishConfig.provenance` in package.json already requests the
+      # attestation; the flag is passed anyway so the requirement is visible
+      # here rather than hidden in another file. `--access public` matters only
+      # for the very first publish of an unscoped name.
+      - run: npm run build
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  verify:
+    # A successful upload is not the same as a working package. This installs
+    # the tarball the registry is actually serving — not the build output — into
+    # a directory with none of our source in it, and runs the installed command.
+    #
+    # It is also the only check that exercises the *packed* artifact on Linux.
+    # Three things a green build and test suite cannot catch live here: a `bin`
+    # entry npm's publish normalization rewrites (a `./`-prefixed path is
+    # silently dropped on npm 11+, leaving the package with no command at all),
+    # a tarball whose bin file is not executable once installed, and a missing
+    # provenance attestation.
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.x'
+          package-manager-cache: false
+
+      - name: Install the registry copy and run the installed command
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          prefix="$(mktemp -d)"
+
+          # `--ignore-scripts` is the supported install path, not a shortcut:
+          # npm 12 blocks `prepare`, so the tarball has to arrive already built.
+          npm install --prefix "$prefix" "@kadirulislam/kicode@$version" --ignore-scripts
+
+          # The installed file, reached the way a user reaches it, rather than
+          # `dist/cli.js` in this checkout.
+          bin="$prefix/node_modules/kicode/dist/cli.js"
+          test -x "$bin" || { echo "::error::$bin is not executable after install"; exit 1; }
+
+          test "$(node "$bin" --version)" = "$version" \
+            || { echo "::error::installed --version is not $version"; exit 1; }
+          node "$bin" --help > /dev/null
+
+          # With no key and no config, the documented first-run path: exit 1 and
+          # the setup hint, on a machine that has no ~/.kicode of its own. A
+          # package that instead starts, or fails with a stack trace, is broken
+          # for exactly the person who just installed it.
+          set +e
+          no_key="$(node "$bin" -p "hello" 2>&1)"
+          code=$?
+          set -e
+          test "$code" -eq 1 || { echo "::error::expected exit 1 with no key, got $code"; exit 1; }
+          echo "$no_key" | grep -q "and try again" \
+            || { echo "::error::no setup hint printed for a missing key"; exit 1; }
+
+          ( cd "$prefix" && npm audit signatures )
+
+      - name: Confirm the provenance attestation is attached
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+
+          # The attestation is minted with the publish, but the registry's read
+          # path can lag it by a moment. A missing attestation fails the run
+          # rather than passing quietly: it is the thing `publishConfig` asked
+          # for, and a release without it is a release nobody can verify.
+          for attempt in $(seq 1 10); do
+            if npm view "@kadirulislam/kicode@$version" dist.attestations --json 2>/dev/null | grep -q provenance; then
+              npm view "@kadirulislam/kicode@$version" dist.attestations.url
+              npm view "@kadirulislam/kicode@$version" dist.attestations.provenance.predicateType
+              exit 0
+            fi
+            echo "attestation not visible yet (attempt $attempt/10)"
+            sleep 6
+          done
+
+          echo "::error::no provenance attestation on @kadirulislam/kicode@$version"
+          exit 1

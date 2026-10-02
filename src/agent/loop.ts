@@ -112,6 +112,15 @@ export type AgentOptions = {
    * can investigate and plan without touching anything.
    */
   readOnly?: boolean;
+  /**
+   * Says whether this call may run without being put to the user.
+   *
+   * Asked only for a tool that is gated, and before the approval channel — so
+   * an endpoint with no approval channel still refuses everything it would
+   * have refused. The policy lives with the caller that knows the config
+   * (`run.ts`); the loop only knows to ask.
+   */
+  allow?: (name: string, args: Record<string, unknown>) => boolean;
   /** Reasoning effort for this session, when it has been chosen. */
   reasoningEffort?: string;
   /** Session token ceiling; 0 or absent means none. */
@@ -162,7 +171,7 @@ export const PLAN_MODE_PROMPT = [
  * not done, the model had not said it was, and the run simply ended. Forty is
  * still a bound, but it is one a real task does not hit by accident.
  */
-export const DEFAULT_MAX_TURNS = 40;
+export const DEFAULT_MAX_TURNS = 100;
 
 /**
  * How many times one turn may re-ask a reply that was not an answer.
@@ -219,6 +228,8 @@ export class Agent {
   private readonly reasoningEffort: string | undefined;
   /** True in plan mode: the approval-gated tools are refused, not prompted. */
   private readonly readOnly: boolean;
+  /** The caller's allow policy, asked before the approval channel. */
+  private readonly allow?: (name: string, args: Record<string, unknown>) => boolean;
   /** Tokens reported by the provider this session, and the ceiling on them. */
   private spent = 0;
   private budgetTokens = 0;
@@ -263,6 +274,7 @@ export class Agent {
     this.compaction = options.compaction;
     this.reasoningEffort = options.reasoningEffort;
     this.readOnly = options.readOnly === true;
+    this.allow = options.allow;
     this.budgetTokens = Math.max(options.maxTokens ?? 0, 0);
 
     // The environment block is appended to whatever prompt the run was given,
@@ -661,12 +673,21 @@ export class Agent {
           continue;
         }
 
-        // A gated tool that reports this particular call as read-only is
-        // exempt from both gates below: nothing can happen either way, and a
-        // prompt about `git status` is noise. The tool decides, because only it
-        // knows what its own arguments mean — and the classifier is its own,
+        // A gated tool that reports this particular call as read-only is exempt
+        // from both gates below: nothing can happen either way, and a prompt
+        // about `git status` is noise. The tool decides, because only it knows
+        // what its own arguments mean — and the classifier is its own,
         // conservative one.
-        const readsOnly = this.readOnly && tool.readsOnly?.(args) === true;
+        //
+        // Deliberately not conditioned on plan mode any more: reading a file is
+        // as harmless in build mode as it is in plan mode, and asking about it
+        // every time is what made the approval prompt something people learn to
+        // dismiss without reading.
+        const readsOnly = tool.readsOnly?.(args) === true;
+        // The caller's own policy (config `allow` rules). Asked here rather than
+        // inside the approval channel so that a run with no channel still
+        // refuses what it always refused.
+        const allowed = this.allow?.(name, args) === true;
 
         // Plan mode refuses what would change anything, before the approval
         // prompt rather than through it: a dialog the user is expected to
@@ -692,7 +713,7 @@ export class Agent {
 
         // Destructive tools are gated. With no approval channel the answer is
         // always no — silence must never mean "go ahead and overwrite files".
-        if (!readsOnly && tool.requiresApproval === true && !this.sessionApprovals.has(name)) {
+        if (!readsOnly && !allowed && tool.requiresApproval === true && !this.sessionApprovals.has(name)) {
           if (!this.approve) {
             yield* this.rejectToolCall(
               call.id,

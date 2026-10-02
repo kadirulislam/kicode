@@ -9,6 +9,12 @@
 export type Key =
   | { type: "text"; text: string }
   | { type: "enter" }
+  /**
+   * Shift+Enter, or Alt+Enter — the same act either way: a line break in the
+   * box rather than a submit. Only terminals that report modifiers can send
+   * this at all, which is why the protocol is asked for at startup.
+   */
+  | { type: "newline" }
   | { type: "tab" }
   | { type: "backtab" }
   | { type: "backspace" }
@@ -136,10 +142,22 @@ export function parseKeys(input: string): Key[] {
         continue;
       }
 
-      const csi = /^\u001b\[([0-9;]*)([A-Za-z~])/.exec(input.slice(index));
+      // `:` is in the parameter set because kitty's CSI-u carries an event
+      // type after a colon (`CSI 13;2:1u`); leaving it out made those sequences
+      // fail to match at all and spill into the prompt as text.
+      const csi = /^\u001b\[([0-9;:]*)([A-Za-z~])/.exec(input.slice(index));
       if (csi) {
         flush();
         const [, params = "", final = ""] = csi;
+        // Modifier-carrying encodings first: `CSI 27;2;13~` and `CSI 13;2u`
+        // both start with digits, so the tables below would read them as
+        // unknown sequences rather than as the key they name.
+        const modified = modifiedKey(params, final);
+        if (modified) {
+          keys.push(modified);
+          index += csi[0].length;
+          continue;
+        }
         const name = final === "~" ? TILDE_KEYS[params.split(";")[0] ?? ""] : CSI_KEYS[final];
         keys.push(name ? toKey(name) : { type: "unknown", raw: csi[0] });
         index += csi[0].length;
@@ -163,6 +181,13 @@ export function parseKeys(input: string): Key[] {
         continue;
       }
       flush();
+      // `ESC` then Enter. Most terminals mean alt+enter by it and some put
+      // shift+enter here; neither is a submit, so both land on the newline.
+      if (next === "\r" || next === "\n") {
+        keys.push({ type: "newline" });
+        index += 2;
+        continue;
+      }
       keys.push({ type: "alt", key: next });
       index += 2;
       continue;
@@ -200,6 +225,52 @@ export function parseKeys(input: string): Key[] {
 
   flush();
   return keys;
+}
+
+/**
+ * A key the terminal reported the modifier for, decoded back to the key it is.
+ *
+ * Two encodings, because terminals disagree about which to use: xterm's
+ * `modifyOtherKeys` sends `CSI 27 ; <modifiers> ; <code> ~`, and the kitty /
+ * CSI-u style sends `CSI <code> ; <modifiers> u`. Both are accepted whichever
+ * was enabled, so a terminal already in one mode — or a multiplexer that adds
+ * its own layer — still lands on the right key instead of an unknown sequence.
+ *
+ * `modifiers` is 1 plus a bitmask (1 shift, 2 alt, 4 ctrl, 8 super), so 1 is
+ * "no modifier" and 2 is shift.
+ */
+function modifiedKey(params: string, final: string): Key | null {
+  const parts = params.split(";");
+  if (final === "~") {
+    // `CSI 27 ; m ; code ~` — anything else with a `~` belongs to TILDE_KEYS.
+    if (parts[0] !== "27" || parts.length < 3) return null;
+    return fromModifiers(Number(parts[2]), Number(parts[1]));
+  }
+  if (final === "u") return fromModifiers(Number(parts[0]), Number((parts[1] ?? "1").split(":")[0]));
+  return null;
+}
+
+function fromModifiers(code: number, modifiers: number): Key | null {
+  if (!Number.isFinite(code) || !Number.isFinite(modifiers) || code <= 0) return null;
+
+  const bits = Math.max(0, modifiers - 1);
+  const shift = (bits & 1) !== 0;
+  const alt = (bits & 2) !== 0;
+  const ctrl = (bits & 4) !== 0;
+
+  // Enter is the case this whole mechanism exists for: only a terminal that can
+  // report the modifier can tell shift+enter from enter at all.
+  if (code === 13 || code === 10) {
+    if (ctrl) return { type: "ctrl", key: "j" };
+    return shift || alt ? { type: "newline" } : { type: "enter" };
+  }
+  if (code === 9) return shift ? { type: "backtab" } : { type: "tab" };
+  if (code === 27) return { type: "escape" };
+  // The rest goes back to the shape the plain decoder already produces, so a
+  // terminal in a reporting mode cannot lose ctrl and alt bindings.
+  if (ctrl && code >= 0x40 && code <= 0x7e) return { type: "ctrl", key: String.fromCharCode(code).toLowerCase() };
+  if (alt) return { type: "alt", key: String.fromCharCode(code) };
+  return code >= 0x20 ? { type: "text", text: String.fromCharCode(code) } : null;
 }
 
 function toKey(type: Key["type"]): Key {
@@ -262,7 +333,7 @@ function incompleteStart(buffer: string): number {
 
 function completeEscape(tail: string): boolean {
   if (tail === "\u001b") return false;
-  if (/^\u001b\[[0-9;]*$/.test(tail)) return false;
+  if (/^\u001b\[[0-9;:]*$/.test(tail)) return false;
   if (/^\u001b\[<[0-9;]*$/.test(tail)) return false;
   if (/^\u001bO$/.test(tail)) return false;
   // Bracketed paste is the one sequence with no length limit; until its

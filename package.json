@@ -1,18 +1,18 @@
 {
-  "name": "kicode",
-  "version": "0.1.0",
-  "private": true,
+  "name": "@kadirulislam/kicode",
+  "version": "0.1.1",
   "description": "Bring-your-own-key terminal coding agent. OpenAI-compatible, no account, no server.",
   "type": "module",
   "bin": {
-    "kicode": "./dist/cli.js"
+    "kicode": "dist/cli.js"
   },
   "engines": {
     "node": ">=20"
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup",
@@ -32,7 +32,19 @@
     "openai-compatible"
   ],
   "author": "Kadirul Islam",
-  "license": "MIT",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kadirulislam/kicode.git"
+  },
+  "homepage": "https://github.com/kadirulislam/kicode#readme",
+  "bugs": {
+    "url": "https://github.com/kadirulislam/kicode/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "devDependencies": {
     "@types/node": "^26.6.2",
     "tsup": "^8.0.0",

@@ -2,6 +2,11 @@ node_modules/
 dist/
 coverage/
 
+# `npm pack`/`publish` leave the packed tarball here. It is a duplicate of the
+# build output, and it is the one artifact most likely to be committed by
+# accident right after a release check.
+*.tgz
+
 # Never commit keys.
 .env
 .env.*
