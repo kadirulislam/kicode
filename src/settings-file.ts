@@ -75,6 +75,12 @@ export type FileSettings = {
   fallbackAuto?: boolean;
   /** Session token ceiling. Omitted or 0 means no ceiling. */
   maxTokens?: number;
+  /**
+   * Whether a finished turn runs the automatic learning pass. `"auto"` (the
+   * default) or `"off"`. It costs one extra request per turn, so it is a
+   * setting rather than a silent decision.
+   */
+  learning?: "off" | "auto";
   /** Shorthand for pointing this project at the bundled mock provider. */
   mock?: boolean;
   /**
@@ -186,6 +192,11 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
     if (json.mock !== undefined) {
       if (typeof json.mock === "boolean") settings.mock = json.mock;
       else warnings.push(`Ignoring "mock" in ${entry.file}: expected true or false.`);
+    }
+
+    if (json.learning !== undefined) {
+      if (json.learning === "off" || json.learning === "auto") settings.learning = json.learning;
+      else warnings.push(`Ignoring "learning" in ${entry.file}: expected "off" or "auto".`);
     }
 
     if (json.brain !== undefined) {

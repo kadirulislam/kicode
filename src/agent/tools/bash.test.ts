@@ -138,10 +138,53 @@ describe("what plan mode may run", () => {
     expect(isReadOnlyCommand("git")).toBe(false);
   });
 
+  it("tells a git listing from the same word used to create", () => {
+    for (const command of [
+      "git branch",
+      "git branch -a",
+      "git branch -vv",
+      "git tag",
+      "git tag -l 'v*'",
+      "git remote -v",
+      "git config --get user.email",
+      "git config user.email",
+    ]) {
+      expect(isReadOnlyCommand(command), command).toBe(true);
+    }
+    // A name creates one; a writing flag writes.
+    for (const command of [
+      "git branch feature",
+      "git tag v1.2.0",
+      "git remote add origin url",
+      "git config user.email me@example.com",
+      "git branch -d old",
+      "git tag -d v1",
+    ]) {
+      expect(isReadOnlyCommand(command), command).toBe(false);
+    }
+  });
+
+  it("reads through an assignment in front, and still refuses the command behind it", () => {
+    expect(isReadOnlyCommand("FOO=bar ls")).toBe(true);
+    expect(isReadOnlyCommand("NODE_ENV=test grep x src")).toBe(true);
+    // An assignment is not a way past the checks that matter.
+    for (const command of ["FOO=bar node index.js", "FOO=bar rm -rf src", "FOO=bar", "FOO=bar ls > out.txt"]) {
+      expect(isReadOnlyCommand(command), command).toBe(false);
+    }
+  });
+
+  it("allows the plain filters, but not one that can rewrite its input", () => {
+    for (const command of ["cut -d, -f1 data.csv", "uniq -c", "tr a-z A-Z", "nl README.md", "dirname src/app.ts"]) {
+      expect(isReadOnlyCommand(command), command).toBe(true);
+    }
+    for (const command of ["sort -o out.txt in.txt", "sed -i s/a/b/ file", "tee out.txt", "xargs rm"]) {
+      expect(isReadOnlyCommand(command), command).toBe(false);
+    }
+  });
+
   it("refuses a program that is only usually harmless", () => {
-    // `node -e` and an assignment prefix are exactly how a read-looking command
-    // writes, so neither is trusted.
-    for (const command of ["node -e \"require('fs').writeFileSync('a','b')\"", "FOO=bar ls", "npm test", "tsc"]) {
+    // `node -e` runs whatever it is given, so it is never trusted.
+    for (const command of ["node -e \"require('fs').writeFileSync('a','b')\"", "npm test", "tsc"]) {
       expect(isReadOnlyCommand(command), command).toBe(false);
     }
   });

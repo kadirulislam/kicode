@@ -31,6 +31,17 @@ const MEMORY_SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 /** Shapes the tool refuses to persist: a secret must never be written to disk by anyone. */
 const SECRET_PATTERNS = [/-{5}BEGIN [A-Z ]*PRIVATE KEY-{5}/, /\bsk-[A-Za-z0-9]{20,}\b/];
 
+/**
+ * Whether any of these values looks like a credential.
+ *
+ * Exported so the automatic learning pass applies the same refusal. That pass
+ * writes with these same functions, and a writer that trusted its caller would
+ * be one careless caller away from putting a key on disk.
+ */
+export function looksLikeSecret(...values: readonly string[]): boolean {
+  return values.some((value) => SECRET_PATTERNS.some((pattern) => pattern.test(value)));
+}
+
 function textOf(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
@@ -91,9 +102,7 @@ export const rememberTool: Tool = {
     if (!text.trim()) {
       return { content: "Error: \"text\" is empty — there is nothing to save.", isError: true };
     }
-    for (const pattern of SECRET_PATTERNS) {
-      if (pattern.test(text) || pattern.test(textOf(args.description))) return secretError();
-    }
+    if (looksLikeSecret(text, textOf(args.description))) return secretError();
 
     // A brain is created on the first save when there is none: a fresh user has
     // no skills and no brain, and a save that refused to make one would mean
@@ -115,7 +124,12 @@ export const rememberTool: Tool = {
   },
 };
 
-async function saveSkill(
+/**
+ * Writes a skill into the brain. Exported so the automatic learning pass files
+ * what it extracts through exactly the same gate the tool does — slug names,
+ * capped bodies, a refusal to overwrite — rather than a second, looser writer.
+ */
+export async function saveSkill(
   brain: string,
   name: string,
   description: string,
@@ -165,7 +179,8 @@ async function saveSkill(
   };
 }
 
-async function saveMemory(
+/** Appends a dated entry to a project's memory. Exported for the learning pass. */
+export async function saveMemory(
   brain: string,
   slug: string,
   entry: string,

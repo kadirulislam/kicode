@@ -100,6 +100,14 @@ export type Config = {
   fallbackAuto: boolean;
   /** Session token ceiling. 0 means no ceiling. */
   maxTokens: number;
+  /**
+   * Whether a finished turn runs the learning pass over the transcript.
+   *
+   * On by default: a brain that only fills when the model remembers to call
+   * `remember` is the half-built version this pass exists to finish. `off`
+   * turns it back into a strict BYO-attention bargain — no extra request.
+   */
+  learning: "off" | "auto";
   compaction: CompactionSettings;
 };
 
@@ -168,6 +176,7 @@ export function loadConfig(
     fallback: readFallback(env, file, providers, chosen.name, baseUrl, apiKey, model),
     fallbackAuto: readFallbackAuto(env, file),
     maxTokens: overrides.maxTokens ?? file.maxTokens ?? intFrom(env.KICODE_MAX_TOKENS, 0),
+    learning: readLearning(env, file),
     compaction: {
       enabled: overrides.compact === false ? false : compaction.enabled !== false,
       contextTokens: compaction.contextTokens ?? intFrom(env.KICODE_CONTEXT_TOKENS, DEFAULT_CONTEXT_TOKENS),
@@ -246,6 +255,20 @@ function readFallbackAuto(env: NodeJS.ProcessEnv, file: FileSettings): boolean {
   if (declared === "on" || declared === "true" || declared === "1" || declared === "yes") return true;
   if (declared !== undefined && declared !== "") return false;
   return file.fallbackAuto === true;
+}
+
+/**
+ * Whether the automatic learning pass runs.
+ *
+ * `KICODE_LEARNING=off` (or `"learning": "off"` in `kicode.json`) turns it off;
+ * anything else leaves it on. Kept as an environment escape hatch as well as a
+ * setting, because the thing it spends is the user's money per turn.
+ */
+function readLearning(env: NodeJS.ProcessEnv, file: FileSettings): "off" | "auto" {
+  const declared = env.KICODE_LEARNING?.trim().toLowerCase();
+  if (declared === "off" || declared === "false" || declared === "0" || declared === "no") return "off";
+  if (declared !== undefined && declared !== "") return "auto";
+  return file.learning === "off" ? "off" : "auto";
 }
 
 /** Identifies a route for de-duplication: an endpoint plus a model. */

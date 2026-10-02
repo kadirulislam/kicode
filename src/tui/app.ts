@@ -105,6 +105,8 @@ import { readAttachedFile, docBlock, type AttachedDoc } from "./attach";
 export type SessionSummary = {
   id: string;
   title: string;
+  /** ISO timestamp the session was created, so a switch restores its age. */
+  createdAt?: string;
   /** ISO timestamp of the last turn, for the picker's trailing note. */
   updatedAt?: string;
   /** Turns in the session, for the picker's trailing note. */
@@ -249,6 +251,8 @@ export type TuiOptions = {
   /** The window the footer measures the transcript against. */
   contextTokens: number;
   compacting: boolean;
+  /** Whether a finished turn runs the automatic learning pass. `auto` unless `off`. */
+  learning?: "off" | "auto";
   /**
    * Sessions for a directory, newest first. The directory is passed in because
    * `/cd` moves the session, and the tabs have to follow it.
@@ -616,6 +620,10 @@ class TuiApp {
   private lastRightClickTime = 0;
   /** Whether model execution or session is currently paused. */
   private isPaused = false;
+  /** Whether a finished turn runs the learning pass (see `learnAfterTurn`). */
+  private learning: "off" | "auto" = "auto";
+  /** True while a learning pass is running, so turns do not stack requests. */
+  private learningInFlight = false;
   /** Queued prompts to execute in sequence when active turn finishes. */
   private queuedPrompts: Array<{ prompt: string; images: PastedImage[] }> = [];
   /**
@@ -682,6 +690,7 @@ class TuiApp {
     this.baseUrl = options.baseUrl;
     this.cwd = options.cwd;
     this.config = options.config ?? null;
+    this.learning = options.learning === "off" ? "off" : "auto";
     this.clipboardHistory = loadSavedClipboardHistory();
   }
 
@@ -966,8 +975,16 @@ class TuiApp {
 
         case "escape":
           this.notice = null;
-          // Escape closes the most recent thing that was opened. The plan panel
-          // is below every card and above the session, so it goes first.
+          // Escape closes the most recent thing that was opened. An informational
+          // card (session usage) has no decision to resolve, so it is cleared
+          // here rather than by `answerModal`, which owns the approval prompts.
+          if (this.modal && !this.pending) {
+            this.modal = null;
+            this.draw();
+            break;
+          }
+          // The plan panel is below every card and above the session, so it
+          // goes next.
           if (this.todoPanel) {
             this.todoPanel = false;
             this.draw();
@@ -1158,44 +1175,6 @@ class TuiApp {
   }
 
   /**
-   * The `ADD[+]` control: what is in the box joins the queue, unsent.
-   *
-   * It exists for the case the queue is for — a turn is running and the next
-   * message is worth writing down now. With nothing running there is nothing to
-   * queue behind, so the message simply becomes the turn.
-   */
-  private async queueEditorText(): Promise<void> {
-    const text = this.editor.text.trim();
-    if (!text) {
-      this.notice = span("nothing to add — type a message first", this.styles.faint);
-      this.draw();
-      return;
-    }
-    this.editor.acceptHistory(text);
-    this.editor.clear();
-
-    // The same treatment enter gives a message: `@` mentions expanded and any
-    // attached documents appended, so what is queued is what would have been
-    // sent — the queue is not a second, poorer path into the conversation.
-    let expanded = text;
-    if (text.includes("@")) {
-      try {
-        expanded = (await expandMentions(text, await this.ensureMentionIndex())).text;
-      } catch {}
-    }
-    const docs = this.attachedDocs;
-    this.attachedDocs = [];
-    if (docs.length > 0) expanded = [expanded, ...docs.map(docBlock)].join("\n\n");
-
-    this.queuedPrompts.push({ prompt: expanded, images: this.attached });
-    this.attached = [];
-    this.entries.push({ kind: "note", text: `[queued in conversation] ${text}`, tone: "accent" });
-    this.notice = span(`pushed into conversation queue (${this.queuedPrompts.length} queued)`, this.styles.accent);
-    if (this.busy === null && !this.isPaused) this.releaseHeldQueue();
-    this.draw();
-  }
-
-  /**
    * Drops one message from the queue, by the tile's `[x]`.
    *
    * Only the tile it was pressed on goes: a queue is often several messages
@@ -1207,6 +1186,37 @@ class TuiApp {
     this.queuedPrompts.splice(index, 1);
     this.notice = span(`removed queued message (${this.queuedPrompts.length} queued)`, this.styles.dim);
     this.draw();
+  }
+
+  /**
+   * Hands one queued message to the turn in flight, from the tile's `[Add+]`.
+   *
+   * A queue is right when the next words can wait; this is for when they
+   * cannot — the model is half a step away from the wrong thing, and a
+   * correction is worth more now than after the turn. The message is spliced
+   * out of the queue first, so it cannot arrive twice: once pushed into the
+   * running turn it is part of that turn's transcript, and the queue's own
+   * drain would send it again as a brand-new turn.
+   *
+   * With nothing in flight there is no turn to steer — a queued line can sit
+   * there for a while behind a paused session — and "now" is the whole promise
+   * of the button, so it is simply run.
+   */
+  private addQueuedToTurn(index: number): void {
+    const entry = this.queuedPrompts[index];
+    if (!entry) return;
+    this.queuedPrompts.splice(index, 1);
+
+    // A slash line is an instruction to KiCode, not words for the model, so it
+    // cannot ride along inside a turn. It keeps its ordinary path instead.
+    if (!entry.prompt.startsWith("/") && this.agent.steer(entry.prompt)) {
+      this.notice = span(`added to the running turn (${this.queuedPrompts.length} queued)`, this.styles.accent);
+      this.draw();
+      return;
+    }
+
+    this.notice = span(`running queued message (${this.queuedPrompts.length} queued)`, this.styles.accent);
+    this.runQueued(entry);
   }
 
   /**
@@ -1971,6 +1981,13 @@ class TuiApp {
   }
 
   private async runTurn(prompt: string, images: readonly PastedImage[] = []): Promise<void> {
+    // A turn belongs to the session it started in. Its events are applied to
+    // whatever transcript is on screen, so without this a switch made while a
+    // turn is running would write one session's answer into another's — and
+    // `save()` would file the turn under whichever session happened to be
+    // current when it ended.
+    const turnSession = this.sessionId;
+    const agent = this.agent;
     this.setBusy("thinking…");
 
     // Stamped once, here, because this is the only place that knows when the
@@ -1985,7 +2002,10 @@ class TuiApp {
     };
 
     try {
-      for await (const event of this.agent.send(prompt, images)) {
+      for await (const event of agent.send(prompt, images)) {
+        // The session changed under us: stop reading and let the abandoned turn
+        // go. What it was working on belongs to the session that asked for it.
+        if (this.sessionId !== turnSession) break;
         applyEvent(this.entries, event, { at: Date.now(), turn });
         // The plan tools' state as data, so the TODO chip and its panel read a
         // structure rather than parsing the checklist out of rendered text.
@@ -2010,7 +2030,7 @@ class TuiApp {
       // actually happen next — run it again, move to another model, or let it
       // go. Goal runs stay autonomous: a modal nobody is watching would stall
       // the run, so they only get the note.
-      if (!cancelled && !this.goalRun) {
+      if (!cancelled && !this.goalRun && this.sessionId === turnSession) {
         const limited = /rate.limit|429/i.test(failure.message);
         this.recovery = {
           title: limited ? "Rate limited — what now?" : "The turn failed — what now?",
@@ -2023,14 +2043,22 @@ class TuiApp {
     } finally {
       this.stopBusy();
       this.goalRun = false;
-      await this.save().catch(() => undefined);
-      this.draw();
-      // A failed turn holding the recovery modal also holds the queue: a turn
-      // running behind the question would be a second thing deciding what the
-      // screen is doing. The queue moves when the question is answered.
-      if (!this.isPaused && !this.recovery && this.queuedPrompts.length > 0) {
-        const next = this.queuedPrompts.shift();
-        if (next) this.runQueued(next);
+      // Only the session that started the turn may be saved or have its queue
+      // drained here. Anything else belongs to a session the user has left, and
+      // writing into it is the leak this guard exists to stop.
+      if (this.sessionId === turnSession) {
+        await this.save().catch(() => undefined);
+        this.draw();
+        // Off the critical path: the pass exists to help a *future* session, so
+        // the user's next message must not wait on it.
+        void this.learnAfterTurn(turnSession);
+        // A failed turn holding the recovery modal also holds the queue: a turn
+        // running behind the question would be a second thing deciding what the
+        // screen is doing. The queue moves when the question is answered.
+        if (!this.isPaused && !this.recovery && this.queuedPrompts.length > 0) {
+          const next = this.queuedPrompts.shift();
+          if (next) this.runQueued(next);
+        }
       }
     }
   }
@@ -2467,6 +2495,45 @@ class TuiApp {
     ];
   }
 
+  /** The `[USAGE]` chip: this session's own numbers, as a card. */
+  /**
+   * The learning pass, fired after a turn that finished.
+   *
+   * A second request over the transcript, on the user's own provider, asking
+   * what is worth keeping — the half the `remember` tool cannot guarantee,
+   * because it depends on the model choosing to call it. Everything it writes
+   * goes through the same writers the tool uses.
+   *
+   * Deliberately quiet: a turn that taught nothing says nothing, and a pass that
+   * fails is not the session's problem — the turn it followed already worked.
+   */
+  private async learnAfterTurn(turnSession: string): Promise<void> {
+    if (this.learning === "off" || this.learningInFlight) return;
+    if (this.sessionId !== turnSession) return;
+    this.learningInFlight = true;
+    try {
+      const result = await this.agent.learn();
+      // The session may have moved on while the pass ran; its news is about a
+      // conversation the user is no longer looking at.
+      if (result.added.length === 0 || this.sessionId !== turnSession) return;
+      const names = result.added.map((item) => item.name).join(", ");
+      this.note(`learned ${result.added.length === 1 ? "this" : `${result.added.length} things`}: ${names}`, "dim");
+      this.draw();
+    } catch {
+      // A learning pass that fails is a quiet no-op, never an error card.
+    } finally {
+      this.learningInFlight = false;
+    }
+  }
+
+  private usageModal(): Modal {
+    return {
+      title: "Session usage",
+      body: this.statsLines().map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.text)),
+      choices: [{ key: "esc", label: "close" }],
+    };
+  }
+
   private debugLines(): string[] {
     return [
       `kicode ${this.options.version} · node ${process.version} · ${process.platform}`,
@@ -2789,6 +2856,35 @@ class TuiApp {
     this.draw();
   }
 
+  /**
+   * The state that belongs to one conversation and must not follow the user
+   * into another.
+   *
+   * `switchSession` swaps the transcript, but the things *about* a session —
+   * what is queued behind the running turn, what is attached to the next one,
+   * the plan panel, a failed turn waiting on a decision — are held on the app
+   * rather than in the session record, so they have to be cleared by hand.
+   * Leaving any of them behind is how a message typed for one session ends up
+   * running in another.
+   */
+  private resetSessionState(): void {
+    this.queuedPrompts = [];
+    this.attached = [];
+    this.attachedDocs = [];
+    this.plan = null;
+    this.todoPanel = false;
+    this.recovery = null;
+    this.pendingRetry = null;
+    this.changes = [];
+    this.anchor = null;
+    this.notice = null;
+    this.isPaused = false;
+    // A turn running in the session being left is not this session's, so its
+    // spinner must not keep ticking here.
+    this.stopBusy();
+    this.scroll = 0;
+  }
+
   /** Moves to another session, saving the one being left behind first. */
   private async switchSession(id: string): Promise<void> {
     if (id === this.sessionId) return;
@@ -2803,25 +2899,31 @@ class TuiApp {
     // Explicitly switching to a session re-opens it
     this.closedSessions.delete(id);
     this.deletedSessions.delete(id);
+
+    // The record's own title and start time, rather than a fresh `null` and
+    // `now`: a session that was renamed has to come back renamed, and its age
+    // is part of what `/stats` and `[USAGE]` report. Reading the title here is
+    // also what stops `save()` from re-deriving one and overwriting the user's
+    // choice on the next turn.
+    const summaries = await this.options.listSessions(this.cwd).catch(() => []);
+    const record = summaries.find((session) => session.id === id);
+
     this.sessionId = id;
-    this.createdAt = new Date().toISOString();
-    this.title = null;
+    this.createdAt = record?.createdAt ?? new Date().toISOString();
+    this.title = record?.title ?? null;
+    this.resetSessionState();
     this.entries = entriesFromHistory(messages);
-    this.changes = [];
-    this.anchor = null;
     this.rebuild(messages);
-    this.scroll = 0;
+    this.editor.clear();
 
     for (const t of this.tabs) t.current = false;
     const existing = this.tabs.find((t) => t.id === id);
     if (existing) {
       existing.current = true;
+      if (this.title) existing.title = this.title;
     } else {
-      const summaries = await this.options.listSessions(this.cwd).catch(() => []);
-      const found = summaries.find((s) => s.id === id);
-      const title = found?.title ?? "session";
       this.tabs = [
-        { id, title, current: true },
+        { id, title: record?.title ?? "session", current: true },
         ...this.tabs.filter((t) => !this.closedSessions.has(t.id) && !this.deletedSessions.has(t.id)),
       ];
       if (this.tabs.length > MAX_TABS) {
@@ -2836,11 +2938,12 @@ class TuiApp {
     this.sessionId = this.options.newSessionId();
     this.createdAt = new Date().toISOString();
     this.title = null;
+    // A new session starts empty in every sense — no queue, no attachments, no
+    // plan inherited from the one being left.
+    this.resetSessionState();
     this.entries = [];
-    this.changes = [];
-    this.anchor = null;
-    this.scroll = 0;
     this.rebuild([]);
+    this.editor.clear();
 
     for (const t of this.tabs) t.current = false;
     this.tabs = [
@@ -4497,14 +4600,7 @@ class TuiApp {
         }
       }
 
-      // 3. `ADD[+]` queues what is in the box instead of sending it, so a
-      // message can be lined up behind the turn that is running.
-      if (presses(box.addButton)) {
-        void this.queueEditorText();
-        return true;
-      }
-
-      // 4. `UPLOAD[+]` at the row's right edge: the platform's file-selection
+      // `UPLOAD[+]` at the row's right edge: the platform's file-selection
       // window. It is the only other control the row carries — send has no
       // button of its own (enter sends) and the variant has none either
       // (`/effort` changes it). The clipboard menu it once shared this corner
@@ -4531,6 +4627,22 @@ class TuiApp {
         }
         return true;
       }
+    }
+
+    // A queued message's `[Add+]` hands that one message to the turn in flight.
+    // Checked before the `[x]` because the two chips sit side by side and their
+    // generous hit boxes meet at the space between them.
+    const addChip = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "queued_add" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (addChip) {
+      this.addQueuedToTurn(addChip.index);
+      return true;
     }
 
     // A queued message's `[x]` drops that one message. It is handled before the
@@ -4563,6 +4675,24 @@ class TuiApp {
     );
     if (todoChip) {
       this.todoPanel = !this.todoPanel;
+      this.draw();
+      return true;
+    }
+
+    // The `[USAGE]` chip on the state row opens this session's numbers as a
+    // card. A card rather than a transcript note: a note scrolls away and
+    // becomes part of the conversation, and the question the button asks is
+    // about the session as it stands right now.
+    const usageChip = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "usage_button" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (usageChip) {
+      this.modal = this.usageModal();
       this.draw();
       return true;
     }

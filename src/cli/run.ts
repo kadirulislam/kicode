@@ -190,7 +190,8 @@ const USAGE = [
   "  kicode.json in the working directory, or in ~/.kicode/ for every project,",
   "  sets \"model\", \"provider\", \"providers\", \"fallbackModels\", \"fallback\",",
   "  \"fallbackAuto\", \"maxTokens\", \"theme\", \"baseUrl\", \"compaction\", \"brain\",",
-  "  \"mcp\", and \"mock\": true. A provider declares a baseUrl and the environment",
+  "  \"learning\" (\"auto\" or \"off\"), \"mcp\", and \"mock\": true. A provider declares a",
+  "  baseUrl and the environment",
   "  variable holding its key (\"apiKeyEnv\"); the file has no place for a key.",
   "  A failed turn asks what to do next (retry / another model / dismiss).",
   "  \"fallbackAuto\": true, or KICODE_FALLBACK_AUTO=on, instead lets a free",
@@ -214,6 +215,7 @@ const USAGE = [
   "  KI_BRAIN_PATH    optional, where skills and memories are saved (default",
   "                   ~/.kicode/brain, created on the first save; an existing",
   "                   ki-agent-brain at or above the working directory is used)",
+  "  KICODE_LEARNING  off disables the extra learning request after a turn",
   "  KICODE_SHELL     optional, which shell the bash tool runs commands through",
   "                   (default: a Git Bash on Windows when one is installed,",
   "                   otherwise Node's own default — set it to cmd.exe to",
@@ -672,6 +674,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         },
         mcp: mcpSummary(mcp),
         config: configFiles.files.length > 0 ? configFiles.files.join("  ") : null,
+        learning: config.learning,
         initial: { id: sessionId, createdAt, messages: restored ?? [] },
         listSessions: async (cwd) =>
           (await listSessions())
@@ -681,6 +684,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
               return {
                 id: record.id,
                 title: sessionTitle(record),
+                ...(record.createdAt ? { createdAt: record.createdAt } : {}),
                 ...(record.updatedAt ? { updatedAt: record.updatedAt } : {}),
                 messageCount: record.messages.length,
                 ...(record.model ? { model: record.model } : {}),
@@ -1134,9 +1138,11 @@ async function render(events: AsyncGenerator<AgentEvent, void, void>, io: Io): P
           `\u001b[2m${
             event.reason === "empty"
               ? "the model answered with nothing — asking again"
-              : event.reason === "work"
-                ? "tracked work is not finished — asking it to carry on"
-                : "the reply was cut off — asking it to carry on"
+              : event.reason === "steered"
+                ? "you added to this turn — answering it now"
+                : event.reason === "work"
+                  ? "tracked work is not finished — asking it to carry on"
+                  : "the reply was cut off — asking it to carry on"
           }\u001b[0m`,
         );
         break;

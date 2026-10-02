@@ -4,6 +4,7 @@ import { imageUrl, type PastedImage } from "../clipboard";
 import type { AssistantMessage, ChatMessage, ContentPart, FinishReason, Provider, Usage } from "../types";
 import type { QuotaReading } from "../routes/quota";
 import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions } from "./compaction";
+import { learnFromSession, type LearnResult } from "./learn";
 import type { PlanSnapshot, ToolRegistry } from "./tools/types";
 
 /**
@@ -49,7 +50,7 @@ export type AgentEvent =
    * mid-sentence, and "the cap did that" is not the same news as "the model
    * was finished".
    */
-  | { type: "continued"; reason: "truncated" | "empty" | "work"; attempt: number }
+  | { type: "continued"; reason: "truncated" | "empty" | "work" | "steered"; attempt: number }
   /**
    * The plan or goal tools' own state, as data, after they ran.
    *
@@ -230,6 +231,25 @@ export class Agent {
    * actually reaches for with Ctrl+C is the turn.
    */
   private turn: AbortController | null = null;
+  /**
+   * Messages the user pushed into the turn in flight, from the queue's `[Add+]`.
+   *
+   * Counted rather than set to a flag, because a reply already on its way has to
+   * be told apart from one that answered these words: the count is read as a
+   * high-water mark before each request, and a later reading that is higher
+   * means the model has not seen them yet — so the reply cannot be the last word
+   * on the turn.
+   */
+  private steered = 0;
+  /**
+   * Steered messages waiting for a safe moment to join the transcript.
+   *
+   * They cannot be appended where they arrived: words slipped between an
+   * assistant's tool calls and the results that answer them would break the
+   * pairing every endpoint insists on. The top of a loop iteration is the one
+   * point where that pairing is always whole.
+   */
+  private readonly pendingSteers: string[] = [];
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -334,6 +354,23 @@ export class Agent {
   }
 
   /**
+   * The learning pass over this session, for a caller to run after a turn.
+   *
+   * Deliberately not part of `send()`: a turn ends when the answer does, and a
+   * second request that exists to help a *future* session must not delay the
+   * one the user is reading. The caller fires this off and forgets it.
+   */
+  async learn(signal?: AbortSignal): Promise<LearnResult> {
+    return learnFromSession({
+      messages: this.turns,
+      provider: this.provider,
+      model: this.model,
+      cwd: this.cwd,
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  /**
    * Stops the turn in flight, if there is one.
    *
    * The stop is felt where the turn next talks to the provider: that request is
@@ -343,6 +380,27 @@ export class Agent {
    */
   cancel(): void {
     this.turn?.abort();
+  }
+
+  /**
+   * Puts a message into the turn in flight, to be answered before it ends.
+   *
+   * This is what the queue's `[Add+]` reaches for. A queue is right when the
+   * next words can wait; this is for when they cannot — the model is a step
+   * away from the wrong thing and the correction is worth more now than after
+   * the turn. The words join the transcript at the end, so the model reads them
+   * on its very next request, rather than after everything already queued.
+   *
+   * Nothing is sent here. A turn talks to the provider in exactly one place, and
+   * a request fired from here would race the one already in flight — the words
+   * are held until the loop reaches the next request. Returns false when no turn
+   * is running, which is the caller's cue to just run it.
+   */
+  steer(text: string): boolean {
+    if (!this.turn || this.turn.signal.aborted) return false;
+    this.pendingSteers.push(text);
+    this.steered += 1;
+    return true;
   }
 
   /**
@@ -414,6 +472,14 @@ export class Agent {
     for (let turn = 0; turn < this.maxTurns; turn++) {
       yield* this.maybeCompact();
 
+      // Words the user pushed into this turn while it was working. They join the
+      // transcript here, where whatever tools ran last have already appended
+      // their results, and never mid-stream — see `steer`.
+      if (this.pendingSteers.length > 0) {
+        for (const text of this.pendingSteers) this.messages.push({ role: "user", content: text });
+        this.pendingSteers.length = 0;
+      }
+
       // The ceiling is checked between requests, never mid-stream: a turn
       // already under way is finished, because stopping it would leave the
       // user with a half answer they did not ask to stop.
@@ -422,6 +488,10 @@ export class Agent {
         yield done("budget");
         return;
       }
+
+      // Read before the request is built, so a message pushed while this reply
+      // streams is recognised afterwards as one the model has not seen.
+      const steeredAtRequest = this.steered;
 
       let assistant: AssistantMessage | null = null;
       // Why the endpoint stopped writing. `length` means its own output cap cut
@@ -500,6 +570,16 @@ export class Agent {
         // empty reply that has run out of allowances is dropped rather than
         // recorded as a turn that said nothing.
         if (said) this.messages.push(assistant);
+
+        // The user pushed a message into this turn while the reply was being
+        // written. That reply answers the turn as it stood *before* those words
+        // arrived, so it cannot end the turn: they are in the transcript and
+        // nothing has answered them yet. The message is its own instruction, so
+        // it is not nudged or re-asked — the next request simply carries it.
+        if (this.steered > steeredAtRequest) {
+          yield { type: "continued", reason: "steered", attempt: 1 };
+          continue;
+        }
 
         // A turn ends at an answer — unless the work being tracked is not
         // finished. A reply that stops mid-task is not the end of the task,

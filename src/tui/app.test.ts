@@ -50,6 +50,8 @@ type Harness = {
   sentImages: PastedImage[][];
   /** The prompt text each turn was sent with, after mentions and docs. */
   sentPrompts: string[];
+  /** Messages pushed into the turn in flight, by the queue's `[Add+]`. */
+  steers: string[];
   /** How many times a turn was stopped with Ctrl+C. */
   cancels: number;
   /** Every token ceiling `/budget` set, in order. */
@@ -92,6 +94,7 @@ function harness(
   let compactions = 0;
   const sentImages: PastedImage[][] = [];
   const sentPrompts: string[] = [];
+  const steers: string[] = [];
   let cancels = 0;
   const budgets: number[] = [];
   let spent = 0;
@@ -144,6 +147,11 @@ function harness(
       cancel(): void {
         cancels += 1;
         stopped = true;
+      },
+      steer(text: string): boolean {
+        steers.push(text);
+        messages.push({ role: "user", content: text });
+        return !stopped;
       },
       async *send(prompt: string, images: readonly PastedImage[] = []): AsyncGenerator<AgentEvent> {
         sentImages.push([...images]);
@@ -247,6 +255,7 @@ function harness(
     sideQuestions,
     sentImages,
     sentPrompts,
+    steers,
     viewSaves,
     added,
     get cancels() {
@@ -1165,36 +1174,29 @@ describe("the queue and the commands that fill it", () => {
     await done;
   });
 
-  it("queues the box's text when ADD[+] is pressed", async () => {
-    const app = harness({}, { slow: 300 });
+  it("opens this session's usage from the [USAGE] chip, and escape closes it", async () => {
+    const app = harness({});
     const done = runTui(app.options);
     await tick(20);
 
-    app.input.write("first\r");
-    await tick(40);
-    app.input.write("staged message");
-    await tick(40);
-
-    // The button rides the first text row, so its own reported columns are
-    // where the press goes.
+    // The chip reports its own columns, so the press lands on it the way a
+    // mouse would.
     const lines = app.lastFrame().split(/\r?\n/);
-    const promptRow = lines.findIndex((line) => line.includes("ADD[+]"));
-    expect(promptRow).toBeGreaterThanOrEqual(0);
-    const col = (lines[promptRow] ?? "").indexOf("ADD[+]") + 4;
-    app.input.write(clickAt(promptRow + 1, col));
+    const row = lines.findIndex((line) => line.includes("[USAGE]"));
+    expect(row).toBeGreaterThanOrEqual(0);
+    const col = (lines[row] ?? "").indexOf("[USAGE]") + 3;
+    app.input.write(clickAt(row + 1, col));
     await tick(40);
 
-    expect(app.screen()).toContain("[queued in conversation] staged message");
-    // The box was cleared, so what is queued is not also what is typed — the
-    // row the button rides carries the placeholder again, not the message.
-    const after = app.lastFrame().split(/\r?\n/);
-    const afterRow = after.findIndex((line) => line.includes("ADD[+]"));
-    expect((after[afterRow] ?? "").includes("staged message")).toBe(false);
-    expect(after[afterRow] ?? "").toContain("Ask anything");
+    expect(app.lastFrame()).toContain("Session usage");
+    expect(app.lastFrame()).toContain("messages");
 
-    await tick(700);
-    await tick(700);
-    expect(app.sentPrompts).toContain("staged message");
+    // The card has nothing to answer, so escape — or the chip it names — is the
+    // only key it owns. A lone ESC is ambiguous on the wire, so it is held for
+    // `ESCAPE_GRACE_MS` (40) before it is flushed — wait past that.
+    app.input.write("\u001b");
+    await tick(120);
+    expect(app.lastFrame()).not.toContain("Session usage");
 
     app.input.write("\u0015/exit\r");
     await done;
@@ -1233,6 +1235,40 @@ describe("the queue and the commands that fill it", () => {
     expect(remaining).toContain("[x]");
     expect(remaining).toContain("third");
     expect(remaining).not.toContain("second");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("hands a queued message to the running turn when its [Add+] is clicked", async () => {
+    const app = harness({}, { slow: 300 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    app.input.write("second\r");
+    await tick(40);
+    app.input.write("third\r");
+    await tick(40);
+    expect(app.lastFrame()).toContain("Queued (2)");
+
+    const lines = app.lastFrame().split(/\r?\n/);
+    const header = lines.findIndex((line) => line.includes("Queued ("));
+    const tileRow = header + 1;
+    expect(lines[tileRow] ?? "").toContain("[Add+]");
+    const col = (lines[tileRow] ?? "").indexOf("[Add+]") + 3;
+    app.input.write(clickAt(tileRow + 1, col));
+    await tick(60);
+
+    // The words went into the turn that was already running — so the model reads
+    // them on its next request — and left the queue, so the drain cannot send
+    // them a second time as a turn of their own.
+    expect(app.steers).toEqual(["second"]);
+    expect(app.lastFrame()).toContain("Queued (1)");
+    const after = app.lastFrame().split(/\r?\n/);
+    const afterHeader = after.findIndex((line) => line.includes("Queued ("));
+    expect(after[afterHeader + 1] ?? "").toContain("third");
 
     app.input.write("\u0015/exit\r");
     await done;
@@ -1331,6 +1367,76 @@ describe("the tab bar", () => {
       { role: "user", content: "earlier work" },
       { role: "assistant", content: "done that" },
     ]);
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("keeps a session's name after switching away and back", async () => {
+    // A store that remembers whatever title a save carried, so `listSessions`
+    // answers with the real one rather than a fixture's fixed string.
+    const store = new Map<string, string>([
+      ["session-1", "this one"],
+      ["session-2", "another one"],
+    ]);
+    const app = harness({
+      listSessions: async () => [...store].map(([id, title]) => ({ id, title })),
+      loadSession: async (id) =>
+        id === "session-2"
+          ? [
+              { role: "user" as const, content: "earlier work" },
+              { role: "assistant" as const, content: "done that" },
+            ]
+          : [
+              { role: "user" as const, content: "hello" },
+              { role: "assistant" as const, content: "hi" },
+            ],
+      saveSession: async ({ id, title }) => {
+        if (title) store.set(id, title);
+      },
+    });
+    const done = runTui(app.options);
+    await tick(15);
+
+    app.input.write("hello\r");
+    await tick(30);
+    app.input.write("/rename renamed one\r");
+    await tick(30);
+    expect(store.get("session-1")).toBe("renamed one");
+
+    app.input.write(click(20)); // away to the other session
+    await tick(30);
+    app.input.write(click(2)); // and back
+    await tick(30);
+
+    // The stored title comes back with the session rather than being re-derived
+    // from its first message when the next turn saves it.
+    app.input.write("again\r");
+    await tick(30);
+    expect(store.get("session-1")).toBe("renamed one");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("does not carry one session's queue into the next", async () => {
+    const app = harness({ ...twoSessions }, { slow: 2000 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(30);
+    app.input.write("queued for the first\r");
+    await tick(30);
+    expect(app.lastFrame()).toContain("Queued (1)");
+
+    // What was queued behind this session's turn belongs to this session: the
+    // one being opened must not inherit it.
+    app.input.write(click(20));
+    await tick(40);
+    expect(app.lastFrame()).toContain("earlier work");
+    expect(app.lastFrame()).not.toContain("Queued (1)");
+    expect(app.lastFrame()).not.toContain("queued for the first");
 
     app.input.write("\u0015/exit\r");
     await done;

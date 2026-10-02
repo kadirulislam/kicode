@@ -30,6 +30,7 @@ function config(overrides: Partial<Config> = {}): Config {
     fallback: [],
     fallbackAuto: true,
     maxTokens: 0,
+    learning: "auto",
     compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 100_000 },
     ...overrides,
   };

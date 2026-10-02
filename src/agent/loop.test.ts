@@ -37,6 +37,31 @@ function abortError(): Error {
   return error;
 }
 
+/**
+ * Replays scripted turns, running `during` once after the first reply's opening
+ * token.
+ *
+ * That is the window a click on a queue tile's `[Add+]` lands in: the model is
+ * already writing, and the words it has not read yet arrive behind them.
+ */
+class SteeringProvider implements Provider {
+  readonly requests: ChatRequest[] = [];
+
+  constructor(
+    private readonly turns: StreamEvent[][],
+    private readonly during: () => void,
+  ) {}
+
+  async *stream(request: ChatRequest): AsyncGenerator<StreamEvent, void, void> {
+    this.requests.push(request);
+    const turn = this.turns[this.requests.length - 1] ?? [];
+    for (const [index, event] of turn.entries()) {
+      yield event;
+      if (index === 0 && this.requests.length === 1) this.during();
+    }
+  }
+}
+
 /** Streams one sentence, then goes on writing until the request is aborted. */
 class HangingProvider implements Provider {
   readonly requests: ChatRequest[] = [];
@@ -232,6 +257,71 @@ describe("Agent.send", () => {
 
     expect(finished(events)).toEqual({ type: "done", reason: "max-turns" });
     expect(provider.requests).toHaveLength(3);
+  });
+});
+
+describe("a message pushed into the turn in flight", () => {
+  it("is read on the next request, and the reply already streaming does not end the turn", async () => {
+    // The reply was written for the turn as it stood *before* the words arrived,
+    // so it cannot be the turn's last word — otherwise `[Add+]` would look like
+    // it worked and quietly change nothing.
+    let agent: Agent;
+    const provider = new SteeringProvider([answerTurn("here is the plan"), answerTurn("adjusted")], () => {
+      expect(agent.steer("actually, use tabs")).toBe(true);
+    });
+    agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "write the config");
+
+    expect(events).toContainEqual({ type: "continued", reason: "steered", attempt: 1 });
+    expect(finished(events)).toEqual({ type: "done", reason: "complete" });
+    // Two requests, because the first could not have read words that arrived
+    // while it was still being written.
+    expect(provider.requests).toHaveLength(2);
+    expect(provider.requests[1]?.messages.at(-1)).toEqual({ role: "user", content: "actually, use tabs" });
+    // Kept as conversation, so the correction survives into the next turn.
+    expect(agent.turns.some((message) => message.role === "user" && message.content === "actually, use tabs")).toBe(
+      true,
+    );
+  });
+
+  it("waits until the tool calls it interrupted have produced their results", async () => {
+    // A turn running tools carries on by itself, so nothing has to keep it open —
+    // but the words must not land between a tool call and the result that
+    // answers it, which is a pairing every endpoint rejects a request over.
+    let agent: Agent;
+    const provider = new SteeringProvider(
+      [toolCallTurn("call_1", "read", '{"path":"a.txt"}'), answerTurn("done")],
+      () => {
+        agent.steer("one moment — also read b.txt");
+      },
+    );
+    agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "read a.txt");
+
+    expect(events.filter((event) => event.type === "continued")).toEqual([]);
+    expect(provider.requests[1]?.messages.map((message) => message.role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "tool",
+      "user",
+    ]);
+  });
+
+  it("is refused when no turn is running, so the caller can just run it", () => {
+    const agent = new Agent({
+      provider: new FakeProvider([]),
+      tools: new ToolRegistry([echoTool]),
+      model: "m",
+      cwd: process.cwd(),
+    });
+
+    // Nothing in flight: there is no turn to put words into, and reporting that
+    // is how the queue knows to start one instead.
+    expect(agent.steer("hello")).toBe(false);
+    expect(agent.turns).toEqual([]);
   });
 });
 

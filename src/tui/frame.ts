@@ -260,7 +260,8 @@ export type TuiState = {
    * The queued messages themselves, drawn as tiles above the box.
    *
    * The count says a queue exists; these say what is in it, so a message queued
-   * by mistake can be seen and dropped before it runs.
+   * by mistake can be seen and dropped before it runs — or pushed into the turn
+   * already running, when waiting for it would be too late.
    */
   queue?: readonly string[];
   /** What the screen shows. Absent means the defaults, which a test relies on. */
@@ -338,8 +339,6 @@ export type PromptBox = {
   modeButton: { row: number; colStart: number; colEnd: number };
   /** The upload button at the box's right edge, in the columns it was drawn in. */
   uploadButton: { row: number; colStart: number; colEnd: number };
-  /** The add button beside it: the box's text joins the queue instead of sending. */
-  addButton: { row: number; colStart: number; colEnd: number };
 };
 
 export type RenderedFrame = {
@@ -394,8 +393,12 @@ export type PanelKind =
   | "modal_choice"
   /** The `[x]` on a queued message's tile, by its place in the queue. */
   | "queued"
+  /** The `[Add+]` on a queued tile: hand that message to the turn in flight. */
+  | "queued_add"
   /** The `TODO [n/m]` chip on the state row, which opens the plan panel. */
-  | "todo_button";
+  | "todo_button"
+  /** The `[USAGE]` chip on the state row, which opens this session's usage. */
+  | "usage_button";
 
 export type ClipboardMenuState = {
   items: readonly PickItem[];
@@ -637,7 +640,6 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
         // The box's three buttons ride the same shift as its rows.
         modeButton: { ...bottom.prompt.modeButton, row: bottom.prompt.modeButton.row + tabRowCount + bodyRows + 1 },
         uploadButton: { ...bottom.prompt.uploadButton, row: bottom.prompt.uploadButton.row + tabRowCount + bodyRows + 1 },
-        addButton: { ...bottom.prompt.addButton, row: bottom.prompt.addButton.row + tabRowCount + bodyRows + 1 },
       }
     : null;
 
@@ -2069,15 +2071,23 @@ function renderBottom(
 
   // Messages queued while a turn was running wait here, above the box, so what
   // will run next is visible without reaching for `/queue`. Each queued message
-  // is its own row with an `[x]` that removes just that one: a message queued
-  // by mistake is dropped by clicking it, not by clearing the queue and
-  // retyping the rest.
+  // is its own row with two controls: `[x]` drops just that one, and `[Add+]`
+  // hands it to the turn already running — a queue is right when the next words
+  // can wait, and the second button is for when they cannot.
   if (boxShown && state.queue && state.queue.length > 0) {
     const queueWidth = Math.min(width, 76);
     const inside = Math.max(queueWidth - 2, 20);
     const borderStyle = styles.faint;
     const leftPad = span(indent);
-    const chipWidth = textWidth("[x]");
+    const addLabel = "[Add+]";
+    const dropLabel = "[x]";
+    const addWidth = textWidth(addLabel);
+    const dropWidth = textWidth(dropLabel);
+    // The two chips travel as one block, `[Add+]` first: reaching for a queued
+    // message to make the agent read it *now* is the common case, and dropping
+    // it is the rarer, more final act — so the order is by which is wanted more
+    // often, not by which is listed first anywhere else.
+    const chipsWidth = addWidth + 1 + dropWidth;
     const topContent = `─ Queued (${state.queue.length}) `;
     push(
       [
@@ -2091,24 +2101,28 @@ function renderBottom(
     );
     state.queue.forEach((text, index) => {
       const body = ` ${index + 1}. ${text}`;
-      const truncated = cut(body, Math.max(inside - chipWidth - 2, 4));
+      const truncated = cut(body, Math.max(inside - chipsWidth - 2, 4));
       const truncWidth = textWidth(truncated);
-      const gap = Math.max(inside - truncWidth - chipWidth - 1, 0);
+      const gap = Math.max(inside - truncWidth - chipsWidth - 1, 0);
       const row = rows.length;
-      const chipCol = margin + 2 + truncWidth + gap;
+      const addCol = margin + 2 + truncWidth + gap;
+      const dropCol = addCol + addWidth + 1;
       push(
         [
           leftPad,
           span("│", borderStyle),
           span(truncated, styles.text),
           span(" ".repeat(gap)),
-          span("[x]", styles.hintKey),
+          span(addLabel, styles.hintKey),
+          span(" ", borderStyle),
+          span(dropLabel, styles.hintKey),
           span(" ", borderStyle),
           span("│", borderStyle),
         ],
         theme.bg,
       );
-      hits.push({ kind: "queued", row, index, colStart: chipCol, colEnd: chipCol + chipWidth - 1 });
+      hits.push({ kind: "queued_add", row, index, colStart: addCol, colEnd: addCol + addWidth - 1 });
+      hits.push({ kind: "queued", row, index, colStart: dropCol, colEnd: dropCol + dropWidth - 1 });
     });
     push([leftPad, span("└", borderStyle), span("─".repeat(inside), borderStyle), span("┘", borderStyle)], theme.bg);
   }
@@ -2158,19 +2172,12 @@ function renderBottom(
     // either.
     const uploadText = "UPLOAD[+]";
     const uploadLen = textWidth(uploadText);
-    // `ADD[+]` queues what is in the box instead of sending it, so a message
-    // can be lined up behind the running turn. It is shown only when there is a
-    // turn to queue behind — or a paused session to queue into — because while
-    // the box is idle enter already sends, and the button would take width from
-    // every prompt to say something the keyboard already does. It sits beside
-    // the upload button in the same idiom: a word and a `[+]`, so neither glyph
-    // is a riddle.
-    const showAdd = state.busy !== null || state.isPaused === true;
-    const addText = "ADD[+]";
-    const addLen = textWidth(addText);
-    // The trailing spaces are part of the controls, so the gap arithmetic
-    // matches exactly what is drawn and the row never overflows.
-    const rightLen = (showAdd ? addLen + 1 : 0) + uploadLen + 1;
+    // The trailing space is part of the control, so the gap arithmetic matches
+    // exactly what is drawn and the row never overflows. Queuing is a keyboard
+    // action — enter while a turn runs — so the box carries no button for it;
+    // the only control a click can do that the keyboard cannot is opening the
+    // platform's file dialog, and that is what is left here.
+    const rightLen = uploadLen + 1;
 
     // The mode pill, on the box's own left edge.
     //
@@ -2198,12 +2205,7 @@ function renderBottom(
       span(modeWordText, mode.style),
       span("]", styles.pillBorder),
     ];
-    const rightControls: Span[] = [
-      ...(showAdd ? [span("ADD", styles.hintKey), span("[+]", styles.plusButton), span(" ")] : []),
-      span("UPLOAD", styles.hintKey),
-      span("[+]", styles.plusButton),
-      span(" "),
-    ];
+    const rightControls: Span[] = [span("UPLOAD", styles.hintKey), span("[+]", styles.plusButton), span(" ")];
 
     // The box is fill and nothing else: no bar down its left edge, no border,
     // and two rows of its own fill above the text and two below. The fill is
@@ -2262,13 +2264,6 @@ function renderBottom(
       // presses, so neither it nor a future change has to redo this arithmetic.
       modeButton: { row: firstTextRow, colStart: margin + 3, colEnd: margin + 2 + pillWidth },
       uploadButton: { row: firstTextRow, colStart: usable - uploadLen, colEnd: usable - 1 },
-      // `ADD[+]` leads the right-hand controls, so it starts `rightLen` cells
-      // from the row's end. When it is not shown its box is put off to the side
-      // with no columns to hit, which is simpler than making the caller ask
-      // whether the button exists.
-      addButton: showAdd
-        ? { row: firstTextRow, colStart: usable - rightLen + 1, colEnd: usable - rightLen + addLen }
-        : { row: firstTextRow, colStart: -1, colEnd: -1 },
     };
   }
 
@@ -2296,13 +2291,35 @@ function renderBottom(
   const stateSpans = modeSpans(state, styles, width, indent, !boxShown);
   // Not while a card is up: the panel it opens is hidden then, and a button
   // that visibly does nothing is worse than one that is not there.
-  const chipSpans = state.plan && !state.modal ? planChip(state.plan, styles) : null;
-  if (chipSpans) {
-    const chipWidth = spansWidth(chipSpans);
-    const gap = Math.max(usable - spansWidth(stateSpans) - chipWidth - 1, 1);
-    const colStart = spansWidth(stateSpans) + gap + 1;
-    hits.push({ kind: "todo_button", row: rows.length, index: 0, colStart, colEnd: colStart + chipWidth - 1 });
-    push([...stateSpans, span(" ".repeat(gap)), ...chipSpans], stateRowBg);
+  // `[USAGE]` rides there too: the session's own cost is the same kind of
+  // status, and it is the one thing the row can offer that asks a question with
+  // a number for an answer. It is always present — unlike the TODO chip, which
+  // only exists when something is tracked — so a session with nothing running
+  // still has a way to ask what it has spent.
+  const chips: { kind: PanelKind; spans: Span[] }[] = [];
+  if (boxShown && state.plan) {
+    const plan = planChip(state.plan, styles);
+    if (plan) chips.push({ kind: "todo_button", spans: plan });
+  }
+  if (boxShown) {
+    chips.push({
+      kind: "usage_button",
+      spans: [span("[", styles.pillBorder), span("USAGE", styles.hintKey), span("]", styles.pillBorder)],
+    });
+  }
+  if (chips.length > 0) {
+    const chipsWidth = chips.reduce((sum, chip) => sum + spansWidth(chip.spans), 0) + (chips.length - 1);
+    const gap = Math.max(usable - spansWidth(stateSpans) - chipsWidth - 1, 1);
+    const rowSpans: Span[] = [...stateSpans, span(" ".repeat(gap))];
+    let col = spansWidth(stateSpans) + gap + 1;
+    chips.forEach((chip, index) => {
+      if (index > 0) rowSpans.push(span(" "));
+      rowSpans.push(...chip.spans);
+      const chipWidth = spansWidth(chip.spans);
+      hits.push({ kind: chip.kind, row: rows.length, index: 0, colStart: col, colEnd: col + chipWidth - 1 });
+      col += chipWidth + 1;
+    });
+    push(rowSpans, stateRowBg);
   } else {
     push(stateSpans, stateRowBg);
   }

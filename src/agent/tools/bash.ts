@@ -45,6 +45,20 @@ const READ_ONLY_COMMANDS = new Set([
   "whoami",
   "date",
   "echo",
+  // Filters: they read a stream and print. A command that can rewrite its
+  // input (`sort -o`, `sed -i`, `tee`, `xargs`) is deliberately absent — the
+  // classifier does not parse flags deeply enough to tell those apart.
+  "uniq",
+  "cut",
+  "tr",
+  "nl",
+  "basename",
+  "dirname",
+  "realpath",
+  "readlink",
+  "printenv",
+  "id",
+  "ps",
   // Windows
   "dir",
   "type",
@@ -53,6 +67,53 @@ const READ_ONLY_COMMANDS = new Set([
   "more",
   "tree",
   "ver",
+]);
+
+/** A listing flag: it makes a following name a filter rather than a creation. */
+const GIT_LISTING_FLAGS = new Set(["-l", "--list"]);
+
+/** Flags that change a repository rather than reporting on it. */
+const GIT_WRITE_FLAGS = new Set([
+  "-d",
+  "-D",
+  "-m",
+  "-M",
+  "-c",
+  "-C",
+  "-f",
+  "-u",
+  "-t",
+  "-e",
+  "-s",
+  "--delete",
+  "--move",
+  "--copy",
+  "--force",
+  "--set-upstream-to",
+  "--unset-upstream",
+  "--edit-description",
+  "--annotate",
+  "--sign",
+  "--create-reflog",
+  "--track",
+  "--no-track",
+  "--add",
+  "--remove",
+  "--rename",
+  "--set-url",
+  "--set-head",
+]);
+
+/** The `git config` flags that only read, so `key value` can be told from `key`. */
+const GIT_CONFIG_READ_FLAGS = new Set([
+  "-l",
+  "--list",
+  "--get",
+  "--get-all",
+  "--get-regexp",
+  "--get-urlmatch",
+  "--get-color",
+  "--get-colorbool",
 ]);
 
 /**
@@ -95,10 +156,14 @@ export type ReadOnlyVerdict = { ok: true } | { ok: false; reason: string };
  *   reads: `ls -la | head -20` changes nothing, and refusing it was the one
  *   false negative users kept hitting.
  * - `find` actions (`-exec`, `-delete`, …) are refused; bare `find` prints.
- * - `git` must name a read-only subcommand; `git branch` lists but
- *   `git branch -D` deletes, so only the reported-on subcommands are allowed.
- * - An unknown first word is refused. `FOO=bar ls` is refused too, which is the
- *   right trade: the classifier is for a plan, not for getting work done.
+ * - `git` is allowed its reporting subcommands, and three more on a stricter
+ *   rule: `branch`, `tag`, `remote` and `config` read when they name nothing
+ *   (or after a listing flag), and write when they do — `git branch` lists,
+ *   `git branch feature` creates. A writing flag is refused either way.
+ * - Assignments in front (`FOO=bar ls`) are stripped, because the command they
+ *   set the variable for is still the thing being classified, and refusing
+ *   `FOO=bar ls` was a false negative with no safety in it.
+ * - An unknown first word is still refused.
  *
  * `checkReadOnlyCommand` says which of those it was, so the refusal the model
  * reads names the actual problem instead of sending it guessing again.
@@ -135,26 +200,57 @@ function checkStage(stage: string, piped: boolean): ReadOnlyVerdict {
   if (!stage) return { ok: false, reason: "one stage of the pipeline has no command in it" };
 
   const tokens = stage.split(/\s+/);
-  const first = (tokens[0] ?? "").toLowerCase();
+  // `FOO=bar ls` sets a variable for one command. The command is still the
+  // thing being classified, so the assignments come off the front first.
+  let start = 0;
+  while (start < tokens.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[start] ?? "")) start += 1;
+  const parts = tokens.slice(start);
+  const first = (parts[0] ?? "").toLowerCase();
 
   // A pipeline stage is named in full, so the model can see which part of the
   // line was the problem rather than re-reading the whole thing.
   const subject = piped ? `the pipeline stage \`${stage}\`` : `\`${first}\``;
 
+  if (!first) return { ok: false, reason: "the stage sets a variable but runs no command" };
   if (!READ_ONLY_COMMANDS.has(first) && first !== "git") {
     return { ok: false, reason: `${subject} is not a command KiCode knows only reads` };
   }
 
-  const flag = tokens.find((token) => DANGEROUS_FLAGS.includes(token.toLowerCase()));
+  const flag = parts.find((token) => DANGEROUS_FLAGS.includes(token.toLowerCase()));
   if (flag) return { ok: false, reason: `${subject} uses \`${flag}\`, which can run or write something` };
 
   if (first === "git") {
-    const sub = (tokens[1] ?? "").toLowerCase();
+    const sub = (parts[1] ?? "").toLowerCase();
     // `git reflog expire` is the one reported-on subcommand with a writing
     // form, so it is narrowed to the listing on its own.
     if (sub === "reflog") {
-      if (tokens.length === 2 || (tokens[2] ?? "").toLowerCase().startsWith("show")) return { ok: true };
+      if (parts.length === 2 || (parts[2] ?? "").toLowerCase().startsWith("show")) return { ok: true };
       return { ok: false, reason: "`git reflog expire` writes to the repository" };
+    }
+    // `branch`, `tag`, `remote` and `config` do both, decided by their
+    // arguments: a name creates, and only a listing flag makes a name a filter.
+    if (sub === "branch" || sub === "tag" || sub === "remote" || sub === "config") {
+      const rest = parts.slice(2);
+      const base = (token: string): string => (token.split("=")[0] ?? "").toLowerCase();
+      const writing = rest.find((token) => GIT_WRITE_FLAGS.has(base(token)));
+      if (writing) return { ok: false, reason: `\`git ${sub} ${writing}\` can change the repository` };
+      const positional = rest.filter((token) => !token.startsWith("-"));
+      if (sub === "config") {
+        // `git config key` prints the value; `git config key value` sets one.
+        const reads = rest.some((token) => GIT_CONFIG_READ_FLAGS.has(base(token)));
+        if (!reads && positional.length >= 2) {
+          return { ok: false, reason: "`git config` with a value writes a setting" };
+        }
+        return { ok: true };
+      }
+      const listing = rest.some((token) => GIT_LISTING_FLAGS.has(base(token)));
+      if (positional.length > 0 && !listing) {
+        return {
+          ok: false,
+          reason: `\`git ${sub}\` with a name creates one; use \`git ${sub} --list\` to read them`,
+        };
+      }
+      return { ok: true };
     }
     if (!READ_ONLY_GIT.has(sub)) {
       return { ok: false, reason: `${piped ? `the pipeline stage \`git ${sub}\`` : `\`git ${sub}\``} is not a read-only git subcommand` };

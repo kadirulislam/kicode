@@ -269,9 +269,11 @@ export function applyEvent(
         text:
           event.reason === "empty"
             ? "the model answered with nothing — asking again"
-            : event.reason === "work"
-              ? "tracked work is not finished — asking it to carry on"
-              : "the reply was cut off — asking it to carry on",
+            : event.reason === "steered"
+              ? "you added to this turn — answering it now"
+              : event.reason === "work"
+                ? "tracked work is not finished — asking it to carry on"
+                : "the reply was cut off — asking it to carry on",
         tone: "dim",
       });
       return;

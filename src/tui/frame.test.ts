@@ -344,7 +344,9 @@ describe("the bottom bar", () => {
     // fill is what marks it out. The mode is not here — it is the pill in the
     // box above, which is a button now, and a row that said it again would
     // spend a line on a word the eye has already been given.
-    expect(lines[row]?.trimStart()).toBe("gpt-5.6-luna · high");
+    // The `[USAGE]` chip rides the row's right end, so the words lead it.
+    expect(lines[row]?.trimStart().startsWith("gpt-5.6-luna · high")).toBe(true);
+    expect(lines[row]).toContain("[USAGE]");
     // The pill is on the row being typed into, at its left, where the words
     // will start once there are some.
     expect(lines[row - 3]).toContain("[BUILD]");
@@ -1485,19 +1487,34 @@ describe("the box's own two buttons", () => {
 });
 
 describe("the queue above the box", () => {
-  it("shows the add button only while there is a turn to queue behind", () => {
-    // Idle, enter already sends, so the button would take width from every
-    // prompt to say something the keyboard already does.
+  it("carries no ADD button — queuing is the enter key's job", () => {
+    // A queued message is added by pressing enter while a turn runs, so the box
+    // offers only the one click-only control it has: uploading a file.
     expect(draw({}).plain.join("\n")).not.toContain("ADD[+]");
+    expect(draw({ busy: "thinking…" }).plain.join("\n")).not.toContain("ADD[+]");
 
     const running = draw({ busy: "thinking…" });
-    expect(running.plain.join("\n")).toContain("ADD[+]");
+    expect(running.plain.join("\n")).toContain("UPLOAD[+]");
     const box = running.frame.prompt!;
-    const row = running.plain[box.addButton.row - 1] ?? "";
-    expect(row.slice(box.addButton.colStart - 1, box.addButton.colEnd)).toBe("ADD[+]");
-    // It leads the right-hand controls and stays clear of the words.
-    expect(box.addButton.colEnd).toBeLessThan(box.uploadButton.colStart);
-    expect(box.addButton.colStart).toBeGreaterThan(box.textLeft);
+    const row = running.plain[box.uploadButton.row - 1] ?? "";
+    expect(row.slice(box.uploadButton.colStart - 1, box.uploadButton.colEnd)).toBe("UPLOAD[+]");
+  });
+
+  it("puts [Add+] before [x] on every tile, each with its own columns", () => {
+    const { frame, plain } = draw({ busy: "thinking…", queue: ["first one", "second one"] });
+    const adds = frame.rows.filter((row) => row.kind === "queued_add");
+    const drops = frame.rows.filter((row) => row.kind === "queued");
+
+    expect(adds).toHaveLength(2);
+    for (const [index, hit] of adds.entries()) {
+      const line = plain[hit.row - 1] ?? "";
+      expect(line.slice(hit.colStart! - 1, hit.colEnd!)).toBe("[Add+]");
+      expect(hit.index).toBe(index);
+      // `[Add+]` sits first, so the space between the two chips is part of its
+      // hit box: a click that lands a column late must read as "send it now",
+      // never as "throw it away".
+      expect(hit.colEnd!).toBeLessThan(drops[index]!.colStart! - 1);
+    }
   });
 
   it("draws each queued message with an [x] the app can hit", () => {
@@ -1514,6 +1531,25 @@ describe("the queue above the box", () => {
       expect(hit.index).toBe(index);
       expect(line).toContain(["first one", "second one"][index]!);
     }
+  });
+});
+
+describe("the usage chip", () => {
+  it("is always on the state row, and reports its own columns", () => {
+    // Unlike the TODO chip, this one exists even on a quiet session: "what has
+    // this cost me?" is a question every session can answer.
+    const { frame, plain } = draw({});
+    const hit = frame.rows.find((row) => row.kind === "usage_button");
+    expect(hit).toBeDefined();
+    const line = plain[hit!.row - 1] ?? "";
+    expect(line.slice(hit!.colStart! - 1, hit!.colEnd!)).toBe("[USAGE]");
+  });
+
+  it("rides beside the TODO chip without overlapping it", () => {
+    const { frame } = draw({ plan: { todos: [{ text: "one", done: false }], goal: null } });
+    const todo = frame.rows.find((row) => row.kind === "todo_button")!;
+    const usage = frame.rows.find((row) => row.kind === "usage_button")!;
+    expect(todo.colEnd!).toBeLessThan(usage.colStart!);
   });
 });
 
@@ -1756,7 +1792,9 @@ describe("the rows a click can land on", () => {
   });
 
   it("reports only the transcript's own targets, and the card's when one is up", () => {
-    expect(draw({ entries: conversation }).frame.rows).toEqual([]);
+    // The transcript itself is not clickable; the one target an idle frame has
+    // is the `[USAGE]` chip on the state row.
+    expect(draw({ entries: conversation }).frame.rows.map((row) => row.kind)).toEqual(["usage_button"]);
     // A card owns the screen: its own chips and the footer's close box are the
     // only things left to press.
     const card = draw({ entries: conversation, modal: permission() }).frame.rows;
