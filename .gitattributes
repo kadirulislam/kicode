@@ -1,0 +1,38 @@
+# Line endings, pinned.
+#
+# Without this, Git on Windows (where `core.autocrlf=true` is the installer's
+# default) rewrites every text file to CRLF on checkout. A working tree that has
+# LF then disagrees with what Git is about to write, so the next command reports
+# the whole file as changed and every commit carries a diff that has no content
+# in it. `eol=lf` overrides `core.autocrlf` and makes the repository, the
+# working tree and CI (Linux) agree on one ending.
+#
+# `text=auto` lets Git decide what is text by looking at the content, so a file
+# that is added later does not need a rule of its own.
+* text=auto eol=lf
+
+# The one place CRLF is the correct answer: a `.bat`/`.cmd` run by cmd.exe can
+# misbehave with LF endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries are never line-ending-converted — normalizing their bytes is
+# corruption, and it happens silently.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.mp4 binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+
+# Generated, and huge in a diff: keep the lockfile out of review.
+package-lock.json -diff linguist-generated
