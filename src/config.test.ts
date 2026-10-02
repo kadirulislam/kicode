@@ -9,7 +9,9 @@ import {
   loadConfig,
   validateConfig,
 } from "./config";
+import { shouldCompact } from "./agent/compaction";
 import type { FileSettings } from "./settings-file";
+import type { ChatMessage } from "./types";
 import { DEFAULT_THEME } from "./tui/theme";
 
 /** The environment on a machine that has a gateway configured globally. */
@@ -136,6 +138,18 @@ describe("compaction settings", () => {
     // The ceiling is the number that actually fires, so the window has to stay
     // above it or the window would decide and this would never trigger.
     expect(DEFAULT_CONTEXT_TOKENS).toBeGreaterThan(DEFAULT_COMPACT_AT_TOKENS);
+  });
+
+  it("fires at 150K, well inside the window rather than at its edge", () => {
+    // The pair of defaults is the whole point. `shouldCompact` takes the smaller
+    // of the window-minus-reserve and the ceiling, so a window that did not
+    // exceed the ceiling would decide instead and 150K would never be the number
+    // that fires — which is why the two are asserted against each other above.
+    const options = loadConfig({}, {}).compaction;
+    const session = (tokens: number): ChatMessage[] => [{ role: "user", content: "x".repeat(tokens * 4) }];
+
+    expect(shouldCompact(session(149_000), options)).toBe(false);
+    expect(shouldCompact(session(151_000), options)).toBe(true);
   });
 
   it("reads the compact threshold from the environment and the file", () => {

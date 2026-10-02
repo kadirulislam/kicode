@@ -1,10 +1,11 @@
 # KiCode Project Status
 
 **Current Version:** 0.1.0  
-**Build Status:** Stable, All 1074 Tests Passing (51 test suites)  
+**Build Status:** Stable, All 1083 Tests Passing (51 test suites)  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
-**Binary Distribution:** Built (`dist/cli.js`, ~537 KB) via `npm run build`  
-**Auto-compaction:** Fires at **150K** estimated tokens (`compactAt`), inside a 200K default window
+**Binary Distribution:** Built (`dist/cli.js`, ~543 KB) via `npm run build`  
+**Auto-compaction:** Fires at **150K** estimated tokens (`compactAt`), inside a 200K default window  
+**Credential guard:** `npm run check:secrets` (also a git pre-commit hook, and the first CI step)
 
 ---
 

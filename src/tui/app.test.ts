@@ -3,6 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { projectSlug } from "../agent/brain";
+import type { LearnResult } from "../agent/learn";
 import type { Agent, AgentEvent, ApprovalDecision, ApproveFn } from "../agent/loop";
 import type { AskAnswer, AskFn, AskQuestion } from "../agent/ask";
 import type { PlanSnapshot } from "../agent/tools/types";
@@ -24,6 +26,23 @@ import { DEFAULT_THEME, buildStyles, themeByName, themeNames } from "./theme";
 
 const strip = (text: string): string => text.replace(/\u001b\[[0-9;?]*[A-Za-z]/g, "");
 const tick = (ms = 8): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Waits for the screen to say something, rather than guessing how long it takes.
+ *
+ * A fixed sleep is a bet on how fast the machine is, and this suite runs fifty
+ * files at once: the same `tick(30)` that is generous alone is not enough under
+ * load, so a test that passed a moment ago fails on the next run. Polling makes
+ * the wait about the thing being waited for. It does not *assert* — the
+ * assertion stays in the test, where its failure can say what it expected.
+ */
+async function until(app: { screen: () => string }, text: string, timeout = 3_000): Promise<void> {
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    if (app.screen().includes(text)) return;
+    await tick(10);
+  }
+}
 
 type Harness = {
   input: PassThrough;
@@ -52,6 +71,8 @@ type Harness = {
   sentPrompts: string[];
   /** Messages pushed into the turn in flight, by the queue's `[Add+]`. */
   steers: string[];
+  /** How many times the learning pass ran, automatic or asked for. */
+  learns: number;
   /** How many times a turn was stopped with Ctrl+C. */
   cancels: number;
   /** Every token ceiling `/budget` set, in order. */
@@ -71,7 +92,14 @@ type Harness = {
  */
 function harness(
   over: Partial<TuiOptions> = {},
-  flags: { slow?: number; approve?: boolean; questions?: AskQuestion[]; failWith?: Error; plan?: PlanSnapshot } = {},
+  flags: {
+    slow?: number;
+    approve?: boolean;
+    questions?: AskQuestion[];
+    failWith?: Error;
+    plan?: PlanSnapshot;
+    learn?: LearnResult;
+  } = {},
 ): Harness {
   const { slow = 0, approve = false, questions, failWith } = flags;
   const input = new PassThrough();
@@ -95,6 +123,7 @@ function harness(
   const sentImages: PastedImage[][] = [];
   const sentPrompts: string[] = [];
   const steers: string[] = [];
+  let learns = 0;
   let cancels = 0;
   const budgets: number[] = [];
   let spent = 0;
@@ -152,6 +181,10 @@ function harness(
         steers.push(text);
         messages.push({ role: "user", content: text });
         return !stopped;
+      },
+      async learn(): Promise<LearnResult> {
+        learns += 1;
+        return flags.learn ?? { added: [], skipped: [] };
       },
       async *send(prompt: string, images: readonly PastedImage[] = []): AsyncGenerator<AgentEvent> {
         sentImages.push([...images]);
@@ -256,6 +289,9 @@ function harness(
     sentImages,
     sentPrompts,
     steers,
+    get learns() {
+      return learns;
+    },
     viewSaves,
     added,
     get cancels() {
@@ -317,6 +353,8 @@ describe("runTui", () => {
   });
 
   it("stops the turn on ctrl+c instead of quitting, and quits on the next press", async () => {
+    // Short on purpose, unlike the queue tests: this one waits the turn *out*
+    // after cancelling it, and the wait is a fixed `tick(400)` below.
     const app = harness({}, { slow: 300 });
     const done = runTui(app.options);
     await tick();
@@ -847,9 +885,11 @@ describe("runTui", () => {
     app.input.write("/sessions\r");
     await tick(20);
 
-    // The system's own format — `Intl` with no locale named — and not the ISO
-    // stamp the record stores, which is data and reads as data.
-    expect(app.lastFrame()).toContain(when.toLocaleDateString(undefined, { dateStyle: "medium" }));
+    // `DD-MM-YYYY` on the local clock, and not the ISO stamp the record stores,
+    // which is UTC and reads as data.
+    const pad = (value: number): string => String(value).padStart(2, "0");
+    const expected = `${pad(when.getDate())}-${pad(when.getMonth() + 1)}-${when.getFullYear()}`;
+    expect(app.lastFrame()).toContain(expected);
     expect(app.lastFrame()).not.toContain(when.toISOString().slice(0, 10));
 
     // Past the app's escape grace, which exists to tell a lone Escape from the
@@ -910,6 +950,8 @@ describe("runTui", () => {
   });
 
   it("queues a second prompt while a turn is running, and runs it after the first", async () => {
+    // Short on purpose: this one waits the turns out with a fixed `tick(500)`
+    // below, so a longer turn than that wait would simply never finish in time.
     const app = harness({}, { slow: 400 });
     const done = runTui(app.options);
     await tick(20);
@@ -1222,6 +1264,12 @@ describe("the queue and the commands that fill it", () => {
     expect(app.lastFrame()).toContain("Session usage");
     expect(app.lastFrame()).toContain("messages");
 
+    // The start reads as `DD-MM-YYYY HH:mm` on the local clock. It used to print
+    // the stored stamp verbatim — `2026-10-02T05:38:58.828Z` — which is UTC, so
+    // it named the wrong hour and read as data rather than a time.
+    expect(app.lastFrame()).toMatch(/session started \d{2}-\d{2}-\d{4} \d{2}:\d{2} \(/);
+    expect(app.lastFrame()).not.toMatch(/session started \d{4}-\d{2}-\d{2}T/);
+
     // The card has nothing to answer, so escape — or the chip it names — is the
     // only key it owns. A lone ESC is ambiguous on the wire, so it is held for
     // `ESCAPE_GRACE_MS` (40) before it is flushed — wait past that.
@@ -1234,7 +1282,11 @@ describe("the queue and the commands that fill it", () => {
   });
 
   it("drops one queued message when its [x] is clicked", async () => {
-    const app = harness({}, { slow: 300 });
+    // Deliberately generous: what these tests need is a turn that is still
+    // running when the next prompt arrives, and how long that takes is the one
+    // thing a loaded machine cannot be trusted to hold to. The margin is set so
+    // the turn outlasts the few ticks of setup by a wide factor.
+    const app = harness({}, { slow: 1_200 });
     const done = runTui(app.options);
     await tick(20);
 
@@ -1272,7 +1324,11 @@ describe("the queue and the commands that fill it", () => {
   });
 
   it("hands a queued message to the running turn when its [Add+] is clicked", async () => {
-    const app = harness({}, { slow: 300 });
+    // Deliberately generous: what these tests need is a turn that is still
+    // running when the next prompt arrives, and how long that takes is the one
+    // thing a loaded machine cannot be trusted to hold to. The margin is set so
+    // the turn outlasts the few ticks of setup by a wide factor.
+    const app = harness({}, { slow: 1_200 });
     const done = runTui(app.options);
     await tick(20);
 
@@ -1309,7 +1365,7 @@ describe("the queue and the commands that fill it", () => {
   });
 
   it("opens the queue as a list whose rows the keyboard can steer and drop", async () => {
-    const app = harness({}, { slow: 400 });
+    const app = harness({}, { slow: 1_200 });
     const done = runTui(app.options);
     await tick(20);
 
@@ -1347,7 +1403,7 @@ describe("the queue and the commands that fill it", () => {
   });
 
   it("takes a queued message back into the prompt to rewrite it with enter", async () => {
-    const app = harness({}, { slow: 400 });
+    const app = harness({}, { slow: 1_200 });
     const done = runTui(app.options);
     await tick(20);
 
@@ -1470,6 +1526,139 @@ describe("the tab bar", () => {
       { role: "user", content: "earlier work" },
       { role: "assistant", content: "done that" },
     ]);
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("runs the learning pass on /learn, and says what it kept and what it skipped", async () => {
+    // The automatic pass is silent by design — it exists to help a future
+    // session and must never interrupt this one. Asking for it is the other
+    // case, and then "nothing was added" is an answer the user is owed.
+    const app = harness({}, {
+      learn: {
+        added: [{ kind: "skill", name: "git-bisect", text: "Find the commit that broke it: git bisect start, then mark good and bad." }],
+        skipped: [{ kind: "memory", name: "kicode", text: "this was already recorded" }],
+      },
+    });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(30);
+
+    app.input.write("\u0015/learn\r");
+    await tick(40);
+
+    expect(app.lastFrame()).toContain("learned 1 thing(s)");
+    expect(app.lastFrame()).toContain("git-bisect");
+    expect(app.lastFrame()).toContain("already known");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("says so on /learn when there is no conversation to learn from", async () => {
+    const app = harness({});
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("/learn\r");
+    await tick(30);
+
+    expect(app.lastFrame()).toContain("nothing to learn from yet");
+
+    app.input.write("/exit\r");
+    await done;
+  });
+
+  it("reads the brain back on /memory, from wherever KI_BRAIN_PATH points", async () => {
+    // Pointed at a temporary brain so the answer is this test's rather than
+    // whatever happens to be on the machine running it.
+    const home = await mkdtemp(path.join(tmpdir(), "kicode-memory-"));
+    const slug = projectSlug("C:\\dev\\projects\\kicode");
+    await mkdir(path.join(home, "memories", "projects"), { recursive: true });
+    await writeFile(path.join(home, "memories", "projects", `${slug}.md`), "# notes\n\n- prefers tabs\n", "utf8");
+
+    const previous = process.env.KI_BRAIN_PATH;
+    process.env.KI_BRAIN_PATH = home;
+    try {
+      const app = harness({});
+      const done = runTui(app.options);
+      await tick(20);
+
+      app.input.write("/memory\r");
+      await tick(30);
+
+      // The text the agent is actually handed — not a description of it — and
+      // then where it came from, which is what you want once you have read it.
+      expect(app.lastFrame()).toContain("prefers tabs");
+      expect(app.lastFrame()).toContain(`this directory is ${slug}`);
+      expect(app.lastFrame()).toContain(`brain ${home}`.replace(/\\/g, "\\"));
+      expect(app.lastFrame()).toContain("/memory full");
+
+      app.input.write("\u0015/exit\r");
+      await done;
+    } finally {
+      if (previous === undefined) delete process.env.KI_BRAIN_PATH;
+      else process.env.KI_BRAIN_PATH = previous;
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("shows the tracked work a session already carries when it comes back", async () => {
+    // The plan tools are built fresh with every agent, so a session being
+    // switched back to knows nothing about its own checklist until it is read
+    // back out of the transcript — which is exactly what the chip draws. This
+    // was the "[TODO] sometimes not showing": the work was never lost, the
+    // button just could not see it.
+    const tracked: ChatMessage[] = [
+      { role: "user", content: "tidy the repo" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "todo",
+              arguments: JSON.stringify({ action: "add", items: ["read the config", "rename the flag"] }),
+            },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "1. read the config\n2. rename the flag" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_2",
+            type: "function",
+            function: { name: "todo", arguments: JSON.stringify({ action: "done", ids: [1] }) },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_2", content: "1. [x] read the config\n2. [ ] rename the flag" },
+    ];
+
+    const app = harness({
+      listSessions: async () => [
+        { id: "session-1", title: "this one" },
+        { id: "session-2", title: "with a checklist" },
+      ],
+      loadSession: async (id) => (id === "session-2" ? tracked : null),
+    });
+
+    const done = runTui(app.options);
+    await tick(15);
+    // The session that is open tracks nothing, so there is no button at all.
+    expect(app.lastFrame()).not.toContain("[TODO");
+
+    app.input.write(click(20)); // over to the session with the checklist
+    await tick(30);
+    expect(app.lastFrame()).toContain("[TODO 1/2]");
 
     app.input.write("\u0015/exit\r");
     await done;
@@ -1928,7 +2117,7 @@ describe("the slash commands", () => {
     await tick();
 
     app.input.write("\u0016");
-    await tick(30);
+    await until(app, "pasted the first 100000 characters");
     await finish(app, done);
 
     expect(app.screen()).toContain("pasted the first 100000 characters");

@@ -167,7 +167,9 @@ describe("applyLearnings", () => {
   it("refuses a secret through the same gate the tool uses", async () => {
     const result = await applyLearnings(
       home,
-      [{ kind: "memory", name: "shop", text: "key: -----BEGIN RSA PRIVATE KEY-----\nabc" }],
+      // The shape this test exists to have refused. The marker has to sit on the
+      // matching line, which is why it is trailing rather than above.
+      [{ kind: "memory", name: "shop", text: "key: -----BEGIN RSA PRIVATE KEY-----\nabc" }], // kicode-secret-ok
       { KICODE_HOME: home },
     );
 

@@ -33,6 +33,13 @@ jobs:
       # package.json instead of quietly resolving a different tree.
       - run: npm ci
 
+      # First, and on its own: a key in a commit has to be rotated, and the
+      # sooner this fails the fewer commits it has to be taken out of. The
+      # pre-commit hook is the same check, but a hook only runs for whoever
+      # installed it — this runs for everyone, including a clone that never did.
+      - name: No credentials in the tree
+        run: npm run check:secrets
+
       - name: Typecheck
         run: npm run typecheck
 

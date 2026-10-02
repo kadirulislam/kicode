@@ -1,3 +1,4 @@
+import type { ChatMessage } from "../../types";
 import type { PlanSnapshot, PlanTask, PlanTodo, Tool } from "./types";
 
 type PlanStep = { title: string; detail?: string; files?: string[] };
@@ -30,6 +31,53 @@ type PlanState = {
  * approval, and both work in build mode too — a big change deserves a tracked
  * plan whatever mode it is made in.
  */
+/**
+ * The tracked work a transcript already records, rebuilt by replaying it.
+ *
+ * The plan tools keep their list in memory and are built fresh with every agent,
+ * so a session that is reopened — switched back to, resumed in a new process, or
+ * rebuilt because the model changed — begins with nothing tracked as far as the
+ * chip can tell, while the checklist sits in the conversation the whole time.
+ * Replaying is exact rather than a guess: both tools only ever mutate their own
+ * state, and neither touches a file.
+ *
+ * Returns null when the transcript tracks nothing, which the chip reads as "no
+ * button" rather than as an empty one.
+ */
+export function planFromHistory(messages: readonly ChatMessage[], cwd: string): PlanSnapshot | null {
+  const tools = createPlanTools();
+  const byName = new Map(tools.map((tool) => [tool.name, tool]));
+
+  for (const message of messages) {
+    if (message.role !== "assistant") continue;
+    for (const call of message.tool_calls ?? []) {
+      const tool = byName.get(call.function.name);
+      // Only the tools that own this state, and only calls whose arguments
+      // parse: a call cut off mid-write is history, not an instruction, and
+      // replaying a transcript must never throw.
+      if (!tool?.snapshot) continue;
+
+      let args: Record<string, unknown>;
+      try {
+        const parsed: unknown = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+        if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+        args = parsed as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+
+      // Not awaited, and safe to leave so: both bodies mutate their own state
+      // and have no `await` in front of it. The test that replays a real
+      // transcript is what keeps that true — an `await` added later fails there
+      // rather than silently rebuilding half a list.
+      void tool.run(args, { cwd });
+    }
+  }
+
+  const snapshot = tools.find((tool) => tool.snapshot)?.snapshot?.() ?? { todos: [], goal: null };
+  return snapshot.todos.length === 0 && !snapshot.goal ? null : snapshot;
+}
+
 export function createPlanTools(): Tool[] {
   const state: PlanState = { plan: null, todos: [], goal: null };
 

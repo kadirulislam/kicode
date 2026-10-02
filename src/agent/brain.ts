@@ -156,6 +156,14 @@ function readProjectIndex(root: string): BrainProject[] {
  * becomes a cost instead of an advantage. The model loads one when a name looks
  * relevant, which is what `recall` is for.
  */
+/**
+ * The heading that starts a briefing's second half.
+ *
+ * Exported because a reader that wants only the memory has to cut on something,
+ * and a heading written in two places is a heading that drifts in one of them.
+ */
+export const SKILLS_HEADING = "## Skills you have";
+
 export function brainBriefing(cwd: string, env: NodeJS.ProcessEnv = process.env): string | null {
   const brain = readBrain(cwd, env);
   if (!brain) return null;
@@ -179,7 +187,7 @@ export function brainBriefing(cwd: string, env: NodeJS.ProcessEnv = process.env)
   }
 
   if (skills.length > 0) {
-    lines.push("", "## Skills you have (load one with the recall tool when its name looks relevant)");
+    lines.push("", `${SKILLS_HEADING} (load one with the recall tool when its name looks relevant)`);
     for (const skill of skills) lines.push(`- ${skill.name} — ${skill.description || "skill"}`);
     if (brain.skills.length > skills.length) lines.push(`- … ${brain.skills.length - skills.length} more`);
   }

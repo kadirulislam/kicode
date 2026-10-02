@@ -147,8 +147,10 @@ describe("RouteHealth store", () => {
       {
         ok: false,
         status: 401,
+        // A key shape inside a gateway message, which is the input the redaction
+        // this file tests has to survive.
         reason:
-          "Provider rejected the API key: Authorization: Bearer thk_live_Xa7UA9mQ2secretvalue (sk-proj-abcdefghijklmnop1234)\nsecond line",
+          "Provider rejected the API key: Authorization: Bearer thk_live_Xa7UA9mQ2secretvalue (sk-proj-abcdefghijklmnop1234)\nsecond line", // kicode-secret-ok
         at: NOW,
       },
     );

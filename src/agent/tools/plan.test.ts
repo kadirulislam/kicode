@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
+import type { ChatMessage } from "../../types";
 import { createDefaultTools } from "./index";
-import { createPlanTools } from "./plan";
+import { createPlanTools, planFromHistory } from "./plan";
+
+/** A call the model made, as the transcript records it. */
+function called(name: string, args: unknown): ChatMessage {
+  return {
+    role: "assistant",
+    content: null,
+    tool_calls: [{ id: `call_${name}`, type: "function", function: { name, arguments: JSON.stringify(args) } }],
+  };
+}
 
 function tools() {
   const [plan, todo, goal] = createPlanTools();
@@ -22,6 +32,56 @@ describe("plan tools", () => {
 
     await first.todo.run({ action: "add", items: ["first task"] }, { cwd: "." });
     expect((await second.todo.run({ action: "list" }, { cwd: "." })).content).toContain("No tracked tasks");
+  });
+});
+
+describe("reading tracked work back out of a transcript", () => {
+  it("rebuilds the checklist the tools no longer hold", () => {
+    // The plan tools are built fresh with every agent, so a session switched
+    // back to — or resumed in a new process — has the checklist in the
+    // conversation and nothing in memory. This is what the chip reads.
+    const history: ChatMessage[] = [
+      { role: "user", content: "tidy the repo" },
+      called("todo", { action: "add", items: ["read the config", "rename the flag"] }),
+      { role: "tool", tool_call_id: "call_todo", content: "1. read the config\n2. rename the flag" },
+      called("todo", { action: "done", ids: [1] }),
+      { role: "tool", tool_call_id: "call_todo", content: "1. [x] read the config\n2. [ ] rename the flag" },
+    ];
+
+    const plan = planFromHistory(history, ".");
+
+    expect(plan?.todos).toEqual([
+      { text: "read the config", done: true },
+      { text: "rename the flag", done: false },
+    ]);
+  });
+
+  it("is null when the transcript tracks nothing, so there is no button to draw", () => {
+    expect(planFromHistory([{ role: "user", content: "hello" }], ".")).toBeNull();
+    // A list that was added and then cleared is tracked work that is over.
+    expect(
+      planFromHistory([called("todo", { action: "add", items: ["x"] }), called("todo", { action: "clear" })], "."),
+    ).toBeNull();
+  });
+
+  it("survives a call cut off mid-write rather than throwing", () => {
+    // A transcript is history, not an instruction. One malformed call in it
+    // must not take the whole replay down with it.
+    const truncated: ChatMessage = {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "call_x", type: "function", function: { name: "todo", arguments: '{"action":"ad' } }],
+    };
+
+    expect(planFromHistory([truncated, called("todo", { action: "add", items: ["still here"] })], ".")?.todos).toEqual([
+      { text: "still here", done: false },
+    ]);
+  });
+
+  it("ignores tools that own other state", () => {
+    // Only the plan tools are replayed: a `bash` call in the transcript is not
+    // something to run again.
+    expect(planFromHistory([called("bash", { command: "rm -rf /" })], ".")).toBeNull();
   });
 });
 

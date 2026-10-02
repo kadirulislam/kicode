@@ -89,6 +89,8 @@ import {
   type MentionIndex,
   type MentionItem,
 } from "../mentions";
+import { SKILLS_HEADING, brainBriefing, projectSlug, readBrain } from "../agent/brain";
+import { planFromHistory } from "../agent/tools/plan";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
 import { applyEvent, entriesFromHistory, entriesToText, summarizeArgs, type Entry, type Tone } from "./transcript";
@@ -158,15 +160,70 @@ const MODEL_FILTER_LABELS = ["all", "free", "paid"] as const;
 
 /** When a session last ran, in words for recent days and a date past that. */
 /**
- * A date in the user's own system format.
+ * A moment, as `DD-MM-YYYY HH:mm`, on the local clock.
  *
- * `Intl` with no locale named uses the system's, which is the only locale
- * KiCode can be sure of, and `dateStyle` is what makes the result *their*
- * format rather than a stamp: "Oct 1, 2026" in one locale, "1 Oct 2026" in
- * another, and the date in their own calendar either way.
+ * Written out rather than handed to `Intl`: a locale picks its own field order
+ * and its own separators, and there is one shape this app is read in. **Local**
+ * rather than UTC is the part that matters — the stamp is *stored* in UTC, and
+ * printing that back is how a session started at 18:52 reads as 15:52, or as
+ * the day before for half the world.
  */
+function formatStamp(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  const day = `${pad(date.getDate())}-${pad(date.getMonth() + 1)}-${date.getFullYear()}`;
+  return `${day} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+/** The same shape without the clock, for a column with no room for one. */
 function formatDay(date: Date): string {
-  return date.toLocaleDateString(undefined, { dateStyle: "medium" });
+  return formatStamp(date).slice(0, 10);
+}
+
+/** A stored stamp rendered for a person, or the raw value when it will not parse. */
+function formatStored(iso: string): string {
+  const parsed = new Date(iso);
+  return Number.isNaN(parsed.getTime()) ? iso : formatStamp(parsed);
+}
+
+/** One line out of a longer piece of text, for a notice that names what happened. */
+function snippet(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+/** How much of a memory file `/memory` prints before it points at `full`. */
+const MEMORY_PREVIEW_CHARS = 900;
+
+/**
+ * A long block trimmed to fit a screen, naming what it dropped.
+ *
+ * A silent cut is worse than no output: the reader cannot tell a memory that
+ * ends from one that was truncated on their behalf.
+ */
+function clipped(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max).trimEnd()}\n… ${text.length - max} more characters not shown`;
+}
+
+/**
+ * Only the memory half of a brain briefing.
+ *
+ * The two halves are separated by a heading the briefing writes itself, which
+ * is a pleasanter thing to cut on than a line count. If that heading is ever
+ * missing the whole briefing is shown, which is a wrong answer you can read
+ * rather than half of one you cannot.
+ */
+function memorySection(briefing: string | null): string | null {
+  if (!briefing) return null;
+  const at = briefing.indexOf(SKILLS_HEADING);
+  const memory = at === -1 ? briefing : briefing.slice(0, at);
+  // The briefing's preamble is about the briefing — "this is not the user's
+  // request", and so on. What was asked for is the memory, which is the part
+  // under its own heading. With no heading there is nothing to cut on, so the
+  // whole thing is shown: a wrong answer you can read beats half of one.
+  const heading = /^## This project's memory.*$/m.exec(memory);
+  const body = (heading ? memory.slice(heading.index + heading[0].length) : memory).trim();
+  return body || null;
 }
 
 /** Local midnight, to count whole days by rather than elapsed hours. */
@@ -742,7 +799,11 @@ class TuiApp {
   async start(): Promise<number> {
     setColorEnabled(!process.env.NO_COLOR && this.output.isTTY === true);
 
-    this.agent = this.options.createAgent(this.options.initial.messages ?? [], this.settings());
+    const opening = this.options.initial.messages ?? [];
+    this.agent = this.options.createAgent(opening, this.settings());
+    // A resumed session's tracked work is in the transcript it just came back
+    // with, and in nothing else: the plan tools were built fresh a line ago.
+    this.plan = planFromHistory(opening, this.cwd);
     // Warm the `@` index in the background so the first `@` is fast: the
     // walk is what made Tab arrive before the list existed in tests and on
     // large directories. Failures are ignored — the first keystroke rebuilds.
@@ -2511,6 +2572,12 @@ class TuiApp {
       case "skills":
         await this.skills(argument);
         break;
+      case "learn":
+        await this.learnNow();
+        break;
+      case "memory":
+        this.showMemory(argument);
+        break;
       case "mode":
         this.chooseMode(argument);
         break;
@@ -2671,12 +2738,15 @@ class TuiApp {
     const tokens = this.agent.contextTokens;
     const budget = this.options.contextTokens;
     const minutes = Math.max(Math.round((Date.now() - Date.parse(this.createdAt)) / 60_000), 0);
+    // Never the raw stamp: it is stored in UTC and in a machine's shape, so
+    // printing it puts the session hours off the clock the user is reading.
+    const started = formatStored(this.createdAt);
 
     return [
       `${this.agent.turns.length} messages · ${this.toolCalls()} tool calls · ${this.entries.length} transcript entries`,
       `~${formatTokens(tokens)} tokens${budget > 0 ? ` (${Math.round((tokens / budget) * 100)}% of ${formatTokens(budget)})` : ""}`,
       budgetLine(this.agent.spentTokens, this.agent.tokenBudget),
-      `session started ${this.createdAt}${Number.isNaN(minutes) ? "" : ` (${minutes} min ago)`}`,
+      `session started ${started}${Number.isNaN(minutes) ? "" : ` (${minutes} min ago)`}`,
     ];
   }
 
@@ -4026,6 +4096,108 @@ class TuiApp {
         // summariser call itself not landing.
         : "nothing to compact — this session is already short, or the summariser failed",
     );
+  }
+
+  /**
+   * The learning pass, asked for by name.
+   *
+   * The automatic pass is deliberately silent: it runs after a turn and exists
+   * to help a *future* session, so it reports only what it actually wrote and
+   * never interrupts. Asking for it is the other case — the user is watching and
+   * wants the answer — so this one waits, says what landed, and says why when
+   * nothing did, which is the half the automatic pass will never tell you.
+   *
+   * It ignores `"learning": "off"`: that setting is about the pass that runs on
+   * its own, not a refusal of one that was requested.
+   */
+  private async learnNow(): Promise<void> {
+    if (this.learningInFlight) {
+      this.note("a learning pass is already running");
+      this.draw();
+      return;
+    }
+    if (this.agent.turns.length === 0) {
+      this.note("nothing to learn from yet — this session has no conversation");
+      this.draw();
+      return;
+    }
+
+    this.learningInFlight = true;
+    this.setBusy("learning…");
+    this.draw();
+    try {
+      const result = await this.agent.learn();
+      if (result.error) {
+        this.note(`the learning pass could not run: ${result.error}`, "warn");
+      } else if (result.added.length === 0) {
+        this.notes([
+          "nothing new in this session to keep",
+          ...(result.skipped.length > 0 ? [`${result.skipped.length} thing(s) were already known`] : []),
+        ]);
+      } else {
+        this.notes([
+          `learned ${result.added.length} thing(s):`,
+          ...result.added.map((item) => `  · ${item.kind} ${item.name} — ${snippet(item.text, 100)}`),
+          ...(result.skipped.length > 0 ? [`${result.skipped.length} thing(s) skipped as already known`] : []),
+        ]);
+      }
+    } catch (error) {
+      this.note(`the learning pass failed: ${(error as Error).message}`, "error");
+    } finally {
+      this.learningInFlight = false;
+      this.stopBusy();
+      this.draw();
+    }
+  }
+
+  /**
+   * What the brain holds for this project, and what the agent is told because
+   * of it.
+   *
+   * The briefing is the honest answer to "what does it know about this?" — it is
+   * the exact text assembled into the system prompt at the start of a session,
+   * not a description of it. The rest is where that text comes from, which is
+   * what you need in order to change it. `/skills` is the other half: this lists
+   * what the brain *says*, that one browses what it can *do*.
+   */
+  private showMemory(argument: string): void {
+    const brain = readBrain(this.cwd);
+    if (!brain) {
+      this.notes([
+        "no brain on this machine yet — nothing has been saved, and nowhere it would have gone",
+        "the first `remember` creates one at ~/.kicode/brain, or wherever KI_BRAIN_PATH or `brain` in kicode.json points",
+      ]);
+      this.draw();
+      return;
+    }
+
+    const slug = projectSlug(this.cwd);
+    const mine = brain.projects.find((project) => project.slug === slug);
+    const others = brain.projects.filter((project) => project.slug !== slug).map((project) => project.slug);
+    const briefing = brainBriefing(this.cwd);
+
+    // `full` prints the briefing whole. Without it the skill list is left out —
+    // on a maintained brain it is most of the text, and `/skills` exists to show
+    // exactly that and nothing else — and the memory itself is trimmed to fit a
+    // screen, because a transcript that scrolls its own answer off the top has
+    // told you nothing.
+    const full = argument.trim().toLowerCase() === "full";
+    const shown = full ? briefing : memorySection(briefing);
+
+    // Every entry costs two rows on screen, so this stays short and carries no
+    // blank ones. The reference lines go last rather than first: the newest
+    // lines are the ones on screen, and "where is this kept" is what you want
+    // once you have read the text, not before it.
+    this.notes([
+      mine ? `this directory is ${slug} → ${mine.file}` : `this directory is ${slug} — no memory file for it yet`,
+      ...(shown
+        ? clipped(shown, full ? shown.length : MEMORY_PREVIEW_CHARS).split("\n").filter((line) => line.trim().length > 0)
+        : ["nothing saved for this directory yet"]),
+      `brain ${brain.dir} · ${brain.skills.length} skill(s) · ${brain.projects.length} project memory file(s)`,
+      ...(full ? [] : ["`/memory full` prints the whole briefing, skills included"]),
+      ...(others.length > 0 ? [`other projects recorded: ${others.join(", ")}`] : []),
+    ]);
+    this.draw();
   }
 
   /** A question answered from the transcript, recorded nowhere. */
@@ -5530,6 +5702,10 @@ class TuiApp {
   /** A fresh agent over the same transcript, after a setting changed. */
   private rebuild(history: readonly ChatMessage[]): void {
     this.agent = this.options.createAgent([...history], this.settings());
+    // The tools came back empty, so the tracked work is read back out of the
+    // conversation. Without this the chip kept showing a list the new agent no
+    // longer had — the one state where the screen and the model disagreed.
+    this.plan = planFromHistory(history, this.cwd);
   }
 
   private approver(): ApproveFn {

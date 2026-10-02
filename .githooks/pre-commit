@@ -1,0 +1,17 @@
+#!/bin/sh
+#
+# Refuses a commit that carries anything shaped like a live credential.
+#
+# Versioned here rather than sitting in `.git/hooks` so it travels with the repo
+# and can be reviewed like any other change. A clone turns it on with one
+# command:
+#
+#     git config core.hooksPath .githooks
+#
+# `npm run check:secrets` runs the same check over every tracked file, and CI
+# runs it on every push — so a clone that never ran that command is still
+# covered. This is the fast path, not the only one: catching it here means the
+# key never reaches a commit, which is the difference between deleting a line
+# and rewriting history.
+#
+exec node "$(git rev-parse --show-toplevel)/scripts/check-secrets.mjs"

@@ -107,7 +107,9 @@ describe("remember tool", () => {
 
   it("refuses anything shaped like a secret", async () => {
     const result = await rememberTool.run(
-      { kind: "skill", name: "deploy", description: "Deploy.", text: "key: -----BEGIN RSA PRIVATE KEY-----\nabc" },
+      // The shape this test exists to have refused. The marker has to sit on the
+      // matching line, which is why it is trailing rather than above.
+      { kind: "skill", name: "deploy", description: "Deploy.", text: "key: -----BEGIN RSA PRIVATE KEY-----\nabc" }, // kicode-secret-ok
       { cwd: dir },
     );
 

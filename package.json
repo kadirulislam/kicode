@@ -22,6 +22,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "check:secrets": "node scripts/check-secrets.mjs --all",
     "mock": "node scripts/mock-provider.mjs"
   },
   "keywords": [
