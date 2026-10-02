@@ -42,6 +42,18 @@ export type CompactionOptions = {
    * Absent means the window alone decides.
    */
   compactAt?: number;
+  /**
+   * Set by `/compact`, which is an instruction rather than a threshold.
+   *
+   * A session already inside the target gains nothing from an *automatic* pass —
+   * summarising it would spend a model call to make it bigger — but someone who
+   * asks for compaction is asking for the session to shrink now, and that used
+   * to do nothing at all: this is also a good deal of what "`/compact` does not
+   * work" meant. The size target drops to half of what the session currently is
+   * so the pass cannot refuse, and half guarantees it makes real progress
+   * without collapsing a short session into nothing.
+   */
+  manual?: boolean;
 };
 
 /** Where a compacted session sits in its window, unless a config says otherwise. */
@@ -52,6 +64,13 @@ export const COMPACT_TARGET_BAND: readonly [number, number] = [30, 50];
 const SUMMARY_SHARE = 0.2;
 /** Below this a briefing is not worth asking a model for. */
 const MIN_SUMMARY_TOKENS = 256;
+/**
+ * Below this a `/compact` has nothing worth summarising.
+ *
+ * A session of greetings and one file read is not a session: halving it saves
+ * nothing anyone misses, and the briefing costs a model call to produce.
+ */
+const MIN_MANUAL_TOKENS = 2_000;
 
 const SUMMARY_SYSTEM_LINES = [
   "You compress a coding session transcript into a briefing for the assistant that will continue it.",
@@ -149,9 +168,15 @@ export function planCompaction(
   messages: readonly ChatMessage[],
   options: CompactionOptions,
 ): CompactionPlan | null {
-  const target = compactionTarget(options);
+  const size = compactionTarget(options);
+  const current = estimateTokens(messages);
+  // Half the session, for a pass nothing else is asking for. See `manual`: the
+  // automatic target is a resting size the session is *supposed* to sit at, so
+  // it is no use as a target for someone asking to shrink it now.
+  const target = options.manual ? Math.min(size, Math.floor(current / 2)) : size;
   if (target <= 0) return null;
-  if (estimateTokens(messages) <= target) return null;
+  if (options.manual && current < MIN_MANUAL_TOKENS) return null;
+  if (current <= target) return null;
 
   const summaryBudget = Math.max(Math.round(target * SUMMARY_SHARE), MIN_SUMMARY_TOKENS);
   // What survives the cut above it: the system prompt is never summarised and

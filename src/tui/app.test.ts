@@ -829,6 +829,37 @@ describe("runTui", () => {
     await done;
   });
 
+  it("dates a session in the user's own format, read off the local clock", async () => {
+    // Ten days back, late in the local evening: a stamp read as UTC would land
+    // this on the following day for anyone east of Greenwich.
+    const when = new Date();
+    when.setDate(when.getDate() - 10);
+    when.setHours(23, 30, 0, 0);
+
+    const app = harness({
+      listSessions: async () => [
+        { id: "session-9", title: "a while back", updatedAt: when.toISOString(), messageCount: 2 },
+      ],
+    });
+
+    const done = runTui(app.options);
+    await tick();
+    app.input.write("/sessions\r");
+    await tick(20);
+
+    // The system's own format — `Intl` with no locale named — and not the ISO
+    // stamp the record stores, which is data and reads as data.
+    expect(app.lastFrame()).toContain(when.toLocaleDateString(undefined, { dateStyle: "medium" }));
+    expect(app.lastFrame()).not.toContain(when.toISOString().slice(0, 10));
+
+    // Past the app's escape grace, which exists to tell a lone Escape from the
+    // front of an escape sequence.
+    app.input.write("\u001b");
+    await tick(80);
+    app.input.write("/exit\r");
+    await done;
+  });
+
   it("searches sessions by title and preview, showing when and how long", async () => {
     const other: ChatMessage[] = [
       { role: "user", content: "earlier work" },
@@ -1265,10 +1296,82 @@ describe("the queue and the commands that fill it", () => {
     // them on its next request — and left the queue, so the drain cannot send
     // them a second time as a turn of their own.
     expect(app.steers).toEqual(["second"]);
+    // The spinner names it while it waits: the tile vanishing is the only other
+    // sign, and a tile vanishing reads as a deletion.
+    expect(app.lastFrame()).toContain("+1 to read");
     expect(app.lastFrame()).toContain("Queued (1)");
     const after = app.lastFrame().split(/\r?\n/);
     const afterHeader = after.findIndex((line) => line.includes("Queued ("));
     expect(after[afterHeader + 1] ?? "").toContain("third");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("opens the queue as a list whose rows the keyboard can steer and drop", async () => {
+    const app = harness({}, { slow: 400 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    app.input.write("second\r");
+    await tick(40);
+    app.input.write("third\r");
+    await tick(40);
+
+    // A bare `/queue` runs while the turn is in flight — it is about the queue,
+    // and the queue is only ever full while a turn runs.
+    app.input.write("\u0015/queue\r");
+    await tick(40);
+    expect(app.lastFrame()).toContain("Queued messages (2)");
+    expect(app.lastFrame()).toContain("2. third");
+
+    // `ctrl+x` drops the row under the cursor, and the list rebuilds so the next
+    // action cannot resolve an index against a queue that moved.
+    app.input.write("\u0018");
+    await tick(40);
+    expect(app.lastFrame()).toContain("Queued messages (1)");
+    // Rebuilt, not merely redrawn: the dropped message is gone from the list and
+    // the one behind it has moved up to row 1.
+    expect(app.lastFrame()).toContain("1. third");
+
+    // `ctrl+a` is the tile's `[Add+]`, from the keyboard.
+    app.input.write("\u0001");
+    await tick(40);
+    expect(app.steers).toEqual(["third"]);
+    expect(app.lastFrame()).toContain("the queue is empty");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("takes a queued message back into the prompt to rewrite it with enter", async () => {
+    const app = harness({}, { slow: 400 });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("first\r");
+    await tick(40);
+    app.input.write("second\r");
+    await tick(40);
+
+    app.input.write("\u0015/queue\r");
+    await tick(40);
+    app.input.write("\r");
+    await tick(40);
+
+    // Out of the queue and into the box, where it can be changed — a queue you
+    // cannot take anything back out of is a place messages go to be lost.
+    expect(app.lastFrame()).toContain("taken back from the queue");
+    expect(app.lastFrame()).not.toContain("Queued messages");
+
+    // Sent again, it queues behind the running turn — which could only happen if
+    // the editor really holds those words.
+    app.input.write("\r");
+    await tick(40);
+    expect(app.lastFrame()).toContain("Queued (1)");
+    expect(app.lastFrame()).toContain("second");
 
     app.input.write("\u0015/exit\r");
     await done;

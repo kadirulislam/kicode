@@ -300,7 +300,12 @@ describe("a message pushed into the turn in flight", () => {
 
     const events = await collect(agent, "read a.txt");
 
-    expect(events.filter((event) => event.type === "continued")).toEqual([]);
+    // Reported, even though the turn never had to be kept open for it: a message
+    // added while a slow tool runs is the case where the wait is longest and the
+    // silence most confusing.
+    expect(events.filter((event) => event.type === "continued")).toEqual([
+      { type: "continued", reason: "steered", attempt: 1 },
+    ]);
     expect(provider.requests[1]?.messages.map((message) => message.role)).toEqual([
       "system",
       "user",
@@ -308,6 +313,27 @@ describe("a message pushed into the turn in flight", () => {
       "tool",
       "user",
     ]);
+  });
+
+  it("is kept when the turn runs out of iterations before it could be sent", async () => {
+    // The alternative is losing words the user typed on the floor, which they
+    // have no way of knowing about: the tile that carried them is already gone.
+    let agent: Agent;
+    const provider = new SteeringProvider([answerTurn("only answer")], () => {
+      agent.steer("one more thing");
+    });
+    agent = new Agent({
+      provider,
+      tools: new ToolRegistry([echoTool]),
+      model: "m",
+      cwd: process.cwd(),
+      maxTurns: 1,
+    });
+
+    const events = await collect(agent, "do the thing");
+
+    expect(finished(events)).toEqual({ type: "done", reason: "max-turns" });
+    expect(agent.turns.at(-1)).toEqual({ role: "user", content: "one more thing" });
   });
 
   it("is refused when no turn is running, so the caller can just run it", () => {

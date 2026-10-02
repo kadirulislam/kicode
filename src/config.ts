@@ -20,10 +20,20 @@ export const DEFAULT_MODEL = "deepseek-v4-flash";
  * second copy of the number is how the two would drift apart.
  */
 export { DEFAULT_MAX_TURNS };
-export const DEFAULT_CONTEXT_TOKENS = 128_000;
+export const DEFAULT_CONTEXT_TOKENS = 200_000;
 export const DEFAULT_RESERVE_TOKENS = 8_000;
-/** The estimate at which a session is compacted, even inside a larger window. */
-export const DEFAULT_COMPACT_AT_TOKENS = 100_000;
+/**
+ * The estimate at which a session is compacted, even inside a larger window.
+ *
+ * This is the number that actually fires, not the window: `shouldCompact` takes
+ * the smaller of the two, so the default window has to stay comfortably above
+ * it or the window would decide instead and this ceiling would never be the one
+ * to trigger. It is set to where a session is worth summarising rather than to
+ * the line where it stops fitting — compaction that waits for the edge has no
+ * room left for the reply or the next round of tool results, which is what the
+ * reserve is for.
+ */
+export const DEFAULT_COMPACT_AT_TOKENS = 150_000;
 /**
  * Where a compacted session is left sitting in its window, as a percentage.
  *

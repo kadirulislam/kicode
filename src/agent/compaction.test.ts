@@ -227,6 +227,41 @@ describe("planCompaction", () => {
   it("has nothing to do when the reserve leaves no window", () => {
     expect(planCompaction(session(20), { contextTokens: 1_000, reserveTokens: 1_000 })).toBeNull();
   });
+
+  it("refuses even an explicit pass on a session too short to be worth shrinking", () => {
+    expect(planCompaction([system, user("short"), assistant("and short")], { ...options, manual: true })).toBeNull();
+  });
+});
+
+describe("an explicit /compact", () => {
+  // A 10,000-token window aims at 4,000, so a 3,000-token session sits inside
+  // it: an automatic pass has nothing to do, and `/compact` used to agree and
+  // sit there doing nothing at all.
+  const wide: CompactionOptions = { contextTokens: 10_000, reserveTokens: 0 };
+
+  it("runs even though the session already sits inside the automatic target", () => {
+    const messages = session(30);
+    expect(estimateTokens(messages)).toBeGreaterThan(2_000);
+    expect(planCompaction(messages, wide)).toBeNull();
+
+    const plan = planCompaction(messages, { ...wide, manual: true })!;
+
+    // Aimed at half the session: the resting size is no use as a target for
+    // someone asking for the session to shrink now.
+    expect(plan.target).toBe(Math.floor(estimateTokens(messages) / 2));
+    expect(plan.cut).toBeGreaterThan(1);
+  });
+
+  it("never aims above what an automatic pass would", () => {
+    // Manual *lowers* the target so the pass cannot refuse. It never raises it,
+    // so a session genuinely over the window is compacted the usual way — this
+    // is a bypass of the threshold, not a different kind of compaction.
+    const messages = session(100);
+
+    expect(planCompaction(messages, { ...wide, manual: true })!.target).toBe(
+      planCompaction(messages, wide)!.target,
+    );
+  });
 });
 
 describe("compactMessages", () => {

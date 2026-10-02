@@ -2,7 +2,14 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_BASE_URL, DEFAULT_MODEL, MOCK_BASE_URL, type Config } from "../config";
+import {
+  DEFAULT_BASE_URL,
+  DEFAULT_COMPACT_AT_TOKENS,
+  DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MODEL,
+  MOCK_BASE_URL,
+  type Config,
+} from "../config";
 import { defaultViewSettings } from "../tui/settings";
 import { DEFAULT_THEME } from "../tui/theme";
 import { writeProjectConfig } from "./init";
@@ -31,7 +38,13 @@ function config(overrides: Partial<Config> = {}): Config {
     fallbackAuto: true,
     maxTokens: 0,
     learning: "auto",
-    compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 100_000 },
+    compaction: {
+      enabled: true,
+      contextTokens: DEFAULT_CONTEXT_TOKENS,
+      reserveTokens: 8_000,
+      targetPercent: 40,
+      compactAt: DEFAULT_COMPACT_AT_TOKENS,
+    },
     ...overrides,
   };
 }
@@ -74,17 +87,26 @@ describe("--init creating a file", () => {
 
   it("records compaction only when it differs from the defaults", async () => {
     const tuning = config({
-      compaction: { enabled: true, contextTokens: 200_000, reserveTokens: 8_000, targetPercent: 35, compactAt: 100_000 },
+      compaction: { enabled: true, contextTokens: 256_000, reserveTokens: 8_000, targetPercent: 35, compactAt: 120_000 },
     });
 
     await writeProjectConfig(dir, tuning);
 
-    expect(await readJson()).toEqual({ model: DEFAULT_MODEL, compaction: { contextTokens: 200_000, targetPercent: 35 } });
+    expect(await readJson()).toEqual({
+      model: DEFAULT_MODEL,
+      compaction: { contextTokens: 256_000, targetPercent: 35, compactAt: 120_000 },
+    });
   });
 
   it("records a non-default compactAt", async () => {
     const tuning = config({
-      compaction: { enabled: true, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 50_000 },
+      compaction: {
+        enabled: true,
+        contextTokens: DEFAULT_CONTEXT_TOKENS,
+        reserveTokens: 8_000,
+        targetPercent: 40,
+        compactAt: 50_000,
+      },
     });
 
     await writeProjectConfig(dir, tuning);
@@ -93,7 +115,18 @@ describe("--init creating a file", () => {
   });
 
   it("records compaction being switched off", async () => {
-    await writeProjectConfig(dir, config({ compaction: { enabled: false, contextTokens: 128_000, reserveTokens: 8_000, targetPercent: 40, compactAt: 100_000 } }));
+    await writeProjectConfig(
+      dir,
+      config({
+        compaction: {
+          enabled: false,
+          contextTokens: DEFAULT_CONTEXT_TOKENS,
+          reserveTokens: 8_000,
+          targetPercent: 40,
+          compactAt: DEFAULT_COMPACT_AT_TOKENS,
+        },
+      }),
+    );
 
     expect((await readJson()).compaction).toEqual({ enabled: false });
   });
@@ -125,7 +158,7 @@ describe("--init merging into an existing file", () => {
     expect(await readJson()).toEqual({
       model: DEFAULT_MODEL,
       future: true,
-      compaction: { targetPercent: 35, futureKnob: 1, contextTokens: 256_000 },
+      compaction: { targetPercent: 35, futureKnob: 1, contextTokens: 256_000, compactAt: 100_000 },
     });
   });
 

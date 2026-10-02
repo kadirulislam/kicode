@@ -220,8 +220,9 @@ const USAGE = [
   "                   (default: a Git Bash on Windows when one is installed,",
   "                   otherwise Node's own default — set it to cmd.exe to",
   "                   keep the Windows commands)",
-  "  KICODE_CONTEXT_TOKENS  model context window used for compaction (default 128000)",
-  "  KICODE_COMPACT_AT      compact once the estimate passes this many tokens (default 100000)",
+  "  KICODE_CONTEXT_TOKENS  model context window used for compaction (default 200000)",
+  "  KICODE_COMPACT_AT      compact once the estimate passes this many tokens (default 150000;",
+  "                   this is the one that fires, so keep it under the window)",
   "  KICODE_COMPACT_TARGET where a compacted session should sit, as a percentage",
   "                   of the window (default 40; clamped to 30-50)",
 ].join("\n");

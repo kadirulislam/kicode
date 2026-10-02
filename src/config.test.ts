@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_BASE_URL, DEFAULT_MODEL, MOCK_API_KEY, MOCK_BASE_URL, loadConfig, validateConfig } from "./config";
+import {
+  DEFAULT_BASE_URL,
+  DEFAULT_COMPACT_AT_TOKENS,
+  DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MODEL,
+  MOCK_API_KEY,
+  MOCK_BASE_URL,
+  loadConfig,
+  validateConfig,
+} from "./config";
 import type { FileSettings } from "./settings-file";
 import { DEFAULT_THEME } from "./tui/theme";
 
@@ -118,16 +127,21 @@ describe("compaction settings", () => {
   it("uses the documented defaults", () => {
     const config = loadConfig({}, {});
 
-    expect(config.compaction.contextTokens).toBe(128_000);
+    // Named through the constants, so changing a default is one edit rather
+    // than a scavenger hunt through the tests that restate it.
+    expect(config.compaction.contextTokens).toBe(DEFAULT_CONTEXT_TOKENS);
     expect(config.compaction.reserveTokens).toBe(8_000);
     expect(config.compaction.targetPercent).toBe(40);
-    expect(config.compaction.compactAt).toBe(100_000);
+    expect(config.compaction.compactAt).toBe(DEFAULT_COMPACT_AT_TOKENS);
+    // The ceiling is the number that actually fires, so the window has to stay
+    // above it or the window would decide and this would never trigger.
+    expect(DEFAULT_CONTEXT_TOKENS).toBeGreaterThan(DEFAULT_COMPACT_AT_TOKENS);
   });
 
   it("reads the compact threshold from the environment and the file", () => {
     expect(loadConfig({ KICODE_COMPACT_AT: "50000" }, {}).compaction.compactAt).toBe(50_000);
     expect(loadConfig({ KICODE_COMPACT_AT: "50000" }, { compaction: { compactAt: 20_000 } }).compaction.compactAt).toBe(20_000);
-    expect(loadConfig({ KICODE_COMPACT_AT: "banana" }, {}).compaction.compactAt).toBe(100_000);
+    expect(loadConfig({ KICODE_COMPACT_AT: "banana" }, {}).compaction.compactAt).toBe(DEFAULT_COMPACT_AT_TOKENS);
   });
 
   it("reads the environment", () => {
@@ -154,8 +168,8 @@ describe("compaction settings", () => {
   });
 
   it("ignores a nonsense context size and keeps the default", () => {
-    expect(loadConfig({ KICODE_CONTEXT_TOKENS: "banana" }, {}).compaction.contextTokens).toBe(128_000);
-    expect(loadConfig({ KICODE_CONTEXT_TOKENS: "-5" }, {}).compaction.contextTokens).toBe(128_000);
+    expect(loadConfig({ KICODE_CONTEXT_TOKENS: "banana" }, {}).compaction.contextTokens).toBe(DEFAULT_CONTEXT_TOKENS);
+    expect(loadConfig({ KICODE_CONTEXT_TOKENS: "-5" }, {}).compaction.contextTokens).toBe(DEFAULT_CONTEXT_TOKENS);
   });
 });
 

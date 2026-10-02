@@ -249,7 +249,7 @@ export class Agent {
    * pairing every endpoint insists on. The top of a loop iteration is the one
    * point where that pairing is always whole.
    */
-  private readonly pendingSteers: string[] = [];
+  private readonly pendingSteers: Array<{ text: string; images: readonly PastedImage[] }> = [];
 
   constructor(options: AgentOptions) {
     this.provider = options.provider;
@@ -328,7 +328,9 @@ export class Agent {
    */
   async compactNow(): Promise<{ before: number; after: number; summarized: number; target: number } | null> {
     const before = estimateTokens(this.messages);
-    const result = await this.summarise();
+    // Explicit, so the pass runs whether or not the window is full: this is the
+    // one compaction the user asked for by name.
+    const result = await this.summarise(true);
     if (!result) return null;
     return { before, after: estimateTokens(this.messages), summarized: result.summarized, target: result.target };
   }
@@ -383,7 +385,8 @@ export class Agent {
   }
 
   /**
-   * Puts a message into the turn in flight, to be answered before it ends.
+   * Puts a message (and any images with it) into the turn in flight, to be
+   * answered before it ends.
    *
    * This is what the queue's `[Add+]` reaches for. A queue is right when the
    * next words can wait; this is for when they cannot — the model is a step
@@ -396,11 +399,29 @@ export class Agent {
    * are held until the loop reaches the next request. Returns false when no turn
    * is running, which is the caller's cue to just run it.
    */
-  steer(text: string): boolean {
+  steer(text: string, images: readonly PastedImage[] = []): boolean {
     if (!this.turn || this.turn.signal.aborted) return false;
-    this.pendingSteers.push(text);
+    this.pendingSteers.push({ text, images });
     this.steered += 1;
     return true;
+  }
+
+  /**
+   * Moves held steers into the transcript, and reports how many landed.
+   *
+   * Called at the top of every loop iteration — the one point where the
+   * transcript is whole, with no tool call still waiting on its result — and
+   * once more when the turn has run out of iterations, so words the user added
+   * are never dropped on the floor.
+   */
+  private flushSteers(): number {
+    if (this.pendingSteers.length === 0) return 0;
+    const added = this.pendingSteers.length;
+    for (const held of this.pendingSteers) {
+      this.messages.push({ role: "user", content: userContent(held.text, held.images) });
+    }
+    this.pendingSteers.length = 0;
+    return added;
   }
 
   /**
@@ -448,6 +469,11 @@ export class Agent {
   /** The turn itself, under the signal that can stop it. */
   private async *run(signal: AbortSignal, userText: string, images: readonly PastedImage[]): AsyncGenerator<AgentEvent, void, void> {
     this.messages.push({ role: "user", content: userContent(userText, images) });
+    // A turn starts with nothing held over from the last one. Words pushed into
+    // a turn that was cancelled were never sent, so carrying them into the next
+    // turn would answer a message the user has since re-thought — the UI puts
+    // them back in the queue instead.
+    this.pendingSteers.length = 0;
 
     // The clock for the turn's own line. Taken here rather than per request so
     // a turn that ran six tools reports the whole turn, which is the wait the
@@ -474,11 +500,12 @@ export class Agent {
 
       // Words the user pushed into this turn while it was working. They join the
       // transcript here, where whatever tools ran last have already appended
-      // their results, and never mid-stream — see `steer`.
-      if (this.pendingSteers.length > 0) {
-        for (const text of this.pendingSteers) this.messages.push({ role: "user", content: text });
-        this.pendingSteers.length = 0;
-      }
+      // their results, and never mid-stream — see `steer`. The event fires from
+      // this same point, not from where the click landed, so a message added
+      // during a slow tool is reported too: without it the tile simply vanished
+      // and the wait had no explanation.
+      const added = this.flushSteers();
+      if (added > 0) yield { type: "continued", reason: "steered", attempt: added };
 
       // The ceiling is checked between requests, never mid-stream: a turn
       // already under way is finished, because stopping it would leave the
@@ -577,7 +604,8 @@ export class Agent {
         // nothing has answered them yet. The message is its own instruction, so
         // it is not nudged or re-asked — the next request simply carries it.
         if (this.steered > steeredAtRequest) {
-          yield { type: "continued", reason: "steered", attempt: 1 };
+          // No event here: the words have not joined the transcript yet, and the
+          // next iteration says so from where they actually do.
           continue;
         }
 
@@ -721,6 +749,10 @@ export class Agent {
       }
     }
 
+    // Out of iterations with words still held: they never reached a request, but
+    // they are the user's and they are kept, so the next turn is asked them
+    // rather than the message being lost with the tile that carried it.
+    this.flushSteers();
     yield done("max-turns");
   }
 
@@ -782,11 +814,12 @@ export class Agent {
    * A failed summary is not fatal: going over budget is better than losing the
    * conversation, so the caller carries on either way.
    */
-  private async summarise(): Promise<{ summarized: number; target: number } | null> {
+  private async summarise(manual = false): Promise<{ summarized: number; target: number } | null> {
     if (!this.compaction) return null;
 
     try {
-      const result = await compactMessages(this.provider, this.model, this.messages, this.compaction);
+      const options = manual ? { ...this.compaction, manual: true } : this.compaction;
+      const result = await compactMessages(this.provider, this.model, this.messages, options);
       if (!result) return null;
       this.messages.splice(0, this.messages.length, ...result.messages);
       return { summarized: result.summarized, target: result.target };

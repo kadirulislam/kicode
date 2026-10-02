@@ -157,14 +157,37 @@ const MODEL_FILTERS: readonly ModelFilter[] = ["all", "free", "paid"];
 const MODEL_FILTER_LABELS = ["all", "free", "paid"] as const;
 
 /** When a session last ran, in words for recent days and a date past that. */
+/**
+ * A date in the user's own system format.
+ *
+ * `Intl` with no locale named uses the system's, which is the only locale
+ * KiCode can be sure of, and `dateStyle` is what makes the result *their*
+ * format rather than a stamp: "Oct 1, 2026" in one locale, "1 Oct 2026" in
+ * another, and the date in their own calendar either way.
+ */
+function formatDay(date: Date): string {
+  return date.toLocaleDateString(undefined, { dateStyle: "medium" });
+}
+
+/** Local midnight, to count whole days by rather than elapsed hours. */
+function startOfLocalDay(date: Date): number {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+}
+
 function formatSessionDate(iso: string): string | null {
   const time = Date.parse(iso);
   if (Number.isNaN(time)) return null;
-  const diffDays = Math.floor((Date.now() - time) / 86_400_000);
+  const then = new Date(time);
+  // Whole days between two *local* midnights. Dividing a millisecond gap by 24
+  // hours instead calls a session from 11pm "2d ago" at breakfast, and counts
+  // in UTC rather than where the user is — so a session started last night read
+  // as the day before for anyone east of Greenwich. Rounding is what keeps it
+  // right across a daylight-saving change, where a local day is 23 or 25 hours.
+  const diffDays = Math.round((startOfLocalDay(new Date()) - startOfLocalDay(then)) / 86_400_000);
   if (diffDays <= 0) return "today";
   if (diffDays === 1) return "yesterday";
   if (diffDays < 7) return `${diffDays}d ago`;
-  return iso.slice(0, 10);
+  return formatDay(then);
 }
 
 /** Groups sessions by calendar date: Today, Yesterday, Previous 7 Days, Previous 30 Days, Month Year. */
@@ -194,11 +217,10 @@ function sessionGroup(session: SessionSummary): string {
   if (t >= startOf7Days) return "Previous 7 Days";
   if (t >= startOf30Days) return "Previous 30 Days";
 
-  const months = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December",
-  ];
-  return `${months[date.getMonth()]} ${date.getFullYear()}`;
+  // The month and the year, in their language and their order — a hardcoded
+  // English list is the one part of a date that cannot be read at a glance by
+  // someone whose system is not English.
+  return date.toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
 /** One line describing the session's token budget, either way. */
@@ -412,6 +434,15 @@ type ModelGroup = {
 const ESCAPE_GRACE_MS = 40;
 /** Label of the row that lets an answer be typed instead of chosen. */
 const FREE_TEXT = "Type your own answer";
+/**
+ * Commands that run even while a turn is in flight.
+ *
+ * A message typed during a turn is queued behind it, which is right for words
+ * the model should read. It is wrong for a command that only reports or lists:
+ * the queue is non-empty only while a turn runs, so putting `/queue` itself
+ * behind that turn would make it unreachable at the one moment it is useful.
+ */
+const RUNS_WHILE_BUSY = new Set(["/queue"]);
 /** Reasoning efforts worth offering; anything else the endpoint handles itself. */
 const VARIANTS = [DEFAULT_VARIANT, "low", "medium", "high"];
 
@@ -587,6 +618,12 @@ class TuiApp {
      * that has something to put back uses it.
      */
     onClose?: (committed: boolean) => void;
+    /**
+     * Marks the queue list, so an action changing the queue rebuilds the rows it
+     * was handed. It is the one list here that acts *on* its own data rather
+     * than choosing from it, and a stale row is how a stale index is acted on.
+     */
+    queue?: true;
   } | null = null;
 
   private busy: string | null = null;
@@ -626,6 +663,14 @@ class TuiApp {
   private learningInFlight = false;
   /** Queued prompts to execute in sequence when active turn finishes. */
   private queuedPrompts: Array<{ prompt: string; images: PastedImage[] }> = [];
+  /**
+   * Messages handed to the running turn that the model has not read yet.
+   *
+   * Held here as well as in the agent for two reasons: the spinner can say the
+   * wait is accounted for, and words added to a turn that then dies are put back
+   * in the queue rather than vanishing with the tile that carried them.
+   */
+  private steering: Array<{ prompt: string; images: PastedImage[] }> = [];
   /**
    * The plan tools' latest state, for the TODO chip and its panel.
    *
@@ -1209,7 +1254,8 @@ class TuiApp {
 
     // A slash line is an instruction to KiCode, not words for the model, so it
     // cannot ride along inside a turn. It keeps its ordinary path instead.
-    if (!entry.prompt.startsWith("/") && this.agent.steer(entry.prompt)) {
+    if (!entry.prompt.startsWith("/") && this.agent.steer(entry.prompt, entry.images)) {
+      this.steering.push(entry);
       this.notice = span(`added to the running turn (${this.queuedPrompts.length} queued)`, this.styles.accent);
       this.draw();
       return;
@@ -1217,6 +1263,119 @@ class TuiApp {
 
     this.notice = span(`running queued message (${this.queuedPrompts.length} queued)`, this.styles.accent);
     this.runQueued(entry);
+  }
+
+  /** The queued messages as list rows, numbered the way the tiles number them. */
+  private queueItems(): PickItem[] {
+    return this.queuedPrompts.map((entry, index) => {
+      const flat = entry.prompt.replace(/\s+/g, " ").trim();
+      const images = entry.images.length;
+      return {
+        label: `${index + 1}. ${flat.length > 68 ? `${flat.slice(0, 67)}…` : flat}`,
+        ...(images > 0 ? { description: `${images} image${images === 1 ? "" : "s"} attached` } : {}),
+        value: String(index),
+      };
+    });
+  }
+
+  /**
+   * The queue, as a list the keyboard can work.
+   *
+   * A tile's chips are reachable only with a mouse, and a queue is exactly what
+   * someone reaches for with their hands on the keys. The two things a tile
+   * offers are here — `ctrl+a` adds a message to the turn already running and
+   * `ctrl+x` drops it — plus the one a list can offer and a chip cannot: `enter`
+   * takes a message back out of the queue and into the box to rewrite it, which
+   * is most of the reason to look at a queue you cannot change your mind about.
+   *
+   * The search field is off, which is what lets the digits pick a row: on a list
+   * this short a number is a faster cursor than an arrow key, and there is
+   * nothing to search for.
+   */
+  private openQueue(): void {
+    if (this.queuedPrompts.length === 0) {
+      this.note("no messages queued in conversation (press enter while a turn runs to queue one)");
+      this.draw();
+      return;
+    }
+
+    this.openPicker(
+      `Queued messages (${this.queuedPrompts.length})`,
+      this.queueItems(),
+      (value) => this.editQueued(Number(value)),
+      [
+        {
+          key: "a",
+          hint: ["ctrl+a", "add to turn"],
+          close: false,
+          run: (item) => {
+            if (item) this.addQueuedToTurn(Number(item.value));
+            this.refreshQueuePicker();
+          },
+        },
+        {
+          key: "x",
+          hint: ["ctrl+x", "drop"],
+          close: false,
+          run: (item) => {
+            if (item) this.removeQueued(Number(item.value));
+            this.refreshQueuePicker();
+          },
+        },
+      ],
+      undefined,
+      false,
+    );
+    if (this.picker) this.picker.queue = true;
+  }
+
+  /**
+   * Rebuilds the list from the queue it just changed.
+   *
+   * The rows are a snapshot taken when the list opened, so without this a drop
+   * leaves the dropped message on screen and the next action resolves a stale
+   * index against a queue it no longer matches.
+   */
+  private refreshQueuePicker(): void {
+    const picker = this.picker;
+    if (!picker?.queue) return;
+
+    const items = this.queueItems();
+    if (items.length === 0) {
+      this.picker = null;
+      this.note("the queue is empty");
+      this.draw();
+      return;
+    }
+
+    picker.title = `Queued messages (${items.length})`;
+    picker.all = items;
+    picker.items = [...items];
+    picker.selected = Math.min(picker.selected, items.length - 1);
+    this.draw();
+  }
+
+  /**
+   * Takes a queued message back out of the queue and into the box.
+   *
+   * `enter` on the list is "give it back", not "run it now": looking at a queued
+   * message is usually how you notice it says the wrong thing, and what you want
+   * then is the words in front of you where they can be changed. They leave the
+   * queue as they arrive, so a message being edited cannot also run behind the
+   * edit — its images come back with it for the same reason.
+   */
+  private editQueued(index: number): void {
+    const entry = this.queuedPrompts[index];
+    if (!entry) return;
+    this.queuedPrompts.splice(index, 1);
+    if (entry.images.length > 0) this.attached = [...this.attached, ...entry.images];
+    this.editor.setText(entry.prompt, entry.prompt.length);
+    this.entries.push({
+      kind: "note",
+      text: "[taken back from the queue — the words are in the prompt, edit and press enter]",
+      tone: "dim",
+    });
+    this.draw();
   }
 
   /**
@@ -1695,6 +1854,17 @@ class TuiApp {
 
     // If a turn is actively running, queue subsequent submitted messages to run in sequence
     if (this.busy !== null) {
+      // Except a command that answers about the state rather than changing the
+      // turn: a bare `/queue` is about the queue, and the queue only has
+      // anything in it while a turn runs — so queueing it would put it out of
+      // reach exactly when it is wanted.
+      if (RUNS_WHILE_BUSY.has(lower.trim())) {
+        this.editor.acceptHistory(prompt);
+        this.editor.clear();
+        await this.command(prompt);
+        return;
+      }
+
       this.editor.acceptHistory(prompt);
       this.editor.clear();
       this.paletteDismissedFor = null;
@@ -2010,6 +2180,9 @@ class TuiApp {
         // The plan tools' state as data, so the TODO chip and its panel read a
         // structure rather than parsing the checklist out of rendered text.
         if (event.type === "plan") this.plan = event.snapshot;
+        // The words the user added have joined the transcript, so the wait the
+        // spinner was describing is over.
+        if (event.type === "continued" && event.reason === "steered") this.steering.splice(0, event.attempt);
         if (event.type === "tool-start") this.setBusy(`${event.name}…`);
         else if (event.type === "route-wait") this.setBusy(`rate-limited on ${event.from} — waiting ${Math.ceil(event.ms / 1000)}s…`);
         else if (event.type === "tool-result" || event.type === "text") this.setBusy("thinking…");
@@ -2043,6 +2216,21 @@ class TuiApp {
     } finally {
       this.stopBusy();
       this.goalRun = false;
+      // Words added to this turn that never reached a request — it was cancelled,
+      // or it failed first. They are the user's, they were never answered, and
+      // the tile that carried them is already gone, so they go back to the front
+      // of the queue in the order they were added.
+      if (this.steering.length > 0) {
+        const unread = this.steering;
+        this.steering = [];
+        this.queuedPrompts.unshift(...unread);
+        const count = unread.length;
+        this.entries.push({
+          kind: "note",
+          text: `${count} message${count === 1 ? "" : "s"} added to that turn went unread — back in the queue`,
+          tone: "warn",
+        });
+      }
       // Only the session that started the turn may be saved or have its queue
       // drained here. Anything else belongs to a session the user has left, and
       // writing into it is the leak this guard exists to stop.
@@ -2110,13 +2298,10 @@ class TuiApp {
           this.entries.push({ kind: "note", text: `[queued in conversation] ${argument}`, tone: "accent" });
           this.notice = span(`pushed into conversation queue (${this.queuedPrompts.length} queued)`, this.styles.accent);
         }
-      } else if (this.queuedPrompts.length === 0) {
-        this.note("no messages queued in conversation (use /queue <message> to push)");
       } else {
-        this.notes([
-          `Queued messages (${this.queuedPrompts.length}):`,
-          ...this.queuedPrompts.map((q, idx) => `  ${idx + 1}. ${q.prompt.slice(0, 60)}`),
-        ]);
+        // Bare `/queue` opens the list rather than printing one: every row there
+        // can be acted on, and a printout is a dead end you have to retype from.
+        this.openQueue();
       }
       this.draw();
       return;
@@ -3836,7 +4021,10 @@ class TuiApp {
     this.note(
       result
         ? `compacted ${result.summarized} earlier messages · ~${formatTokens(result.before)} → ~${formatTokens(result.after)} tokens (target ~${formatTokens(result.target)})`
-        : "nothing to compact yet, or the summariser failed",
+        // A named compaction now runs whatever the window holds, so this is
+        // about the session being too short to be worth shrinking, or the
+        // summariser call itself not landing.
+        : "nothing to compact — this session is already short, or the summariser failed",
     );
   }
 
@@ -5456,7 +5644,10 @@ class TuiApp {
       editor: this.editor,
       attachedImages: this.attached.length,
       attachedDocs: this.attachedDocs.map((doc) => doc.name),
-      busy: this.busy,
+      // What the spinner says, plus what the user added and the model has not
+      // read yet. It is the only sign the message was taken: its tile is gone
+      // from the queue, which on its own looks like a deletion.
+      busy: this.busy && this.steering.length > 0 ? `${this.busy} · +${this.steering.length} to read` : this.busy,
       spinnerFrame: this.spinnerFrame,
       model: this.model,
       messageCount: this.agent.turns.length,

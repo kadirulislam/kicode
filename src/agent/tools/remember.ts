@@ -28,6 +28,21 @@ const MAX_DESCRIPTION_CHARS = 200;
 const SKILL_NAME = /^[a-z0-9][a-z0-9-]*$/;
 const MEMORY_SLUG = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
 
+/**
+ * The local calendar date, as `YYYY-MM-DD`.
+ *
+ * Read back by a person and sorted by a machine, so the stamp keeps its sortable
+ * shape — but it is the *local* day, because one taken from UTC dates a memory
+ * to yesterday for anyone west of Greenwich and to tomorrow for anyone far
+ * enough east. Only the calendar is local: the format stays ISO because it is
+ * data, not something to be read in a system's own style.
+ */
+function localDay(date = new Date()): string {
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+}
+
 /** Shapes the tool refuses to persist: a secret must never be written to disk by anyone. */
 const SECRET_PATTERNS = [/-{5}BEGIN [A-Z ]*PRIVATE KEY-{5}/, /\bsk-[A-Za-z0-9]{20,}\b/];
 
@@ -193,7 +208,7 @@ export async function saveMemory(
   }
   const file = path.join(brain, "memories", "projects", `${slug}.md`);
   const capped = entry.length > MAX_MEMORY_CHARS ? `${entry.slice(0, MAX_MEMORY_CHARS).trimEnd()}\n… (truncated)` : entry.trimEnd();
-  const stamped = `\n## ${new Date().toISOString().slice(0, 10)}\n- ${capped.split("\n").join("\n  ")}\n`;
+  const stamped = `\n## ${localDay()}\n- ${capped.split("\n").join("\n  ")}\n`;
 
   let existing: string | null = null;
   try {
