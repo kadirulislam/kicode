@@ -56,6 +56,29 @@ export type FileFallbackRoute = {
   baseUrl?: string;
 };
 
+/**
+ * The `delegation` block of `kicode.json`:
+ *
+ * ```jsonc
+ * { "delegation": { "model": "gemini-3.8-flash", "maxConcurrent": 4 } }
+ * ```
+ *
+ * `model` and `baseUrl` left out mean the children use whatever the parent is
+ * using, which is the safe default; naming a cheaper model is the whole point
+ * of the block, since a parallel batch of children is where a run's tokens
+ * actually go.
+ */
+export type FileDelegationSettings = {
+  enabled?: boolean;
+  model?: string;
+  baseUrl?: string;
+  maxConcurrent?: number;
+  maxPerTurn?: number;
+  maxIterations?: number;
+  staleMs?: number;
+  staleToolMs?: number;
+};
+
 export type FileSettings = {
   model?: string;
   /** The colour theme by name, e.g. `tokyo-night`. `/themes` lists them. */
@@ -103,6 +126,7 @@ export type FileSettings = {
    */
   brain?: string;
   compaction?: FileCompactionSettings;
+  delegation?: FileDelegationSettings;
 };
 
 export type FileSettingsResult = {
@@ -170,6 +194,11 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
     if (json.provider !== undefined) {
       if (typeof json.provider === "string" && json.provider.trim() !== "") settings.provider = json.provider.trim();
       else warnings.push(`Ignoring "provider" in ${entry.file}: expected a non-empty string.`);
+    }
+
+    if (json.delegation !== undefined) {
+      const parsed = readDelegation(json.delegation, entry.file, warnings);
+      if (parsed) settings.delegation = { ...settings.delegation, ...parsed };
     }
 
     if (json.providers !== undefined) {
@@ -317,6 +346,53 @@ function readAllow(value: unknown, file: string, warnings: string[]): Record<str
   }
 
   return Object.keys(allow).length > 0 ? allow : null;
+}
+
+/**
+ * The `delegation` block, validated one key at a time.
+ *
+ * Per key rather than all-or-nothing, for the reason `providers` does the same:
+ * a typo in `maxConcurrent` should not also throw away a perfectly good
+ * `model` pin — the one line in this block that actually costs nothing to get
+ * wrong would otherwise be lost to the one that does.
+ */
+function readDelegation(
+  json: unknown,
+  file: string,
+  warnings: string[],
+): FileDelegationSettings | null {
+  if (json === null || typeof json !== "object" || Array.isArray(json)) {
+    warnings.push(`Ignoring "delegation" in ${file}: expected an object.`);
+    return null;
+  }
+  const source = json as Record<string, unknown>;
+  const out: FileDelegationSettings = {};
+
+  if (source.enabled !== undefined) {
+    if (typeof source.enabled === "boolean") out.enabled = source.enabled;
+    else warnings.push(`Ignoring "delegation.enabled" in ${file}: expected true or false.`);
+  }
+  for (const key of ["model", "baseUrl"] as const) {
+    const value = source[key];
+    if (value === undefined) continue;
+    if (typeof value === "string" && value.trim() !== "") out[key] = value.trim();
+    else warnings.push(`Ignoring "delegation.${key}" in ${file}: expected a non-empty string.`);
+  }
+  if (out.baseUrl !== undefined && !/^https?:\/\//i.test(out.baseUrl)) {
+    warnings.push(`Ignoring "delegation.baseUrl" in ${file}: expected an http(s) URL.`);
+    delete out.baseUrl;
+  }
+  for (const key of ["maxConcurrent", "maxPerTurn", "maxIterations", "staleMs", "staleToolMs"] as const) {
+    const value = source[key];
+    if (value === undefined) continue;
+    const parsed = positiveInt(value);
+    if (parsed === null) {
+      warnings.push(`Ignoring "delegation.${key}" in ${file}: expected a positive number of milliseconds or count.`);
+    } else {
+      out[key] = parsed;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 function readProviders(value: unknown, file: string, warnings: string[]): Record<string, FileProvider> | null {

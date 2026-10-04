@@ -52,6 +52,82 @@ describe("fileSettingsFromEntries", () => {
     expect(result.settings.baseUrl).toBe("https://global.example.com/v1");
   });
 
+  describe("the delegation block", () => {
+    it("reads a pin and its caps", () => {
+      const result = fileSettingsFromEntries([
+        entry({ delegation: { enabled: true, model: "flash", maxConcurrent: 2, maxPerTurn: 6, maxIterations: 30 } }),
+      ]);
+
+      expect(result.settings.delegation).toEqual({
+        enabled: true,
+        model: "flash",
+        maxConcurrent: 2,
+        maxPerTurn: 6,
+        maxIterations: 30,
+      });
+      expect(result.warnings).toEqual([]);
+    });
+
+    it("merges across files, so a project can pin a model over a global cap", () => {
+      const result = fileSettingsFromEntries([
+        entry({ delegation: { model: "global-child", maxConcurrent: 8 } }, "global"),
+        entry({ delegation: { model: "project-child" } }, "project"),
+      ]);
+
+      expect(result.settings.delegation).toEqual({ model: "project-child", maxConcurrent: 8 });
+    });
+
+    it("drops one bad key and keeps the good ones beside it", () => {
+      // A typo in a cap should not also throw away the model pin — the one line
+      // in this block that costs nothing to get wrong.
+      const result = fileSettingsFromEntries([
+        entry({ delegation: { model: "flash", maxConcurrent: "lots", staleMs: -1 } }),
+      ]);
+
+      expect(result.settings.delegation).toEqual({ model: "flash" });
+      expect(result.warnings).toHaveLength(2);
+      expect(result.warnings[0]).toContain('Ignoring "delegation.maxConcurrent"');
+      expect(result.warnings[1]).toContain('Ignoring "delegation.staleMs"');
+    });
+
+    it("refuses a baseUrl that is not one, since a child would talk to it", () => {
+      const result = fileSettingsFromEntries([entry({ delegation: { baseUrl: "javascript:alert(1)" } })]);
+
+      expect(result.settings.delegation).toBeUndefined();
+      expect(result.warnings[0]).toContain("expected an http(s) URL");
+    });
+
+    it("accepts a real http endpoint", () => {
+      const result = fileSettingsFromEntries([
+        entry({ delegation: { baseUrl: "https://gateway.example.com/v1" } }),
+      ]);
+
+      expect(result.settings.delegation?.baseUrl).toBe("https://gateway.example.com/v1");
+      expect(result.warnings).toEqual([]);
+    });
+
+    it("warns when the block is not an object", () => {
+      const result = fileSettingsFromEntries([entry({ delegation: "off" })]);
+
+      expect(result.settings.delegation).toBeUndefined();
+      expect(result.warnings[0]).toContain('Ignoring "delegation"');
+    });
+
+    it("refuses an enabled that is not a boolean", () => {
+      const result = fileSettingsFromEntries([entry({ delegation: { enabled: "yes" } })]);
+
+      expect(result.settings.delegation).toBeUndefined();
+      expect(result.warnings[0]).toContain("expected true or false");
+    });
+
+    it("ignores an empty model, because empty already means the parent's", () => {
+      const result = fileSettingsFromEntries([entry({ delegation: { model: "   " } })]);
+
+      expect(result.settings.delegation).toBeUndefined();
+      expect(result.warnings[0]).toContain("expected a non-empty string");
+    });
+  });
+
   it("merges compaction across files rather than replacing the block", () => {
     const result = fileSettingsFromEntries([
       entry({ compaction: { contextTokens: 100_000, targetPercent: 35 } }, "global"),

@@ -2,11 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SPACING,
   SETTING_KEYS,
+  SETTING_SHORTCUTS,
+  SPACING_KEYS,
   cycleValue,
   defaultViewSettings,
   filterSettings,
+  filterShortcuts,
+  setSettingValue,
   settingDefs,
   settingOptions,
+  settingValue,
   stepSetting,
   viewFrom,
 } from "./settings";
@@ -22,9 +27,11 @@ describe("the view settings", () => {
     const defs = settingDefs(defaultViewSettings());
     const ids = defs.map((def) => def.id);
     expect(new Set(ids).size).toBe(ids.length);
-    // Every row the values are validated against is a row the panel draws.
+    // Every row the values are validated against is a row the panel draws, and
+    // the three spacing numbers arrive as dotted rows.
     for (const key of SETTING_KEYS) expect(ids).toContain(key);
-    expect(new Set(ids).size).toBe(SETTING_KEYS.length + 1);
+    for (const key of SPACING_KEYS) expect(ids).toContain(`spacing.${key}`);
+    expect(new Set(ids).size).toBe(SETTING_KEYS.length + 1 + SPACING_KEYS.length);
   });
 
   it("describes every row, because a settings screen that explains nothing is a guess", () => {
@@ -37,7 +44,7 @@ describe("the view settings", () => {
   it("has no row that changes nothing — every value is one it offers", () => {
     const view = defaultViewSettings();
     for (const def of settingDefs(view)) {
-      expect(def.options, def.id).toContain(String(view[def.id]));
+      expect(def.options, def.id).toContain(settingValue(view, def.id));
     }
   });
 });
@@ -152,5 +159,42 @@ describe("settings from a config file", () => {
   it("keeps the declared values it was given", () => {
     const view = viewFrom("nord", { verbosity: "high", markdown: "raw" });
     expect(view).toMatchObject({ verbosity: "high", markdown: "raw", theme: "nord", colorMode: "dark" });
+  });
+});
+
+describe("the settings shortcuts", () => {
+  it("lists the seven doors in panel order, each explained", () => {
+    expect(SETTING_SHORTCUTS.map((shortcut) => shortcut.id)).toEqual([
+      "shortcut:connect",
+      "shortcut:models",
+      "shortcut:sessions",
+      "shortcut:compact",
+      "shortcut:skills",
+      "shortcut:tools",
+      "shortcut:mcp",
+    ]);
+    for (const shortcut of SETTING_SHORTCUTS) {
+      expect(shortcut.label.length).toBeGreaterThan(0);
+      expect(shortcut.description.length).toBeGreaterThan(10);
+    }
+  });
+
+  it("keeps every shortcut row, unfiltered, when nothing has been typed", () => {
+    expect(filterShortcuts("  ").map((shortcut) => shortcut.id)).toEqual(
+      SETTING_SHORTCUTS.map((shortcut) => shortcut.id),
+    );
+  });
+
+  it("matches the label and the effect, ignoring case", () => {
+    expect(filterShortcuts("MODEL").map((shortcut) => shortcut.id)).toEqual(["shortcut:models"]);
+    // The description is searched too: "endpoint" is what Connect is about.
+    expect(filterShortcuts("endpoint").map((shortcut) => shortcut.id)).toEqual([
+      "shortcut:connect",
+      "shortcut:models",
+    ]);
+  });
+
+  it("matches nothing rather than everything when there is no match", () => {
+    expect(filterShortcuts("chartreuse")).toEqual([]);
   });
 });

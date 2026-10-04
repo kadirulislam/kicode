@@ -1,7 +1,8 @@
 # KiCode Project Status
 
-**Current Version:** 0.1.1  
-**Build Status:** Stable, All 1118 Tests Passing (52 test suites)  
+**Current Version:** 0.2.0  
+**Build Status:** Stable, All 1314 Tests Passing (56 test suites)  
+**Subagent delegation:** built (ADR-053) — one `delegate` tool, read-only children (`read`, `glob`, `grep`, `recall`), a live dock above the prompt plus `/agents` for the roster; one `delegation.model` pin, empty by default so a fresh install spends no second model's money. Verified end to end against the mock provider (`MOCK_TOOL=delegate`, `MOCK_LOG=1`). Known gap: a child's tokens are not charged to the parent's ledger, so `/usage` under-reports a delegated session  
 **Release readiness:** see [`LAUNCH.md`](LAUNCH.md) — artifacts and paths verified end to end; publishing runs from CI with provenance, so the owner must first rotate the leaked keys, scrub history and make the repository public  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
 **Binary Distribution:** Built (`dist/cli.js`, ~300 KB **minified**, ADR-037) via `npm run build`  

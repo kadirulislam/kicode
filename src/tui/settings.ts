@@ -82,7 +82,7 @@ export type ViewOverrides = Partial<Omit<ViewSettings, "spacing">> & { spacing?:
 
 /** One row of the settings panel. */
 export type SettingDef = {
-  id: keyof ViewSettings;
+  id: SettingId;
   group: string;
   label: string;
   /** The values it cycles through, in order. */
@@ -91,8 +91,106 @@ export type SettingDef = {
   description: string;
 };
 
+/**
+ * A row id: a top-level setting, or one of the three spacing numbers as
+ * `spacing.block` and friends. The panel speaks in single values, so the
+ * nested object arrives as three rows rather than one it cannot step.
+ */
+export type SettingId = keyof ViewSettings | `spacing.${(typeof SPACING_KEYS)[number]}`;
+
+/** The numbers a spacing row steps through: none, up to the ceiling. */
+const SPACING_OPTIONS = Array.from({ length: MAX_SPACING + 1 }, (_, index) => String(index));
+
+/** The value a row shows, whatever shape its setting is stored in. */
+export function settingValue(view: ViewSettings, id: SettingId): string {
+  if (id.startsWith("spacing.")) {
+    const key = id.slice("spacing.".length);
+    if (key === "block" || key === "entry" || key === "turn") return String(view.spacing[key]);
+    return "";
+  }
+  return String(view[id as keyof ViewSettings]);
+}
+
+/**
+ * A view with one row's value adopted — a full spacing object when the row is
+ * one of its numbers, so a write never stores two of the three and drops the
+ * third. Out-of-range numbers clamp; an unknown row or a non-number leaves
+ * the view untouched, so no patch (and no write) follows.
+ */
+export function setSettingValue(view: ViewSettings, id: SettingId, value: string): ViewSettings {
+  if (!id.startsWith("spacing.")) return { ...view, [id]: value } as ViewSettings;
+  const key = id.slice("spacing.".length);
+  if (key !== "block" && key !== "entry" && key !== "turn") return view;
+  const parsed = Number.parseInt(value, 10);
+  const next = Number.isNaN(parsed) ? view.spacing[key] : Math.min(Math.max(parsed, 0), MAX_SPACING);
+  if (next === view.spacing[key]) return view;
+  return { ...view, spacing: { ...view.spacing, [key]: next } };
+}
+
 /** Rows in the order the panel draws them. */
-export const SETTINGS_GROUPS = ["Appearance", "Session"] as const;
+export const SETTINGS_GROUPS = ["Appearance", "Session", "Spacing"] as const;
+
+/**
+ * A shortcut row at the top of the settings panel: a door, not a value.
+ *
+ * Settings are stepped in place; these leave the panel for the screen that
+ * owns the thing — the model list, the session list, the connect menu. The
+ * `shortcut:` prefix keeps their ids from ever colliding with a SettingId, so
+ * a value lookup can never mistake one for a setting.
+ */
+export type SettingShortcut = {
+  id: string;
+  label: string;
+  description: string;
+};
+
+/** The doors, in the order the panel draws them — most reached-for first. */
+export const SETTING_SHORTCUTS: readonly SettingShortcut[] = [
+  {
+    id: "shortcut:connect",
+    label: "Connect / Provider",
+    description: "Add an endpoint KiCode can reach, or switch to one.",
+  },
+  {
+    id: "shortcut:models",
+    label: "Models",
+    description: "Pick a model — choosing one chooses its endpoint too.",
+  },
+  {
+    id: "shortcut:sessions",
+    label: "Sessions",
+    description: "Switch to another session in this directory.",
+  },
+  {
+    id: "shortcut:compact",
+    label: "Compact",
+    description: "Compact the transcript now, not when the window fills.",
+  },
+  {
+    id: "shortcut:skills",
+    label: "Skills",
+    description: "Browse the brain's skills, and use one as @skill:.",
+  },
+  {
+    id: "shortcut:tools",
+    label: "Tools",
+    description: "What this session can call — names and one line each.",
+  },
+  {
+    id: "shortcut:mcp",
+    label: "MCP",
+    description: "Which MCP servers are connected for this project.",
+  },
+];
+
+/** Shortcut rows matching what has been typed, in panel order. */
+export function filterShortcuts(query: string): SettingShortcut[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [...SETTING_SHORTCUTS];
+  return SETTING_SHORTCUTS.filter((shortcut) =>
+    `${shortcut.label} ${shortcut.description}`.toLowerCase().includes(needle),
+  );
+}
 
 export function defaultViewSettings(): ViewSettings {
   return {
@@ -199,6 +297,27 @@ export function settingDefs(view: ViewSettings): SettingDef[] {
       options: ["on", "off"],
       description: "The line under each answer: mode, model, time and tokens a second.",
     },
+    {
+      id: "spacing.block",
+      group: "Spacing",
+      label: "Request padding",
+      options: SPACING_OPTIONS,
+      description: "Rows of padding above and below the text inside a request block.",
+    },
+    {
+      id: "spacing.entry",
+      group: "Spacing",
+      label: "Entry gap",
+      options: SPACING_OPTIONS,
+      description: "Blank rows between two entries.",
+    },
+    {
+      id: "spacing.turn",
+      group: "Spacing",
+      label: "Turn gap",
+      options: SPACING_OPTIONS,
+      description: "The extra rows on either side of a request, where the turn turns over.",
+    },
   ];
 }
 
@@ -263,12 +382,12 @@ export function cycleValue(def: SettingDef, current: string, delta: number): str
  * the theme moves to the first one of that mode. That is the only setting that
  * touches another, and it is why this returns the set rather than a value.
  */
-export function stepSetting(view: ViewSettings, id: keyof ViewSettings, delta: number): ViewSettings {
+export function stepSetting(view: ViewSettings, id: SettingId, delta: number): ViewSettings {
   const def = settingDefs(view).find((entry) => entry.id === id);
   if (!def) return view;
 
-  const value = cycleValue(def, String(view[id]), delta);
-  if (id !== "colorMode") return { ...view, [id]: value } as ViewSettings;
+  const value = cycleValue(def, settingValue(view, def.id), delta);
+  if (def.id !== "colorMode") return setSettingValue(view, def.id, value);
 
   const mode = value === "light" ? "light" : "dark";
   const theme = themeMode(view.theme) === mode ? view.theme : (themeNamesFor(mode)[0] ?? view.theme);
@@ -280,6 +399,6 @@ export function filterSettings(defs: readonly SettingDef[], view: ViewSettings, 
   const needle = query.trim().toLowerCase();
   if (!needle) return [...defs];
   return defs.filter((def) =>
-    `${def.label} ${def.group} ${String(view[def.id])} ${def.description}`.toLowerCase().includes(needle),
+    `${def.label} ${def.group} ${settingValue(view, def.id)} ${def.description}`.toLowerCase().includes(needle),
   );
 }

@@ -169,6 +169,122 @@ describe("the live todo card", () => {
   });
 });
 
+describe("a delegation", () => {
+  const child = (over: Partial<Extract<AgentEvent, { type: "subagents" }>["state"][number]> = {}) => ({
+    id: "sa-1",
+    goal: "find the loop",
+    model: "flash",
+    status: "running" as const,
+    ms: 500,
+    toolCalls: 1,
+    ...over,
+  });
+  const started: AgentEvent = { type: "tool-start", id: "d1", name: "delegate", args: { goal: "find the loop" } };
+
+  it("opens a row of its own, so a silent child is not invisible", () => {
+    const entries = feed([started]);
+
+    // The child runs for a while and the parent's own words say nothing about
+    // it, so without a row a user watching the spinner has no way to know work
+    // is happening off-screen.
+    expect(text(entries)).toContain("delegating");
+  });
+
+  it("does not open a row for every other tool", () => {
+    const entries = feed([{ type: "tool-start", id: "r1", name: "read", args: {} }]);
+
+    expect(text(entries)).not.toContain("delegating");
+  });
+
+  it("one row for a whole batch, not one per child", () => {
+    const entries = feed([
+      started,
+      { type: "text", delta: "the parent thinks while they run" },
+      {
+        type: "subagents",
+        state: [
+          child({ id: "sa-1", status: "completed" }),
+          child({ id: "sa-2", status: "completed" }),
+          child({ id: "sa-3", status: "completed" }),
+        ],
+      },
+    ]);
+
+    expect(entries.filter((entry) => entry.kind === "note" && entry.text.includes("delegated"))).toHaveLength(1);
+    expect(text(entries)).toContain("delegated 3 tasks");
+  });
+
+  it("settles the row in place, where the work started", () => {
+    const entries = feed([
+      started,
+      { type: "text", delta: "the parent thinks while they run" },
+      { type: "subagents", state: [child({ status: "completed" })] },
+    ]);
+
+    const note = entries.findIndex((entry) => entry.kind === "note" && entry.text.includes("delegated"));
+    const thoughts = entries.findIndex((entry) => entry.kind === "assistant");
+
+    // Replaced rather than appended, so the row sits where the delegation
+    // started instead of after whatever the parent said while it ran.
+    expect(note).toBeLessThan(thoughts);
+    expect(text(entries)).toContain("reported");
+  });
+
+  it("names what did not finish, and says so in the warn tone", () => {
+    const entries = feed([
+      started,
+      {
+        type: "subagents",
+        state: [
+          child({ id: "sa-1", status: "completed" }),
+          child({ id: "sa-2", status: "failed", error: "no route to that gateway" }),
+        ],
+      },
+    ]);
+
+    const note = entries.find((entry) => entry.kind === "note" && entry.text.includes("did not finish"));
+    expect(note).toMatchObject({ tone: "warn" });
+    // A child that died is the one thing the parent must not have to go
+    // looking for, so the reason travels with the count.
+    expect(text(entries)).toContain("no route to that gateway");
+  });
+
+  it("waits for the whole batch rather than settling on the first child", () => {
+    const entries = feed([
+      started,
+      {
+        type: "subagents",
+        state: [
+          child({ id: "sa-1", status: "completed" }),
+          child({ id: "sa-2", status: "running" }),
+          child({ id: "sa-3", status: "running" }),
+        ],
+      },
+    ]);
+
+    // One child of three settling is not a delegation that reported. Settling
+    // here would replace the row with "1 task · reported" and then leave the
+    // other two to finish into a row that no longer exists — which is how two
+    // children end up failing in silence.
+    expect(text(entries)).not.toContain("delegated");
+  });
+
+  it("says how many are still going while the batch is in flight", () => {
+    const entries = feed([
+      started,
+      {
+        type: "subagents",
+        state: [
+          child({ id: "sa-1", status: "completed" }),
+          child({ id: "sa-2", status: "running" }),
+        ],
+      },
+    ]);
+
+    expect(text(entries)).toContain("delegating 1 of 2");
+  });
+});
+
 describe("result lines", () => {
   const result = (content: string): Entry => ({ kind: "result", name: "read", content, isError: false });
 

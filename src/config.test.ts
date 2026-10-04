@@ -2,8 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_COMPACT_AT_TOKENS,
   DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+  DEFAULT_MAX_SUBAGENTS_PER_TURN,
   DEFAULT_MAX_TURNS,
   DEFAULT_MODEL,
+  DEFAULT_SUBAGENT_ITERATIONS,
+  DEFAULT_SUBAGENT_STALE_MS,
+  DEFAULT_SUBAGENT_STALE_TOOL_MS,
   MOCK_API_KEY,
   MOCK_BASE_URL,
   loadConfig,
@@ -227,6 +232,65 @@ describe("compaction settings", () => {
   it("ignores a nonsense context size and keeps the default", () => {
     expect(loadConfig({ KICODE_CONTEXT_TOKENS: "banana" }, {}).compaction.contextTokens).toBe(DEFAULT_CONTEXT_TOKENS);
     expect(loadConfig({ KICODE_CONTEXT_TOKENS: "-5" }, {}).compaction.contextTokens).toBe(DEFAULT_CONTEXT_TOKENS);
+  });
+});
+
+describe("delegation settings", () => {
+  it("uses the documented defaults", () => {
+    const config = loadConfig({}, {});
+
+    // Named through the constants, as compaction's are, so a change is one edit
+    // rather than a scavenger hunt.
+    expect(config.delegation.enabled).toBe(true);
+    expect(config.delegation.model).toBe("");
+    expect(config.delegation.maxConcurrent).toBe(DEFAULT_MAX_CONCURRENT_SUBAGENTS);
+    expect(config.delegation.maxPerTurn).toBe(DEFAULT_MAX_SUBAGENTS_PER_TURN);
+    expect(config.delegation.maxIterations).toBe(DEFAULT_SUBAGENT_ITERATIONS);
+    expect(config.delegation.staleMs).toBe(DEFAULT_SUBAGENT_STALE_MS);
+    expect(config.delegation.staleToolMs).toBe(DEFAULT_SUBAGENT_STALE_TOOL_MS);
+  });
+
+  it("keeps a tool in flight longer than one between requests", () => {
+    // A legitimate long command or fetch is silent too, so the in-tool figure
+    // has to be the larger one or it would cut off work about to land.
+    expect(DEFAULT_SUBAGENT_STALE_TOOL_MS).toBeGreaterThan(DEFAULT_SUBAGENT_STALE_MS);
+  });
+
+  it("leaves the child's model empty so it inherits the parent's", () => {
+    // The pin is opt-in: a fresh install must not silently spend a second
+    // model's money on children.
+    expect(loadConfig({}, {}).delegation.model).toBe("");
+  });
+
+  it("reads the pin and the caps from the file", () => {
+    const config = loadConfig({}, { delegation: { model: "flash", maxConcurrent: 2, maxPerTurn: 4 } });
+
+    expect(config.delegation.model).toBe("flash");
+    expect(config.delegation.maxConcurrent).toBe(2);
+    expect(config.delegation.maxPerTurn).toBe(4);
+  });
+
+  it("turns it off from the file", () => {
+    expect(loadConfig({}, { delegation: { enabled: false } }).delegation.enabled).toBe(false);
+  });
+
+  it("turns it off from the environment, in every spelling a shell produces", () => {
+    for (const value of ["off", "OFF", "false", "0", "no"]) {
+      expect(loadConfig({ KICODE_DELEGATION: value }, { delegation: { enabled: true } }).delegation.enabled).toBe(false);
+    }
+  });
+
+  it("leaves it on for an environment value that is not a refusal", () => {
+    expect(loadConfig({ KICODE_DELEGATION: "on" }, {}).delegation.enabled).toBe(true);
+    // An empty value is a shell that exported the name and nothing else, which
+    // is not a decision to disable anything.
+    expect(loadConfig({ KICODE_DELEGATION: "" }, {}).delegation.enabled).toBe(true);
+  });
+
+  it("ignores a nonsense cap rather than spawning nothing", () => {
+    const config = loadConfig({ KICODE_DELEGATION_CONCURRENT: "banana" }, { delegation: { maxConcurrent: 0 } });
+
+    expect(config.delegation.maxConcurrent).toBe(DEFAULT_MAX_CONCURRENT_SUBAGENTS);
   });
 });
 

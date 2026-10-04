@@ -5,7 +5,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_COMPACT_AT_TOKENS,
   DEFAULT_CONTEXT_TOKENS,
+  DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+  DEFAULT_MAX_SUBAGENTS_PER_TURN,
   DEFAULT_MODEL,
+  DEFAULT_SUBAGENT_ITERATIONS,
+  DEFAULT_SUBAGENT_STALE_MS,
+  DEFAULT_SUBAGENT_STALE_TOOL_MS,
   MOCK_BASE_URL,
   type Config,
 } from "../config";
@@ -46,6 +51,16 @@ function config(overrides: Partial<Config> = {}): Config {
       reserveTokens: 8_000,
       targetPercent: 40,
       compactAt: DEFAULT_COMPACT_AT_TOKENS,
+    },
+    delegation: {
+      enabled: true,
+      model: "",
+      baseUrl: "",
+      maxConcurrent: DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+      maxPerTurn: DEFAULT_MAX_SUBAGENTS_PER_TURN,
+      maxIterations: DEFAULT_SUBAGENT_ITERATIONS,
+      staleMs: DEFAULT_SUBAGENT_STALE_MS,
+      staleToolMs: DEFAULT_SUBAGENT_STALE_TOOL_MS,
     },
     ...overrides,
   };

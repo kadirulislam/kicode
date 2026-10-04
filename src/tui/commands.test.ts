@@ -75,18 +75,28 @@ describe("isAvailable", () => {
 });
 
 describe("stepSelectable", () => {
+  // The first five live commands: none of them unavailable, because `/agents`
+  // became one and the fixtures below are about stepping, not about skipping.
   const items = COMMANDS.slice(0, 5).map((command) => ({ ...command }));
 
   it("skips the names that cannot run", () => {
-    // /agents cannot run here, so a step down from it lands on something that can.
-    expect(items[0]?.name).toBe("agents");
-    expect(items[1]?.name).toBe("btw");
-    expect(items[stepSelectable(items, 0, 1)]?.name).toBe("btw");
+    // With `/plan` marked unavailable, a step down from it lands on something
+    // that can — the wrap rule, checked against a name that is actually gated.
+    const gated = items.map((command, index) =>
+      command.name === "btw" ? { ...command, unavailable: "no" } : { ...command, index },
+    );
+    const from = gated.findIndex((command) => command.name === "btw");
+    expect(stepSelectable(gated, from, 1)).not.toBe(from);
+    expect(stepSelectable(gated, from, 1)).toBe(from + 1);
   });
 
   it("wraps around both ends", () => {
     const last = items.length - 1;
-    expect(stepSelectable(items, last, 1)).toBe(stepSelectable(items, 0, 1));
+    // Down past the last lands on the first, and up past the first lands on
+    // the last. All five are available, so no skipping is involved and the
+    // wrap is the whole behaviour.
+    expect(stepSelectable(items, last, 1)).toBe(0);
+    expect(stepSelectable(items, 0, -1)).toBe(last);
   });
 
   it("stays put when nothing can be chosen", () => {
@@ -105,10 +115,10 @@ describe("filterCommands", () => {
     // No aliases and nothing that only explains itself.
     for (const name of ["q", "quit", "open", "project", "projects", "resume", "effort", "thinking"])
       expect(names).not.toContain(name);
-    for (const name of ["agents", "pair", "plugins", "restart", "share", "web", "worktrees"])
+    for (const name of ["pair", "plugins", "restart", "share", "web", "worktrees"])
       expect(names).not.toContain(name);
     // …but the real ones are all there.
-    for (const name of ["btw", "budget", "models", "sessions", "exit", "variants", "skills"])
+    for (const name of ["agents", "btw", "budget", "models", "sessions", "exit", "variants", "skills"])
       expect(names).toContain(name);
   });
 

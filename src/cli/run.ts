@@ -7,7 +7,9 @@ import { brainBriefing } from "../agent/brain";
 import { Agent, DEFAULT_SYSTEM_PROMPT, type AgentEvent, type ApproveFn } from "../agent/loop";
 import type { AskAnswer, AskFn } from "../agent/ask";
 import { allowPredicate } from "../agent/allow";
-import { createDefaultTools } from "../agent/tools";
+import { createDefaultTools, SUBAGENT_TOOLS } from "../agent/tools";
+import { SUBAGENT_SYSTEM_PROMPT, SubagentRegistry, childRunner, delegateTool } from "../agent/subagent";
+import type { Tool } from "../agent/tools/types";
 import { apiKeyEnvFor, loadConfig, validateConfig, type Config, type FallbackRoute } from "../config";
 import { addGlobalProvider, writeGlobalSettings } from "../settings-write";
 import { keysFilePath, readStoredKeys, writeStoredKey } from "../keys-file";
@@ -560,6 +562,31 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       mode?: SessionMode;
       /** What the OpenCode session header carries; one id per conversation. */
       sessionId?: string;
+      /**
+       * A different system prompt and a different toolset — how a child agent
+       * is built.
+       *
+       * The prompt and the tool list are the isolation. A child that keeps the
+       * parent's rules is told to ask the user questions it has no way to ask,
+       * and given tools it cannot use; the read-only subset means it holds
+       * nothing to be talked into using.
+       */
+      systemPrompt?: string;
+      tools?: readonly string[];
+      /** The child's own request ceiling, rather than the session's. */
+      maxTurns?: number;
+      /**
+       * Stops this agent's work — a child's own signal, so a wedged child can be
+       * cut loose without cancelling the turn that delegated it.
+       */
+      signal?: AbortSignal;
+      /**
+       * Tools this agent adds on top of the defaults — the `delegate` tool.
+       *
+       * Passed in rather than built here because the tool carries the caller's
+       * live child registry, and this factory has never heard of the caller.
+       */
+      extraTools?: Tool[];
     } = {},
   ): Agent => {
     const cwd = settings.cwd ?? io.cwd;
@@ -630,15 +657,26 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
     return new Agent({
       provider,
-      tools: createDefaultTools(mcp?.tools ?? [], { ask: canAsk }),
+      tools: settings.tools
+        ? createDefaultTools(mcp?.tools ?? []).subset(settings.tools)
+        : createDefaultTools([...(mcp?.tools ?? []), ...(settings.extraTools ?? [])], { ask: canAsk }),
       model,
       cwd,
-      maxTurns: config.maxTurns,
+      // A child carries its own, smaller ceiling: a delegated task should be
+      // finished, not expanded, and a runaway child should stop on its own
+      // budget rather than on the session's.
+      maxTurns: settings.maxTurns ?? config.maxTurns,
       maxTokens: config.maxTokens,
+      ...(settings.signal ? { signal: settings.signal } : {}),
       // The `allow` rules from kicode.json. Read-only calls bypass the prompt on
       // their own (`loop.ts`); these are the ones the user named explicitly.
       allow: allowPredicate(config.allow),
       ...(instructions ? { systemPrompt: instructions } : {}),
+      // A child's own prompt wins over the directory's: the AGENTS.md block
+      // describes how the user's project is worked on, and a delegated task is
+      // already scoped tightly enough that the block is mostly noise it would
+      // have to spend a turn reading past.
+      ...(settings.systemPrompt ? { systemPrompt: settings.systemPrompt } : {}),
       ...(settings.variant && settings.variant !== "default" ? { reasoningEffort: settings.variant } : {}),
       // Plan mode is enforced inside the agent: the approval-gated tools are
       // refused outright rather than prompted for and refused every time.
@@ -650,9 +688,83 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
     });
   };
 
+  /**
+   * A child agent: this same factory with a different model, a read-only
+   * toolset, and no approval or question channel.
+   *
+   * The prompt and the tool list are the isolation. A child that kept the
+   * parent's rules would be told to ask the user questions it has no way to ask,
+   * and given tools it cannot use; `--yes` is deliberately not forwarded,
+   * because a child that could self-approve would be a child that could write.
+   *
+   * Shared by both doors — the TUI and the one-shot path — so a child is the
+   * same thing whichever way the work arrived.
+   */
+  const buildChild = ({ goal, model, maxTurns, signal }: {
+    goal: string;
+    context: string;
+    model: string;
+    maxTurns: number;
+    signal: AbortSignal;
+  }): Agent =>
+    createAgent(undefined, {
+      model: model || config.delegation.model || config.model,
+      baseUrl: config.delegation.baseUrl || undefined,
+      cwd: io.cwd,
+      systemPrompt: SUBAGENT_SYSTEM_PROMPT,
+      tools: SUBAGENT_TOOLS,
+      maxTurns,
+      signal,
+      // A distinct session id per child: a gateway that routes per conversation
+      // sees each child's work as its own thread, which is what it is.
+      sessionId: `subagent-${goal.slice(0, 12)}`,
+    });
+
+  /**
+   * The `delegate` tool, when delegation is on.
+   *
+   * Built here as well as for the TUI because `kicode -p "…"` is a supported way
+   * to run, and a capability that silently exists in one of the two doors is
+   * worse than one that exists in neither.
+   */
+  const delegateToolForRun = (): Tool | null => {
+    if (!config.delegation.enabled) return null;
+    const registry = new SubagentRegistry();
+    // One turn, so the counter only has to survive this run.
+    let spawned = 0;
+    const run = childRunner({
+      create: buildChild,
+      registry,
+      model: config.delegation.model || config.model,
+      maxIterations: config.delegation.maxIterations,
+      limits: {
+        staleMs: Math.max(1_000, config.delegation.staleMs),
+        staleToolMs: Math.max(1_000, config.delegation.staleToolMs),
+      },
+      // Nothing to repaint here — the print path's own tool line is the only
+      // feedback, and it is already saying a tool is running.
+    });
+    return delegateTool({
+      registry,
+      settings: {
+        model: config.delegation.model || config.model,
+        maxConcurrent: Math.max(1, config.delegation.maxConcurrent),
+        maxPerTurn: Math.max(1, config.delegation.maxPerTurn),
+      },
+      spawnCount: () => spawned,
+      spawn: (request) => {
+        spawned += 1;
+        return run(request);
+      },
+    });
+  };
+
+  const delegate = delegateToolForRun();
+
   const agent = createAgent(restored ?? undefined, {
     approve: createApprover(io, flags.yes),
     ask: createAsker(io),
+    ...(delegate ? { extraTools: [delegate] } : {}),
   });
 
   try {
@@ -940,6 +1052,18 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
             ...settings,
             approve: flags.yes ? async () => "always" : settings.approve,
           }),
+        delegation: {
+          enabled: config.delegation.enabled,
+          model: config.delegation.model,
+          maxConcurrent: config.delegation.maxConcurrent,
+          maxPerTurn: config.delegation.maxPerTurn,
+          maxIterations: config.delegation.maxIterations,
+          staleMs: config.delegation.staleMs,
+          staleToolMs: config.delegation.staleToolMs,
+        },
+        // A child is this same factory with a different model, a read-only
+        // toolset and no approval or question channel — see `buildChild`.
+        createSubagent: buildChild,
         saveSession: async ({ id, createdAt: created, cwd, messages, title, model, baseUrl: endpoint, mode, variant }) => {
           await saveSession({
             id,

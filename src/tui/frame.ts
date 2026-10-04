@@ -18,7 +18,7 @@ import {
 import { COMMAND_WIDTH, isAvailable, type Command } from "./commands";
 import { type LineEditor, editorRows } from "./editor";
 import { LOGO_TEXT, logoRows } from "./logo";
-import type { PlanSnapshot } from "../agent/tools/types";
+import type { PlanSnapshot, SubagentView } from "../agent/tools/types";
 import type { MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
 import { blend, type Styles, type Theme } from "./theme";
@@ -260,6 +260,14 @@ export type TuiState = {
   queuedCount?: number;
   /** The plan tools' state, for the progress button and its panel. */
   plan?: PlanSnapshot | null;
+  /**
+   * Child agents running right now, drawn as a dock above the prompt.
+   *
+   * As data rather than a sentence for the same reason the plan snapshot is: a
+   * panel that parsed a summary to find the model name would be showing the
+   * user something they could not trust.
+   */
+  subagents?: readonly SubagentView[];
   /** True while the plan panel is open above the box. */
   todoPanel?: boolean;
   /**
@@ -2214,6 +2222,38 @@ function renderBottom(
   // The plan panel: the tracked checklist and any running goal, right-aligned
   // just above the box. Narrow on purpose — it is a glance, not the transcript —
   // and hidden with the box, so a card that owns the screen is not sharing it.
+  // The subagent dock: one row per child, above the box, where the plan panel
+  // lives — so a delegation reads as part of the same working area rather than
+  // as another panel competing with it.
+  //
+  // Capped to two rows with a count, because a batch of eight is eight rows of
+  // chrome in a fixed-height area: the count is what tells the user how much is
+  // hidden, and `/agents` opens the rest. The same trade the plan panel makes
+  // when a checklist is long.
+  if (boxShown && (state.subagents?.length ?? 0) > 0) {
+    const live = state.subagents!;
+    const shown = live.slice(0, 2);
+    const hidden = live.length - shown.length;
+    for (const child of shown) {
+      const mark = child.status === "running" ? "◐" : child.status === "completed" ? "✓" : "✕";
+      const tone =
+        child.status === "running" ? styles.accent : child.status === "completed" ? styles.ok : styles.error;
+      const age = child.ms >= 1000 ? `${Math.round(child.ms / 1000)}s` : `${child.ms}ms`;
+      push(
+        [
+          span(indent),
+          span(` ${mark} `, tone),
+          span(cut(child.goal, Math.max(8, Math.floor(width / 3))), styles.text),
+          span(` · ${child.model} · ${child.toolCalls} tools · ${age}`, styles.faint),
+        ],
+        theme.bg,
+      );
+    }
+    if (hidden > 0) {
+      push([span(indent), span(`   +${hidden} more · /agents for the roster`, styles.faint)], theme.bg);
+    }
+  }
+
   if (boxShown && state.todoPanel && state.plan) {
     const panelWidth = clamp(Math.min(44, width - 2), 20, 44);
     const panel = renderPlanPanel(state.plan, styles, panelWidth);

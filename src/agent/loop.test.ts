@@ -573,6 +573,47 @@ describe("a tool with state of its own", () => {
 
     expect(events.some((event) => event.type === "plan")).toBe(false);
   });
+
+  it("hands over the child agents a tool is running, the same way", async () => {
+    const child = { id: "sa-1", goal: "find the loop", model: "flash", status: "running" as const, ms: 900, toolCalls: 2 };
+    const tool: Tool = {
+      name: "delegate",
+      description: "hand a task to a child",
+      parameters: { type: "object", properties: {}, required: [] },
+      async run() {
+        return { content: "TASK 1/1: find the loop\nit is in loop.ts" };
+      },
+      subagents: () => [child],
+    };
+    const provider = new FakeProvider([toolCallTurn("call_1", "delegate", "{}"), answerTurn("done")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([tool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "go");
+
+    // The panel reads this, not the summary text: a screen that parsed the
+    // prose to find the model name would be showing something the user could
+    // not trust.
+    expect(events).toContainEqual({ type: "subagents", state: [child] });
+  });
+
+  it("emits no subagents for a tool that spawned none", async () => {
+    const tool: Tool = {
+      name: "delegate",
+      description: "hand a task to a child",
+      parameters: { type: "object", properties: {}, required: [] },
+      async run() {
+        return { content: "Error: delegate needs a `goal`." };
+      },
+      subagents: () => [],
+    };
+    const provider = new FakeProvider([toolCallTurn("call_1", "delegate", "{}"), answerTurn("done")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([tool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "go");
+
+    // An empty roster is not an event: the panel would repaint for nothing.
+    expect(events.some((event) => event.type === "subagents")).toBe(false);
+  });
 });
 
 describe("a pasted image", () => {

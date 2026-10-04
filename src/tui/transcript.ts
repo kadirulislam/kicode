@@ -14,6 +14,24 @@ import type { Styles } from "./theme";
 
 export type Tone = "dim" | "ok" | "error" | "warn" | "accent";
 
+/**
+ * The placeholder row a delegation opens with.
+ *
+ * Named rather than inlined so the note that replaces it is matched by identity
+ * and not by string equality — a reflow of the wording must not leave the row
+ * unable to find itself.
+ */
+const DELEGATION_OPEN = "delegating…";
+
+/**
+ * What every row of a delegation starts with, in every state.
+ *
+ * The row is rewritten as the batch progresses, so it is matched by this prefix
+ * rather than by its current text — and the settled wording deliberately does
+ * *not* share it, so a finished delegation cannot be settled a second time.
+ */
+const DELEGATION_ROW = "delegating";
+
 export type Entry =
   /** `images` counts the pictures sent with the words, for the marker. */
   /** `docs` names the files attached with `/attach`, shown as badges. */
@@ -254,7 +272,52 @@ export function applyEvent(
     }
     case "tool-start":
       entries.push({ kind: "tool", name: event.name, args: event.args });
+      // A delegation gets one row of its own, standing in for the whole batch.
+      // The child runs for a while and the parent's words say nothing about it,
+      // so without this a user watching the spinner has no idea work is
+      // happening off-screen; with one row per child, a batch of four would
+      // bury the conversation under four progress notes.
+      if (event.name === "delegate") {
+        entries.push({ kind: "note", text: DELEGATION_OPEN, tone: "accent" });
+      }
       return;
+    case "subagents": {
+      // The roster itself is the panel's business. What the transcript records
+      // is one row: the count while the batch runs, and the outcome once it has
+      // finished.
+      const at = entries.findLastIndex(
+        (entry) => entry.kind === "note" && entry.text.startsWith(DELEGATION_ROW),
+      );
+      if (at === -1) return;
+      const live = event.state.filter((child) => child.status === "running").length;
+      const settled = event.state.length - live;
+      if (settled === 0) return;
+
+      // Not settled until nothing is still running. Settling on the first child
+      // to finish would replace the row with "1 task · reported" and leave the
+      // rest to land on a row that no longer exists — which is how two children
+      // end up failing in silence.
+      const note: Entry =
+        live > 0
+          ? { kind: "note", text: `delegating ${settled} of ${event.state.length}`, tone: "accent" }
+          : (() => {
+              const unfinished = event.state.filter((child) => child.status !== "completed");
+              const count = `${settled} task${settled === 1 ? "" : "s"}`;
+              return unfinished.length
+                ? {
+                    kind: "note" as const,
+                    text: `delegated ${count} · ${unfinished.length} did not finish: ${unfinished
+                      .map((child) => child.error ?? child.status)
+                      .join("; ")}`,
+                    tone: "warn" as const,
+                  }
+                : { kind: "note" as const, text: `delegated ${count} · reported`, tone: "dim" as const };
+            })();
+      // Replaced in place rather than appended, so the row sits where the work
+      // started instead of after whatever the parent said while it ran.
+      entries.splice(at, 1, note);
+      return;
+    }
     case "tool-result": {
       // The todo list is live, not history. The agent rewrites it as it works,
       // and a fresh copy per update would bury the conversation under

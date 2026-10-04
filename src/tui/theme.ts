@@ -29,6 +29,14 @@ import { BOLD, DIM, ITALIC, UNDERLINE, bg, fg, style } from "./ansi";
  *   the chrome instead of blending into it;
  * - `mode` colours the build/plan word, which changes what the model may do
  *   and so deserves its own colour on the row.
+ *
+ * Every palette here is **matte**: the four fills — `bg`, `panel`, `block`,
+ * `input` — keep the theme's hue but hold it at no more than a trace of chroma,
+ * because the background is the largest area on screen and any colour in it is
+ * read as colour everywhere at once. What the hue is for is telling the fills
+ * apart, which is why they also step by a clear margin in lightness: lighter as
+ * they come forward on a dark theme, darker on a light one. `theme.test.ts`
+ * checks both, so a theme added later cannot quietly break either.
  */
 export type Theme = {
   bg: string;
@@ -60,10 +68,10 @@ export type Theme = {
  * emphasis keeps a sentence's important word from looking like chrome.
  */
 export const kicodeTheme: Theme = {
-  bg: "#08090f",
-  panel: "#151621",
-  block: "#1d1e2e",
-  input: "#2b2f47",
+  bg: "#08090d",
+  panel: "#16161e",
+  block: "#21222e",
+  input: "#2e303c",
   heading: "#f472b6",
   text: "#e6e6ef",
   dim: "#9b9bb5",
@@ -82,10 +90,10 @@ export const kicodeTheme: Theme = {
 
 /** The original dark slate with a teal accent. */
 export const darkTheme: Theme = {
-  bg: "#0f1720",
-  panel: "#16212e",
-  block: "#1b2837",
-  input: "#263749",
+  bg: "#11171d",
+  panel: "#1c232a",
+  block: "#272f38",
+  input: "#333b43",
   heading: "#f472b6",
   text: "#e6edf3",
   dim: "#8296ab",
@@ -110,10 +118,10 @@ export const darkTheme: Theme = {
  * accent gets deeper rather than brighter so it does not wash out.
  */
 export const lightTheme: Theme = {
-  bg: "#f8fafc",
-  panel: "#e7edf4",
-  block: "#eef2f8",
-  input: "#e2e8f2",
+  bg: "#f8fafb",
+  panel: "#e9edf2",
+  block: "#e3e5e9",
+  input: "#dadee5",
   heading: "#be185d",
   text: "#182430",
   dim: "#4d6076",
@@ -131,10 +139,10 @@ export const lightTheme: Theme = {
 };
 
 export const tokyoNightTheme: Theme = {
-  bg: "#1a1b26",
-  panel: "#1f2335",
-  block: "#24283b",
-  input: "#2f3450",
+  bg: "#1b1b23",
+  panel: "#252733",
+  block: "#303342",
+  input: "#3d3f4c",
   heading: "#bb9af7",
   text: "#c0caf5",
   dim: "#9aa5ce",
@@ -153,9 +161,9 @@ export const tokyoNightTheme: Theme = {
 
 export const gruvboxTheme: Theme = {
   bg: "#282828",
-  panel: "#32302f",
-  block: "#3c3836",
-  input: "#4b4643",
+  panel: "#353433",
+  block: "#423f3e",
+  input: "#4f4b49",
   heading: "#d3869b",
   text: "#ebdbb2",
   dim: "#a89984",
@@ -173,10 +181,10 @@ export const gruvboxTheme: Theme = {
 };
 
 export const nordTheme: Theme = {
-  bg: "#2e3440",
-  panel: "#3b4252",
-  block: "#434c5e",
-  input: "#4f596e",
+  bg: "#30343c",
+  panel: "#3e424b",
+  block: "#494e57",
+  input: "#555a64",
   heading: "#b48ead",
   text: "#eceff4",
   dim: "#d8dee9",
@@ -194,10 +202,10 @@ export const nordTheme: Theme = {
 };
 
 export const draculaTheme: Theme = {
-  bg: "#282a36",
-  panel: "#343746",
-  block: "#3b3f52",
-  input: "#464b63",
+  bg: "#292a33",
+  panel: "#353742",
+  block: "#41434f",
+  input: "#4d4f5b",
   heading: "#ff79c6",
   text: "#f8f8f2",
   dim: "#bdc3d1",
@@ -215,10 +223,10 @@ export const draculaTheme: Theme = {
 };
 
 export const catppuccinTheme: Theme = {
-  bg: "#1e1e2e",
-  panel: "#181825",
-  block: "#313244",
-  input: "#45475a",
+  bg: "#1f1f2a",
+  panel: "#2a2a3a",
+  block: "#363744",
+  input: "#464854",
   heading: "#f5c2e7",
   text: "#cdd6f4",
   dim: "#a6adc8",
@@ -236,10 +244,10 @@ export const catppuccinTheme: Theme = {
 };
 
 export const solarizedDarkTheme: Theme = {
-  bg: "#002b36",
-  panel: "#073642",
-  block: "#0b3f4d",
-  input: "#12505f",
+  bg: "#182225",
+  panel: "#242e31",
+  block: "#2f3b3e",
+  input: "#3c4648",
   heading: "#d33682",
   text: "#93a1a1",
   dim: "#839496",
@@ -258,10 +266,10 @@ export const solarizedDarkTheme: Theme = {
 
 /** The Catppuccin light flavour, so the light half of the roster is not a corner. */
 export const catppuccinLatteTheme: Theme = {
-  bg: "#eff1f5",
-  panel: "#e6e9ef",
-  block: "#dce0e8",
-  input: "#d3d8e3",
+  bg: "#f0f1f4",
+  panel: "#e7e9ed",
+  block: "#dde0e6",
+  input: "#d4d8e0",
   heading: "#ea76cb",
   text: "#4c4f69",
   dim: "#5c5f77",
@@ -281,9 +289,9 @@ export const catppuccinLatteTheme: Theme = {
 /** GitHub's light palette: a white page with a blue accent. */
 export const githubLightTheme: Theme = {
   bg: "#ffffff",
-  panel: "#f6f8fa",
-  block: "#eaeef2",
-  input: "#e2e6ea",
+  panel: "#f2f5f7",
+  block: "#e9edf0",
+  input: "#dfe3e6",
   heading: "#bf3989",
   text: "#1f2328",
   dim: "#59636e",
@@ -301,10 +309,10 @@ export const githubLightTheme: Theme = {
 };
 
 export const solarizedLightTheme: Theme = {
-  bg: "#fdf6e3",
-  panel: "#eee8d5",
-  block: "#f4eeda",
-  input: "#ede4cc",
+  bg: "#f9f6ec",
+  panel: "#ebe8dd",
+  block: "#e4e1d7",
+  input: "#dddad0",
   heading: "#d33682",
   text: "#586e75",
   dim: "#657b83",
@@ -331,9 +339,9 @@ export const solarizedLightTheme: Theme = {
  */
 export const monoTheme: Theme = {
   bg: "#0b0b0b",
-  panel: "#161616",
-  block: "#1f1f1f",
-  input: "#2a2a2a",
+  panel: "#171717",
+  block: "#232323",
+  input: "#2f2f2f",
   heading: "#e0e0e0",
   text: "#e8e8e8",
   dim: "#b0b0b0",
@@ -356,9 +364,9 @@ export const monoTheme: Theme = {
  */
 export const contrastTheme: Theme = {
   bg: "#000000",
-  panel: "#101014",
-  block: "#1a1a20",
-  input: "#26262f",
+  panel: "#101010",
+  block: "#1c1c1c",
+  input: "#282828",
   heading: "#ff79c6",
   text: "#ffffff",
   dim: "#dcdce4",

@@ -7,7 +7,7 @@ import { projectSlug } from "../agent/brain";
 import type { LearnResult } from "../agent/learn";
 import type { Agent, AgentEvent, ApprovalDecision } from "../agent/loop";
 import type { AskAnswer, AskQuestion } from "../agent/ask";
-import type { PlanSnapshot } from "../agent/tools/types";
+import type { PlanSnapshot, Tool } from "../agent/tools/types";
 import type { PastedImage } from "../clipboard";
 import type { ChatMessage } from "../types";
 import { bg } from "./ansi";
@@ -165,6 +165,13 @@ function harness(
       get toolCount(): number {
         // The fake offers a fixed set: `/context` costs it out by number.
         return 9;
+      },
+      get toolList(): { name: string; description: string }[] {
+        return [
+          { name: "read", description: "Read a file." },
+          { name: "bash", description: "Run a command." },
+          { name: "ask", description: "Ask the user a question." },
+        ];
       },
       get contextTokens(): number {
         return 1000;
@@ -977,9 +984,10 @@ describe("runTui", () => {
     app.input.write("/");
     await tick(20);
     // The list opens on the first runnable command and fills the screen —
-    // the window follows the selection from there.
+    // the window follows the selection from there. `/agents` runs now, so it is
+    // in the list and sorted ahead of `/btw`.
+    expect(app.lastFrame()).toContain("/agents");
     expect(app.lastFrame()).toContain("/btw");
-    expect(app.lastFrame()).not.toContain("/agents");
     expect(app.lastFrame()).not.toContain("/sessions");
 
     app.input.write("sessi");
@@ -1004,9 +1012,9 @@ describe("runTui", () => {
 
     app.input.write("/");
     await tick(20);
-    // /agents cannot run, so the list opens on /btw — one step down lands on
+    // The list opens on /agents — one step down lands on /btw, a second on
     // /budget, the command this test runs.
-    app.input.write("\u001b[B");
+    app.input.write("\u001b[B\u001b[B");
     await tick(20);
 
     app.input.write("\r");
@@ -1691,6 +1699,379 @@ describe("the plan panel", () => {
 
     app.input.write("\u0015/exit\r");
     await done;
+  });
+});
+
+describe("delegation", () => {
+  /**
+   * A child agent that reports a fixed thing, and records what it was asked.
+   *
+   * Shaped as an `Agent` because that is what the app holds: the parent's
+   * events are what the dock is drawn from, so a child that never emits one
+   * would leave the panel untested rather than tested-and-empty.
+   */
+  function child(sent: string[], body: () => AsyncGenerator<AgentEvent>): Agent {
+    return {
+      async *send(prompt: string): AsyncGenerator<AgentEvent> {
+        sent.push(prompt);
+        yield* body();
+      },
+    } as unknown as Agent;
+  }
+
+  const answering = (report: string, tools = 1): (() => AsyncGenerator<AgentEvent>) =>
+    async function* answering(): AsyncGenerator<AgentEvent> {
+      for (let at = 0; at < tools; at += 1) {
+        yield { type: "tool-start", id: `t${at}`, name: "read", args: {} };
+        yield { type: "tool-result", id: `t${at}`, name: "read", content: "x", isError: false };
+      }
+      yield { type: "text", delta: report };
+      yield { type: "done", reason: "complete" };
+    }
+
+  const delegation = (over: Partial<NonNullable<TuiOptions["delegation"]>> = {}): NonNullable<
+    TuiOptions["delegation"]
+  > => ({
+    enabled: true,
+    model: "child-flash",
+    maxConcurrent: 2,
+    maxPerTurn: 4,
+    maxIterations: 20,
+    staleMs: 60_000,
+    staleToolMs: 120_000,
+    ...over,
+  });
+
+  /** The `delegate` tool the app actually registered, as the loop would find it. */
+  function tool(app: Harness): Tool {
+    // Built in the constructor and handed to every agent, so the first settings
+    // the harness collected is where it is.
+    const registered = app.settings[0]?.extraTools?.[0];
+    if (!registered) throw new Error("no delegate tool was registered");
+    return registered;
+  }
+
+  describe("registration", () => {
+    it("registers the delegate tool when delegation is on", async () => {
+      const { app, done } = await drive([], {
+        delegation: delegation(),
+        createSubagent: ({ goal }) => child([], answering(goal)),
+      });
+
+      expect(await tool(app)).toBeDefined();
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("registers nothing when delegation is off", async () => {
+      // A tool the model can see but cannot use costs it a wasted turn every
+      // time it reaches for one, so the absence has to be the absence.
+      const { app, done } = await drive([], {
+        delegation: delegation({ enabled: false }),
+        createSubagent: ({ goal }) => child([], answering(goal)),
+      });
+
+      expect(app.settings[0]?.extraTools).toBeUndefined();
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("registers nothing when the run cannot build a child", async () => {
+      // Delegation without a factory is a promise, not a capability.
+      const { app, done } = await drive([], { delegation: delegation() });
+
+      expect(app.settings[0]?.extraTools).toBeUndefined();
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+  });
+
+  describe("running a child", () => {
+    it("hands the child the delegated model, and the goal as its prompt", async () => {
+      const sent: string[] = [];
+      const models: string[] = [];
+      const { app, done } = await drive([], {
+        delegation: delegation({ model: "child-flash" }),
+        createSubagent: ({ goal, model }) => {
+          models.push(model);
+          return child(sent, answering("found it"));
+        },
+      });
+
+      const result = await (await tool(app)).run(
+        { goal: "find the retry logic", context: "src/agent" },
+        { cwd: "C:\\dev" },
+      );
+
+      expect(result.content).toContain("found it");
+      expect(models).toEqual(["child-flash"]);
+      expect(sent).toEqual(["find the retry logic"]);
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("falls back to the session's own model when no pin is set", async () => {
+      // The default shape is a frontier parent with cheaper children, and a
+      // project that has not chosen a cheaper one should not accidentally get
+      // an expensive child by a name it never wrote.
+      const models: string[] = [];
+      const { app, done } = await drive([], {
+        delegation: delegation({ model: "" }),
+        createSubagent: ({ goal, model }) => {
+          models.push(model);
+          return child([], answering(goal));
+        },
+      });
+
+      await (await tool(app)).run({ goal: "look around" }, { cwd: "C:\\dev" });
+
+      expect(models).toEqual(["deepseek-v4-flash:free"]);
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("shows a row for a child while it is still working", async () => {
+      // The whole point of the dock: a child can run for minutes with the
+      // parent's own words silent, and a row that only filled in at the end
+      // would be a receipt rather than a progress display.
+      const sent: string[] = [];
+      let release = (): void => {};
+      const held = new Promise<void>((done_) => {
+        release = done_;
+      });
+      const { app, done } = await drive([], {
+        delegation: delegation(),
+        createSubagent: ({ goal }) =>
+          child(sent, (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "tool-start", id: "t0", name: "read", args: {} };
+            yield { type: "tool-result", id: "t0", name: "read", content: "x", isError: false };
+            await held;
+            yield { type: "text", delta: "found it" };
+            yield { type: "done", reason: "complete" };
+          })),
+      });
+
+      const running = (await tool(app)).run({ goal: "read the whole tree" }, { cwd: "C:\\dev" });
+      await tick(40);
+
+      // The goal, the pinned model and the request count are all on screen.
+      expect(app.lastFrame()).toContain("read the whole tree");
+      expect(app.lastFrame()).toContain("child-flash");
+
+      release();
+      expect((await running).content).toContain("found it");
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("files the report so /agents can still show it after the turn", async () => {
+      const { app, done } = await drive([], {
+        delegation: delegation(),
+        createSubagent: ({ goal }) => child([], answering("the answer is 42")),
+      });
+
+      await (await tool(app)).run({ goal: "what is the port" }, { cwd: "C:\\dev" });
+      await tick(20);
+      app.input.write("/agents\r");
+      await tick(30);
+
+      // The roster row is a summary line, so it is cut to fit — the dock says
+      // work happened, and choosing the row is where the report is read.
+      const listed = app.lastFrame();
+      expect(listed).toContain("Subagents");
+      expect(listed).toContain("what is the port");
+      expect(listed).toContain("child-flash");
+
+      app.input.write("\r");
+      await tick(30);
+      expect(app.lastFrame()).toContain("the answer is 42");
+
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+  });
+
+  describe("when a child does not finish", () => {
+    it("names the failure in the parent's report rather than swallowing it", async () => {
+      const { app, done } = await drive([], {
+        delegation: delegation(),
+        createSubagent: () => {
+          throw new Error("no route to that gateway");
+        },
+      });
+
+      const result = await (await tool(app)).run({ goal: "check upstream" }, { cwd: "C:\\dev" });
+
+      expect(result.content).toContain("failed: no route to that gateway");
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("says a child stopped mid-run rather than calling it a clean finish", async () => {
+      const { app, done } = await drive([], {
+        delegation: delegation(),
+        createSubagent: ({ goal }) =>
+          child([], (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "tool-start", id: "t0", name: "read", args: {} };
+            yield { type: "done", reason: "max-turns" };
+          })),
+      });
+
+      const result = await (await tool(app)).run({ goal: "an endless grep" }, { cwd: "C:\\dev" });
+
+      // A child that ran out of turns has still seen the task; claiming a clean
+      // finish on partial work is how a parent ends up trusting a truncated
+      // report.
+      expect(result.content).toContain("stalled: it ran out of turns");
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("calls a child stopped with its turn interrupted, not failed", async () => {
+      const { app, done } = await drive([], {
+        delegation: delegation(),
+        createSubagent: ({ goal, signal }) =>
+          child([], (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "tool-start", id: "t0", name: "read", args: {} };
+            await new Promise<void>((_, reject) => {
+              const onAbort = (): void => {
+                const error = new Error("This operation was aborted");
+                error.name = "AbortError";
+                reject(error);
+              };
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+            });
+          })),
+      });
+
+      const controller = new AbortController();
+      const running = (await tool(app)).run({ goal: "long read" }, { cwd: "C:\\dev", signal: controller.signal });
+      await tick(20);
+      controller.abort();
+
+      expect((await running).content).toContain("interrupted: stopped with the turn");
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+  });
+
+  describe("a child that stops making progress", () => {
+    it("cuts it loose rather than holding the turn open", async () => {
+      // A wedged child would otherwise hold the parent's turn open until the
+      // session's own ceiling, which is the one thing a batch must never do.
+      const { app, done } = await drive([], {
+        delegation: delegation({ staleMs: 1_000, staleToolMs: 1_000 }),
+        createSubagent: ({ goal, signal }) =>
+          child([], (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "tool-start", id: "t0", name: "read", args: {} };
+            await new Promise<void>((_, reject) => {
+              const onAbort = (): void => {
+                const error = new Error("This operation was aborted");
+                error.name = "AbortError";
+                reject(error);
+              };
+              if (signal.aborted) onAbort();
+              else signal.addEventListener("abort", onAbort, { once: true });
+            });
+          })),
+      });
+
+      const result = await (await tool(app)).run({ goal: "a read that never returns" }, { cwd: "C:\\dev" });
+
+      // `stalled`, not `interrupted`: nobody asked for this to stop, it simply
+      // stopped moving, and the parent is told which it was.
+      expect(result.content).toContain("stalled: no progress for");
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+
+    it("leaves a child alone while it is still moving", async () => {
+      const { app, done } = await drive([], {
+        delegation: delegation({ staleMs: 1_000, staleToolMs: 1_000 }),
+        createSubagent: ({ goal }) =>
+          child([], (async function* (): AsyncGenerator<AgentEvent> {
+            for (let at = 0; at < 3; at += 1) {
+              yield { type: "tool-start", id: `t${at}`, name: "read", args: {} };
+              // Each request takes longer than the idle limit on its own; only
+              // the silence between them counts.
+              await tick(1_400);
+            }
+            yield { type: "text", delta: "slow but finished" };
+            yield { type: "done", reason: "complete" };
+          })),
+      });
+
+      const result = await (await tool(app)).run({ goal: "a long but live read" }, { cwd: "C:\\dev" });
+
+      expect(result.content).toContain("slow but finished");
+      expect(result.content).not.toContain("stalled");
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
+  });
+
+  describe("/agents", () => {
+    it("says there are none, rather than opening an empty panel", async () => {
+      const { app, done } = await drive(["/agents"], { delegation: delegation() });
+      await finish(app, done);
+
+      expect(app.screen()).toContain("no subagents yet");
+    });
+  });
+
+  describe("the per-turn budget", () => {
+    it("starts again with each turn, rather than running out for the session", async () => {
+      // `maxPerTurn` is a per-turn promise to the model. A session-wide counter
+      // would have the second turn of a short session refused for children the
+      // first turn spawned — and the model would be told a budget it still had.
+      const { app, done } = await drive([], {
+        delegation: delegation({ maxPerTurn: 1 }),
+        createSubagent: ({ goal }) => child([], answering(goal)),
+      });
+      const delegate = tool(app);
+      const spawn = (goal: string): Promise<{ content: string; isError?: boolean }> =>
+        delegate.run({ goal }, { cwd: "C:\\dev" });
+
+      expect((await spawn("first turn")).isError).toBeFalsy();
+
+      // The same turn may not exceed its budget.
+      expect((await spawn("still the first turn")).isError).toBe(true);
+
+      // A new turn gets a new budget. Sending a message is what starts a turn.
+      app.input.write("go\r");
+      await tick(60);
+      expect((await spawn("second turn")).isError).toBeFalsy();
+
+      app.input.write("\u001b");
+      await tick(20);
+      app.input.write("\u0015/exit\r");
+      await done;
+    });
   });
 });
 
@@ -3262,11 +3643,27 @@ describe("the slash commands", () => {
     expect(text).toContain("~1.0K tokens");
     expect(text).toContain("tool calls");
     expect(text).toContain("node ");
-    expect(text).toContain("type / for the palette");
-    expect(text).toContain("/variants");
     // Asserted on a phrase shorter than the wrap, so a break cannot split it.
     expect(text).toContain("built it from");
     expect(text).toContain("npm run build");
+  });
+
+  it("prints the whole help block on a screen that fits it", async () => {
+    // On its own, so the assertion is about `/help` and not about where six
+    // commands' worth of scrollback left the viewport. Six informational
+    // commands push the top of a ten-row help block off a 24-row terminal, which
+    // is the terminal scrolling, not a line going missing.
+    const { app, done } = await drive(["/help"]);
+    await finish(app, done);
+
+    const text = app.screen();
+    expect(text).toContain("type / for the palette");
+    expect(text).toContain("alt+u usage card");
+    expect(text).toContain("+NEW for a fresh one");
+    // The command list is not spelled out here — the palette owns it — so the
+    // block stays six rows and fits a short terminal with the keymap intact.
+    expect(text).toMatch(/\d+ commands — press \/ or ctrl\+p to list them/);
+    expect(text).not.toContain("/variants");
   });
 
   it("shows the machine rollup on /usage", async () => {
@@ -3663,8 +4060,10 @@ describe("the slash commands", () => {
     await finish(app, done);
 
     expect(app.screen()).toContain("theme light");
-    // The light background is on screen from that point on.
-    expect(app.raw()).toContain("48;2;248;250;252");
+    // The light background is on screen from that point on — read off the theme
+    // rather than typed in, so a palette change is not a test change.
+    const [r, g, b] = [1, 3, 5].map((i) => Number.parseInt(themeByName("light").bg.slice(i, i + 2), 16));
+    expect(app.raw()).toContain(`48;2;${r};${g};${b}`);
   });
 
   it("asks the endpoint for a summary on /compact", async () => {
@@ -3929,18 +4328,32 @@ async function finish(app: Harness, done: Promise<number>): Promise<void> {
 }
 
 describe("/settings", () => {
-  it("opens a panel with the groups, the rows and their values", async () => {
+  it("opens a panel with the shortcuts, the groups, the rows and their values", async () => {
     const { app, done } = await open("/settings");
     const screen = app.screen();
 
     expect(screen).toContain("Settings");
-    expect(screen).toContain("Appearance");
+    // The doors ride first, in panel order, ahead of every value.
+    expect(screen).toContain("Shortcuts");
+    for (const label of ["Connect / Provider", "Models", "Sessions", "Compact", "Skills", "Tools", "MCP"]) {
+      expect(screen).toContain(label);
+    }
+    const shortcutsAt = screen.indexOf("Shortcuts");
+    expect(shortcutsAt).toBeGreaterThanOrEqual(0);
+    expect(shortcutsAt).toBeLessThan(screen.indexOf("Appearance"));
     expect(screen).toContain("Session");
     expect(screen).toContain("Theme");
     // The value in effect, on the row — not a copy that can drift from it.
     expect(screen).toContain("kicode");
     expect(screen).toContain("verbosity".slice(0, 0)); // no-op, keeps the shape
-    expect(screen).toContain("‹/› change");
+    // On a shortcut row the footer names opening, not changing.
+    expect(app.lastFrame()).toContain("enter open");
+
+    // Down past the shortcuts, Theme is still there with its value, and the
+    // footer names changing again.
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    await tick(30);
+    expect(app.lastFrame()).toContain("‹/› change");
 
     await finish(app, done);
   });
@@ -3948,6 +4361,10 @@ describe("/settings", () => {
   it("changes a value with the arrows, and writes it down", async () => {
     const { app, done } = await open("/settings");
 
+    // Down past the seven shortcut rows: the first value is the theme, and a
+    // dark theme steps to the next dark one.
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    await tick(30);
     app.input.write(RIGHT);
     await tick(30);
 
@@ -3963,13 +4380,13 @@ describe("/settings", () => {
   });
 
   it("sizes the card by the longest description, so moving never resizes it", async () => {
-    // Down to `Sidebar`, whose sentence is the longest of the list. Sized by
-    // the row under the cursor, the card would jump on every step — and this
-    // sentence would be cut short on rows narrower than it. Sized by the
-    // longest, it fits in full and the card never moves.
+    // Down past the shortcuts to `Sidebar`, whose sentence is the longest of
+    // the list. Sized by the row under the cursor, the card would jump on
+    // every step — and this sentence would be cut short on rows narrower than
+    // it. Sized by the longest, it fits in full and the card never moves.
     const { app, done } = await open("/settings");
 
-    app.input.write(`${DOWN}${DOWN}${DOWN}`);
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
     await tick(30);
     expect(app.screen()).toContain("Auto shows it once a second session exists.");
 
@@ -3992,6 +4409,9 @@ describe("/settings", () => {
     app.input.write("/settings\r");
     await tick(30);
 
+    // Down past the shortcuts: the first value is the theme.
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    await tick(30);
     app.input.write(RIGHT);
     await tick(30);
     // The screen already moved on, while the write is still in flight.
@@ -4007,8 +4427,8 @@ describe("/settings", () => {
   it("steps a row with Enter as well, so the arrows are not the only way", async () => {
     const { app, done } = await open("/settings");
 
-    // Down to `Color mode`: Enter flips it, and the theme moves with it.
-    app.input.write(`${DOWN}\r`);
+    // Down past the shortcuts to `Color mode`: Enter flips it, and the theme moves with it.
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}\r`);
     await tick(40);
 
     const saved = app.viewSaves.at(-1) ?? {};
@@ -4120,6 +4540,148 @@ describe("/settings", () => {
     const glyphs = (text: string): number => new Set(text.match(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/g) ?? []).size;
     expect(glyphs(still.screen())).toBe(1);
     expect(glyphs(spinning.screen())).toBeGreaterThan(1);
+  });
+});
+
+describe("settings shortcuts", () => {
+  it("opens the connect menu from its shortcut, closing settings first", async () => {
+    const { app, done } = await open("/settings");
+    app.input.write("\r");
+    await tick(60);
+
+    // The settings panel is gone, replaced by the screen the shortcut names.
+    expect(app.lastFrame()).toContain("Connect an integration");
+    expect(app.lastFrame()).toContain("OpenAI");
+
+    await finish(app, done);
+  });
+
+  it("opens the model picker from its shortcut", async () => {
+    const { app, done } = await open("/settings", {
+      listModels: async () => [{ id: "m1" }, { id: "m2" }],
+    });
+    app.input.write(`${DOWN}\r`);
+    await tick(60);
+
+    expect(app.lastFrame()).toContain("Select model");
+    expect(app.lastFrame()).toContain("m2");
+
+    await finish(app, done);
+  });
+
+  it("opens the session picker from its shortcut", async () => {
+    const { app, done } = await open("/settings", {
+      listSessions: async () => [{ id: "session-2", title: "the other one" }],
+    });
+    app.input.write(`${DOWN}${DOWN}\r`);
+    await tick(60);
+
+    expect(app.lastFrame()).toContain("Sessions");
+    expect(app.lastFrame()).toContain("the other one");
+
+    await finish(app, done);
+  });
+
+  it("compacts from its shortcut, closing the panel first", async () => {
+    const { app, done } = await open("/settings");
+    app.input.write(`${DOWN}${DOWN}${DOWN}\r`);
+    await tick(60);
+
+    expect(app.compactions).toBe(1);
+    expect(app.screen()).toContain("compacted 3 earlier messages");
+
+    await finish(app, done);
+  });
+
+  it("opens the skills picker from its shortcut", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "kicode-skills-"));
+    await mkdir(path.join(dir, "ki-agent-brain", "skills", "demo"), { recursive: true });
+    await writeFile(
+      path.join(dir, "ki-agent-brain", "skills", "demo", "SKILL.md"),
+      "---\nname: demo-skill\ndescription: Does a demo.\n---\n\nDemo skill body.\n",
+    );
+    try {
+      const { app, done } = await open("/settings", { cwd: dir });
+      await tick(120);
+      app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}\r`);
+      await tick(120);
+
+      expect(app.lastFrame()).toContain("demo-skill");
+
+      await finish(app, done);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists the session's tools from its shortcut, and reads one back", async () => {
+    const { app, done } = await open("/settings");
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}\r`);
+    await tick(60);
+
+    expect(app.lastFrame()).toContain("Tools · 3");
+    expect(app.lastFrame()).toContain("read");
+
+    // Picking a tool reads its line back: tools run for the model, and the
+    // panel is for looking.
+    app.input.write("\r");
+    await tick(40);
+    expect(app.screen()).toContain("read — Read a file.");
+
+    await finish(app, done);
+  });
+
+  it("reports the MCP servers from its shortcut", async () => {
+    const { app, done } = await open("/settings");
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}\r`);
+    await tick(40);
+
+    expect(app.screen()).toContain("no MCP servers configured for this project");
+
+    await finish(app, done);
+  });
+
+  it("leaves a shortcut alone on ‹/›: there is no value to step", async () => {
+    const { app, done } = await open("/settings");
+
+    app.input.write(RIGHT);
+    await tick(30);
+    app.input.write(LEFT);
+    await tick(30);
+
+    expect(app.viewSaves).toEqual([]);
+    // Still open on the same row: nothing moved, nothing saved.
+    expect(app.lastFrame()).toContain("Connect / Provider");
+
+    await finish(app, done);
+  });
+
+  it("narrows the doors to what is typed, then opens the one row left", async () => {
+    const { app, done } = await open("/settings");
+
+    app.input.write("comp");
+    await tick(30);
+    expect(app.lastFrame()).toContain("Compact");
+    expect(app.lastFrame()).not.toContain("Models");
+    expect(app.lastFrame()).not.toContain("Theme");
+
+    app.input.write("\r");
+    await tick(60);
+    expect(app.screen()).toContain("compacted 3 earlier messages");
+
+    await finish(app, done);
+  });
+
+  it("opens the door a click lands on, because a click is Enter after a move", async () => {
+    const { app, done } = await open("/settings", {
+      listModels: async () => [{ id: "m1" }, { id: "m2" }],
+    });
+
+    clickOn(app, "Models");
+    await tick(60);
+    expect(app.lastFrame()).toContain("Select model");
+
+    await finish(app, done);
   });
 });
 
@@ -4246,6 +4808,10 @@ describe("clicking a row", () => {
   it("moves to a settings row and steps it, because a click is a cursor move plus Enter", async () => {
     const { app, done } = await open("/settings");
 
+    // Down to `Thinking` first: the shortcuts pushed it below the panel's
+    // visible window, and a click can only land on a row that is drawn.
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    await tick(30);
     app.input.write(clickAt(rowOf(app.lastFrame(), "Thinking")));
     await tick(40);
 

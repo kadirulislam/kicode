@@ -1,10 +1,42 @@
 import type { AskFn } from "../ask";
+import type { SubagentSpawner } from "../subagent";
+
+/**
+ * One child agent, as the screen draws it.
+ *
+ * Re-exported here rather than imported by the renderer so the frame depends on
+ * the tool layer's shape and not on the runner that produces it — the same
+ * boundary the plan snapshot keeps.
+ */
+export type SubagentView = {
+  id: string;
+  /** One line: what the child was asked to do. */
+  goal: string;
+  /** Which model it is actually on — the parent's, or the delegated pin. */
+  model: string;
+  status: "running" | "completed" | "failed" | "interrupted" | "stalled";
+  /** How long it has run, or took. */
+  ms: number;
+  /** Requests spent, which is the only number that says it is moving. */
+  toolCalls: number;
+  summary?: string;
+  error?: string;
+};
 import type { ToolSpec } from "../../types";
 
 export type ToolContext = {
   cwd: string;
   /** Absent when nobody can answer, in which case the ask tool is not offered. */
   ask?: AskFn;
+  /**
+   * Spawns a child agent, when delegation is on.
+   *
+   * Carried on the context rather than closed over by the tool, because the
+   * factory belongs to the run — it holds the provider, the config and the
+   * working directory — and the tool list is built once per agent from a static
+   * array.
+   */
+  delegate?: SubagentSpawner;
   /**
    * The turn's signal, so a tool that runs for a long time can stop when the
    * turn is cancelled. A short tool can ignore it; `bash` kills the child.
@@ -81,6 +113,15 @@ export type Tool = {
    */
   pendingWork?(): string | null;
   /**
+   * The child agents this tool currently has running, as data.
+   *
+   * The same contract as `snapshot()`, and for the same reason: the loop draws
+   * from this rather than parsing what the tool returned, so a panel showing
+   * "who is working on what" is reading the runner's own state rather than a
+   * sentence about it. Only the `delegate` tool implements it.
+   */
+  subagents?(): SubagentView[];
+  /**
    * The tool's own state as plain data, or null when it has none to show.
    *
    * Only the plan tools implement this: a checklist and a goal are the two
@@ -106,6 +147,20 @@ export class ToolRegistry {
 
   list(): Tool[] {
     return [...this.tools.values()];
+  }
+
+  /**
+   * The same tools under different names — what a child agent gets.
+   *
+   * Isolation by absence rather than by policy: a child is handed a registry
+   * that does not contain `write`, `edit` or `bash`, so it has nothing to be
+   * talked into using. A flag that says "don't write files" is a check that has
+   * to be right; a missing tool cannot be misused, and there is nothing to get
+   * wrong. Names that are not here are simply absent — the registry never had
+   * them — so passing an unknown name is a no-op rather than an error.
+   */
+  subset(names: readonly string[]): ToolRegistry {
+    return new ToolRegistry(names.flatMap((name) => (this.tools.has(name) ? [this.tools.get(name)!] : [])));
   }
 
   /** Tool declarations in the exact shape the completions API expects. */

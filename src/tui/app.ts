@@ -67,12 +67,17 @@ import {
 } from "./theme";
 import { type MenuPanel, type MenuRow, filterMenuRows, stepMenuRow } from "./menu";
 import {
+  SETTING_SHORTCUTS,
   type SettingDef,
+  type SettingShortcut,
   type ViewSettings,
   defaultViewSettings,
   filterSettings,
+  filterShortcuts,
+  setSettingValue,
   settingDefs,
   settingOptions,
+  settingValue,
   stepSetting,
 } from "./settings";
 import type { AddProviderResult } from "../providers/services";
@@ -97,6 +102,15 @@ import {
 } from "../mentions";
 import { SKILLS_HEADING, brainBriefing, projectSlug, readBrain, trashSkill } from "../agent/brain";
 import { planFromHistory } from "../agent/tools/plan";
+import {
+  SubagentRegistry,
+  childRunner,
+  delegateTool,
+  type SubagentRequest,
+  type SubagentResult,
+  type SubagentState,
+} from "../agent/subagent";
+import type { SubagentView, Tool } from "../agent/tools/types";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
 import { renderUsage, summarizeUsage, totalsLine, turnRecord, type UsageRecord } from "../usage";
@@ -320,6 +334,14 @@ export type AgentSettings = {
   mode: SessionMode;
   /** The id this session's transcript is saved under, for per-conversation routing. */
   sessionId: string;
+  /**
+   * Tools this session adds on top of the defaults — the `delegate` tool, when
+   * delegation is on.
+   *
+   * Passed rather than built in `run.ts` because the tool carries the app's live
+   * child registry, and the run that builds agents has never heard of the app.
+   */
+  extraTools?: Tool[];
 };
 
 /**
@@ -430,6 +452,39 @@ export type TuiOptions = {
     list: () => Promise<MenuRow[]>;
     add: (name: string, apiKey?: string) => Promise<AddProviderResult>;
   };
+  /**
+   * Whether child agents may be spawned, and on what.
+   *
+   * Absent means delegation is off and the `delegate` tool is never registered:
+   * a tool the model can see but cannot use costs it a wasted turn every time it
+   * reaches for one.
+   */
+  delegation?: {
+    enabled: boolean;
+    /** Model every child runs on. Empty means the parent's own. */
+    model: string;
+    maxConcurrent: number;
+    maxPerTurn: number;
+    maxIterations: number;
+    /** Idle time before a child counts as wedged, and is stopped. */
+    staleMs: number;
+    /** The same, while the child is inside a tool — where silence is legitimate. */
+    staleToolMs: number;
+  };
+  /**
+   * Builds the agent a delegated task runs in.
+   *
+   * Injected rather than built here, because a child needs the same provider,
+   * config and session id the parent was built with — and because a test has no
+   * gateway to talk to. The `model` passed in is already resolved.
+   */
+  createSubagent?: (input: {
+    goal: string;
+    context: string;
+    model: string;
+    maxTurns: number;
+    signal: AbortSignal;
+  }) => Agent;
   streams?: { input: NodeJS.ReadStream; output: NodeJS.WriteStream };
   /** Renders one frame to stdout and returns, for eyeballing and bug reports. */
   preview?: boolean;
@@ -885,6 +940,22 @@ class TuiApp {
   private copiedNotice: string | null = null;
   private copiedTimer: NodeJS.Timeout | null = null;
   private paletteSelected = 0;
+  /**
+   * The child agents this session has running, and the reports they returned.
+   *
+   * Held on the app rather than read off the loop because the panel outlives
+   * the turn that drew it: a finished child's report stays on screen after its
+   * row leaves the live list, the way a tab's contents outlive the turn in it.
+   */
+  private subagents = new SubagentRegistry();
+  /**
+   * Children spawned this turn, so the per-turn cap is spent honestly.
+   *
+   * Reset when a turn starts rather than accumulated for the session: the cap is
+   * a per-turn promise to the model, and a session-wide counter would have the
+   * third turn of a session refused for children the first two spawned.
+   */
+  private subagentsSpawned = 0;
   /** The prompt text when the palette was dismissed, so typing reopens it. */
   private paletteDismissedFor: string | null = null;
   /**
@@ -913,6 +984,8 @@ class TuiApp {
   /** Resolves the input loop; set once the listeners are attached. */
   private finish: (() => void) | null = null;
   private cleanup: () => void = () => {};
+  /** The `delegate` tool for this session, when delegation is on. */
+  private delegateTool: Tool | null = null;
 
   constructor(
     options: TuiOptions,
@@ -941,8 +1014,60 @@ class TuiApp {
     this.mode = options.mode === "plan" ? "plan" : "build";
     this.variant = options.variant ?? DEFAULT_VARIANT;
     this.clipboardHistory = loadSavedClipboardHistory();
+    this.delegateTool = this.buildDelegateTool();
   }
 
+  /**
+   * The `delegate` tool for this session, or null when delegation is off.
+   *
+   * Built once here rather than per turn because the tool carries this
+   * session's live registry — which children are running right now — and a fresh
+   * registry per turn would empty the panel every time the model spoke.
+   */
+  private buildDelegateTool(): Tool | null {
+    const delegation = this.options.delegation;
+    if (!delegation?.enabled || !this.options.createSubagent) return null;
+    const pin = delegation.model.trim();
+    return delegateTool({
+      registry: this.subagents,
+      settings: {
+        model: pin || this.model,
+        maxConcurrent: Math.max(1, delegation.maxConcurrent),
+        maxPerTurn: Math.max(1, delegation.maxPerTurn),
+      },
+      spawnCount: () => this.subagentsSpawned,
+      spawn: (request) => {
+        this.subagentsSpawned += 1;
+        return this.runChild(request);
+      },
+    });
+  }
+
+  /**
+   * Builds and wires the runner this session's children go through.
+   *
+   * The runner itself is `childRunner`, shared with the one-shot `--print` path:
+   * a child must be built, watched and reported identically whichever door it
+   * came in by, or one of them quietly loses the staleness cut-off.
+   */
+  private runChild(request: SubagentRequest): Promise<SubagentResult> {
+    const delegation = this.options.delegation!;
+    const runner = childRunner({
+      create: this.options.createSubagent!,
+      registry: this.subagents,
+      model: delegation.model.trim() || this.model,
+      maxIterations: Math.max(1, delegation.maxIterations),
+      limits: {
+        staleMs: Math.max(1_000, delegation.staleMs),
+        staleToolMs: Math.max(1_000, delegation.staleToolMs),
+      },
+      // The dock is the reason a child is watched at all: it can run for minutes
+      // with the parent's own words silent, so each request that moves it
+      // repaints. A row that only filled in at the end would be a receipt.
+      onProgress: () => this.draw(),
+    });
+    return runner(request);
+  }
   async start(): Promise<number> {
     setColorEnabled(!process.env.NO_COLOR && this.output.isTTY === true);
 
@@ -2503,6 +2628,10 @@ class TuiApp {
     // user's request started — and the per-answer line is about the wait they
     // sat through, not about one request inside the turn.
     const startedAt = Date.now();
+    // The per-turn delegation budget starts again with the turn. A session-wide
+    // counter would have the third turn of a long session refused for children
+    // the first two spawned, which is not what `maxPerTurn` says.
+    this.subagentsSpawned = 0;
     // What the spinner's live rate is estimated from: characters streamed so
     // far, and when the first of them arrived. A turn's tool calls reset
     // neither — the speed is the turn's, not the current answer chunk's.
@@ -2964,6 +3093,15 @@ class TuiApp {
       case "debug":
         this.notes(this.debugLines());
         break;
+      case "agents":
+        // The roster, from the same state the dock is drawn from — so a number
+        // in the panel and a row in the list can never disagree.
+        if (this.subagents.snapshot().length === 0) {
+          this.note("no subagents yet — the delegate tool spawns them when a task is broad enough to hand off");
+          break;
+        }
+        this.openSubagentRoster();
+        break;
       case "settings":
         await this.showSettings(argument);
         break;
@@ -3096,7 +3234,7 @@ class TuiApp {
     this.draw();
   }
 
-  /**
+/**
    * One line of transcript, in the tone that suits it.
    *
    * With `foldPastRetry`, the fold looks past the user's own message: a gateway
@@ -3121,14 +3259,16 @@ class TuiApp {
   }
 
   private helpLines(): string[] {
-    const available = COMMANDS.filter((command) => isAvailable(command) && !command.alias).map(
-      (command) => `/${command.name}`,
-    );
     return [
       "type / for the palette — ↑↓ choose, enter runs, esc closes",
       "tab switches session · ctrl+w closes a tab · ctrl+p palette · ctrl+v paste text or image · alt+v or /paste when the terminal keeps ctrl+v · ctrl+u clear the line · alt+u usage card · ctrl+c stops a turn, again to quit",
       "click a tab to switch, its × to close, +NEW for a fresh one · the wheel scrolls",
-      available.join("  "),
+      // Every command, with a description of each, one keystroke away — and the
+      // only list of them that stays readable as the count grows. Spelling all
+      // of them out here used to cost seven wrapped rows on an 80-column
+      // terminal, which is most of a short screen spent on names the palette
+      // renders better, and it pushed the keymap above them off the top.
+      `${COMMANDS.filter((command) => isAvailable(command) && !command.alias).length} commands — press / or ctrl+p to list them`,
     ];
   }
 
@@ -3393,7 +3533,7 @@ class TuiApp {
         return;
       }
       if (!value) {
-        this.note(`${def.id} is ${String(this.view[def.id])} — ${def.description}`, "dim");
+        this.note(`${def.id} is ${settingValue(this.view, def.id)} — ${def.description}`, "dim");
         this.draw();
         return;
       }
@@ -3402,7 +3542,7 @@ class TuiApp {
         this.draw();
         return;
       }
-      await this.applyView({ ...this.view, [def.id]: value } as ViewSettings);
+      await this.applyView(setSettingValue(this.view, def.id, value));
       this.draw();
       return;
     }
@@ -3412,11 +3552,83 @@ class TuiApp {
     this.draw();
   }
 
-  /** The settings rows, filtered by the panel's search field. */
-  private visibleSettings(): SettingDef[] {
+  /**
+   * Runs the screen a shortcut row names, after closing settings — one panel
+   * at a time, so the target owns the screen rather than stacking over it.
+   * Each target is the same call its slash command makes, so the key, the
+   * click and the command can never disagree about what "Models" does.
+   */
+  private async openShortcut(id: string): Promise<void> {
+    this.settingsMenu = null;
+    this.editor.clear();
+    switch (id) {
+      case "shortcut:connect":
+        await this.command("/connect");
+        break;
+      case "shortcut:models":
+        await this.command("/models");
+        break;
+      case "shortcut:sessions":
+        await this.command("/sessions");
+        break;
+      case "shortcut:compact":
+        await this.command("/compact");
+        break;
+      case "shortcut:skills":
+        await this.command("/skills");
+        break;
+      case "shortcut:tools":
+        this.showTools();
+        break;
+      case "shortcut:mcp":
+        await this.command("/mcps");
+        break;
+      default:
+        this.draw();
+        break;
+    }
+  }
+
+  /**
+   * What this session can call, by name with one line each — the count the
+   * context card already reports, spelled out. Picking one reads its
+   * description back: tools run for the model, and the panel is for looking.
+   */
+  private showTools(): void {
+    // A foreign Agent (a test double) may not carry the list; an empty one
+    // notes rather than crashing, the way an empty picker does.
+    const tools = this.agent.toolList ?? [];
+    this.openPicker(
+      `Tools · ${tools.length}`,
+      tools.map((tool) => ({ label: tool.name, description: tool.description, value: tool.name })),
+      (name) => {
+        const tool = tools.find((candidate) => candidate.name === name);
+        if (tool) this.notes([`${tool.name} — ${tool.description}`]);
+      },
+    );
+  }
+
+  /**
+   * One selectable row of the settings panel: a shortcut out, or a value to
+   * step. Shortcuts ride first, in panel order — they are the reason the panel
+   * was opened as often as the values are.
+   */
+  private visibleSettingsRows(): (
+    | { kind: "shortcut"; shortcut: SettingShortcut }
+    | { kind: "setting"; def: SettingDef }
+  )[] {
     const menu = this.settingsMenu;
     if (!menu) return [];
-    return filterSettings(settingDefs(this.view), this.view, menu.query);
+    // Shortcuts ride first, in panel order — they are the reason the panel
+    // was opened as often as the values are.
+    return [
+      ...filterShortcuts(menu.query).map(
+        (shortcut): { kind: "shortcut"; shortcut: SettingShortcut } => ({ kind: "shortcut", shortcut }),
+      ),
+      ...filterSettings(settingDefs(this.view), this.view, menu.query).map(
+        (def): { kind: "setting"; def: SettingDef } => ({ kind: "setting", def }),
+      ),
+    ];
   }
 
   /**
@@ -3495,7 +3707,7 @@ class TuiApp {
     const menu = this.settingsMenu;
     if (!menu) return false;
 
-    const rows = this.visibleSettings();
+    const rows = this.visibleSettingsRows();
     const last = Math.max(rows.length - 1, 0);
     const clampCursor = (): void => {
       menu.selected = Math.min(Math.max(menu.selected, 0), last);
@@ -3510,17 +3722,26 @@ class TuiApp {
         return true;
       // The arrows along the row change its value: a row that has a value is a
       // row you can move through them, and it is the one gesture the footer names.
+      // A shortcut is a door, not a value — the arrows have nothing to step,
+      // so they leave it alone rather than pretending to change something.
       case "left":
       case "right": {
-        const def = rows[menu.selected];
-        if (def) await this.applyView(stepSetting(this.view, def.id, key.type === "right" ? 1 : -1));
+        const row = rows[menu.selected];
+        if (!row || row.kind === "shortcut") return true;
+        await this.applyView(stepSetting(this.view, row.def.id, key.type === "right" ? 1 : -1));
         return true;
       }
       case "enter": {
-        // Enter steps forward too, so a row can be changed without the arrows —
-        // and it never closes the panel, because one change is rarely the only one.
-        const def = rows[menu.selected];
-        if (def) await this.applyView(stepSetting(this.view, def.id, 1));
+        // Enter steps a value forward too, so a row can be changed without the
+        // arrows — and it never closes the panel, because one change is rarely
+        // the only one. On a shortcut it goes through the door instead, which
+        // is the one thing that does close the panel.
+        const row = rows[menu.selected];
+        if (row?.kind === "shortcut") {
+          await this.openShortcut(row.shortcut.id);
+          return true;
+        }
+        if (row) await this.applyView(stepSetting(this.view, row.def.id, 1));
         return true;
       }
       case "escape":
@@ -5440,7 +5661,7 @@ class TuiApp {
         return true;
       }
       if (this.settingsMenu) {
-        const last = Math.max(this.visibleSettings().length - 1, 0);
+        const last = Math.max(this.visibleSettingsRows().length - 1, 0);
         this.settingsMenu.selected =
           delta < 0
             ? (this.settingsMenu.selected <= 0 ? last : this.settingsMenu.selected - 1)
@@ -6553,6 +6774,7 @@ class TuiApp {
       // `x-opencode-session`) get the id this transcript is saved under, so
       // every rebuild of the same session keeps the same identity.
       sessionId: this.sessionId,
+      ...(this.delegateTool ? { extraTools: [this.delegateTool] } : {}),
     };
   }
 
@@ -6653,22 +6875,56 @@ class TuiApp {
   private menuPanel(): MenuPanel | null {
     if (this.settingsMenu) {
       const menu = this.settingsMenu;
-      const defs = this.visibleSettings();
-      const selected = Math.min(Math.max(menu.selected, 0), Math.max(defs.length - 1, 0));
-      const current = defs[selected];
-      // Sized by the longest description of any setting, not the current
-      // one: the sentence changes with every row the cursor lands on, so the
-      // current one would resize the card on every hover. Measured over the
-      // whole list rather than the filtered one, so typing keeps the card
-      // still too — and every sentence fits, none truncated.
-      const descriptionWidth = Math.max(0, ...settingDefs(this.view).map((def) => textWidth(def.description)));
+      const rows = this.visibleSettingsRows();
+      const selected = Math.min(Math.max(menu.selected, 0), Math.max(rows.length - 1, 0));
+      const current = rows[selected];
+      // Sized by the longest description of any row, not the current one: the
+      // sentence changes with every row the cursor lands on, so the current
+      // one would resize the card on every hover. Measured over the whole
+      // list rather than the filtered one, so typing keeps the card still
+      // too — and every sentence fits, none truncated.
+      const descriptionWidth = Math.max(
+        0,
+        ...settingDefs(this.view).map((def) => textWidth(def.description)),
+        ...SETTING_SHORTCUTS.map((shortcut) => textWidth(shortcut.description)),
+      );
+      const menuRows: MenuRow[] = [];
+      let group = "";
+      for (const row of rows) {
+        const item: MenuRow =
+          row.kind === "shortcut"
+            ? { label: row.shortcut.label, value: row.shortcut.id, trailing: "→" }
+            : {
+                label: row.def.label,
+                value: row.def.id,
+                trailing: settingValue(this.view, row.def.id),
+              };
+        const rowGroup = row.kind === "shortcut" ? "Shortcuts" : row.def.group;
+        if (rowGroup !== group) {
+          item.group = rowGroup;
+          group = rowGroup;
+        }
+        menuRows.push(item);
+      }
       return {
         title: "Settings",
-        rows: settingRows(defs, this.view),
+        rows: menuRows,
         selected,
         query: menu.query,
-        footer: "‹/› change · enter value · ↑↓ move · esc close",
-        ...(current ? { description: `${current.description}${this.options.saveView ? "" : " (not saved)"}` } : {}),
+        // A shortcut opens rather than changes: naming ‹/› on one would
+        // promise a gesture that does nothing there.
+        footer:
+          current?.kind === "shortcut"
+            ? "enter open · ↑↓ move · esc close"
+            : "‹/› change · enter value · ↑↓ move · esc close",
+        ...(current
+          ? {
+              description:
+                current.kind === "shortcut"
+                  ? current.shortcut.description
+                  : `${current.def.description}${this.options.saveView ? "" : " (not saved)"}`,
+            }
+          : {}),
         descriptionWidth,
       };
     }
@@ -6719,6 +6975,7 @@ class TuiApp {
       queue: this.queuedPrompts.map((entry) => entry.prompt),
       plan: this.plan,
       todoPanel: this.todoPanel,
+      subagents: this.subagents.snapshot(),
       settings: this.view,
       scroll: this.scroll,
       anchor: this.anchor,
@@ -6781,6 +7038,31 @@ class TuiApp {
   }
 
   /**
+   * `/agents` — the roster, as a list whose rows are the children's reports.
+   *
+   * A picker rather than a bespoke panel because it already windows a long list,
+   * scrolls with the selection and takes a number key, and a batch of children is
+   * exactly the case it was built for. Choosing a row prints that child's report
+   * in full: the dock shows that work happened, this is where it is read.
+   *
+   * Read straight off the registry — the same rows the dock draws — so a count
+   * here and a row there cannot disagree.
+   */
+  private openSubagentRoster(): void {
+    const children = this.subagents.snapshot();
+    if (children.length === 0) {
+      this.note("no subagent reports yet");
+      return;
+    }
+    this.openPicker(`Subagents · ${children.length}`, subagentRows(children), (value) => {
+      const child = this.subagents.snapshot().find((entry) => entry.id === value);
+      if (!child) return;
+      if (child.error) this.notes([`${child.goal} — ${child.model}`, `${child.status}: ${child.error}`]);
+      else this.notes([`${child.goal} — ${child.model}`, child.summary || "(it reported nothing)"]);
+    });
+  }
+
+  /**
    * Leaves the loop. Deliberately does *not* mark the app closed: teardown
    * still has to run, or the terminal is left in raw mode and the last turn is
    * never saved. `shutdown()` is what sets `closed`.
@@ -6790,26 +7072,39 @@ class TuiApp {
   }
 }
 
+
 /**
- * The settings rows as the panel wants them: a value on the right, and the
- * group heading carried only by the first row of each run.
+ * The subagent roster: one card row per child, model and elapsed included.
+ *
+ * Drawn from the same registry the dock is, so a count in the panel and a row
+ * in this list cannot disagree — the thing that would make both untrustworthy.
+ * Scrolled with the picker's own windowing when a batch outgrows the screen.
  */
-function settingRows(defs: readonly SettingDef[], view: ViewSettings): MenuRow[] {
-  let group = "";
-  return defs.map((def) => {
-    const row: MenuRow = { label: def.label, value: def.id, trailing: String(view[def.id]) };
-    if (def.group !== group) {
-      row.group = def.group;
-      group = def.group;
-    }
-    return row;
-  });
+function subagentRows(children: readonly SubagentView[]): PickItem[] {
+  return children.map((child) => ({
+    label: `${child.status === "running" ? "◐" : child.status === "completed" ? "✓" : "✕"} ${child.goal}`,
+    description:
+      child.error ??
+      `${child.model} · ${child.toolCalls} tool${child.toolCalls === 1 ? "" : "s"} · ${
+        child.ms >= 1000 ? `${Math.round(child.ms / 1000)}s` : `${child.ms}ms`
+      }${child.summary ? ` · ${child.summary.split("\n")[0]}` : ""}`,
+    value: child.id,
+  }));
 }
 
 /** `thinking hide` from a patch, for a notice under the prompt. */
 function describePatch(patch: Partial<ViewSettings>): string {
   return Object.entries(patch)
-    .map(([key, value]) => `${key} ${String(value)}`)
+    .map(([key, value]) => {
+      // A spacing write carries the whole object (a partial one would drop its
+      // siblings on disk), so it is read back out as dotted rows.
+      if (key === "spacing" && typeof value === "object" && value !== null) {
+        return Object.entries(value)
+          .map(([inner, each]) => `spacing.${inner} ${String(each)}`)
+          .join(" · ");
+      }
+      return `${key} ${String(value)}`;
+    })
     .join(" · ");
 }
 

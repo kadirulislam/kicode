@@ -17,6 +17,16 @@ function luminance(hex: string): number {
   return ((value >> 16) & 0xff) * 0.299 + ((value >> 8) & 0xff) * 0.587 + (value & 0xff) * 0.114;
 }
 
+/** How much colour a surface carries, 0–1: the gap between its widest channels. */
+function chroma(hex: string): number {
+  const value = Number.parseInt(hex.slice(1), 16);
+  const channels = [(value >> 16) & 0xff, (value >> 8) & 0xff, value & 0xff];
+  return (Math.max(...channels) - Math.min(...channels)) / 255;
+}
+
+/** The four fills a screen is built from, near enough to background to rest the eye. */
+const SURFACES = ["bg", "panel", "block", "input"] as const;
+
 describe("the theme roster", () => {
   it("starts on the default, and names every theme exactly once", () => {
     expect(THEMES[0]?.name).toBe(DEFAULT_THEME);
@@ -66,6 +76,36 @@ describe("the theme roster", () => {
   it("resolves legacy theme aliases like opencode cleanly", () => {
     expect(isThemeName("opencode")).toBe(true);
     expect(themeByName("opencode")).toBe(themeByName("kicode"));
+  });
+
+  it("keeps every surface matte, so a theme rests the eye rather than glares at it", () => {
+    // A background is the largest area on screen: any chroma in it is read as
+    // colour everywhere at once. The fills may not carry much either — a tinted
+    // box is a highlight, and the typing area is not the loudest thing here.
+    // The two themes whose whole point is not to tint anything sit lower still.
+    for (const { name, theme } of THEMES) {
+      for (const slot of SURFACES) {
+        expect(chroma(theme[slot]), `${name}.${slot}`).toBeLessThanOrEqual(0.08);
+      }
+      if (name === "mono" || name === "contrast") {
+        for (const slot of SURFACES) expect(chroma(theme[slot]), `${name}.${slot}`).toBe(0);
+      }
+    }
+  });
+
+  it("steps each fill away from its own background, so surfaces stay tellable apart", () => {
+    // Matte is not the same as flat: a box the eye cannot pick out is a box the
+    // eye stops seeing. Dark themes step lighter as they come forward, light ones
+    // step darker — the same direction as the theme it belongs to.
+    for (const { name, mode, theme } of THEMES) {
+      const steps = SURFACES.filter((slot) => slot !== "bg").map((slot) => luminance(theme[slot]));
+      const bgL = luminance(theme.bg);
+      for (const value of steps) {
+        expect(Math.abs(value - bgL) > 8, `${name} surface on bg`).toBe(true);
+        expect(value > bgL, `${name} ${mode} surface`).toBe(mode === "dark");
+      }
+      expect(new Set(steps.map((value) => Math.round(value))).size).toBeGreaterThan(1);
+    }
   });
 
   it("gives every slot a style of its own, so a theme can change it", () => {

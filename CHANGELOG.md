@@ -6,7 +6,38 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **Subagent delegation.** A `delegate` tool hands a task — or a batch of
+  independent tasks, run in parallel — to a child agent: a fresh context, a
+  read-only toolset (`read`, `glob`, `grep`, `recall`), and its own model. Only
+  a bounded report comes back. Configure with a `delegation` block in
+  `kicode.json`; `model` empty means children use the parent's, and
+  `KICODE_DELEGATION=off` (or `"enabled": false`) removes the tool entirely.
+- A dock above the prompt shows every child in flight — goal, model, tools
+  spent, elapsed — capped at two rows with a count of the rest; `/agents` opens
+  the full roster and prints any child's report in full.
+- The transcript records one row per delegation: it opens as `delegating…`,
+  counts `delegating N of M` while the batch runs, and settles to what
+  reported and what did not.
+- `MOCK_TOOL=delegate` and `MOCK_LOG=1` on the mock provider, for exercising
+  the whole delegation path with no key or network.
+
+### Changed
+
+- `/help` names the command count and points at `/` instead of listing every
+  command inline. The list was seven wrapped rows of a 24-row terminal's worth
+  of space, it pushed the keymap off the top of a short screen, and the palette
+  renders the same names with descriptions.
+
+### Fixed
+
+- A wedged child is cut loose on its own account after
+  `delegation.staleMs` of silence (1 200s while inside a tool), instead of
+  holding its parent's turn open until the session's own request budget.
+- `delegation.maxPerTurn` is spent across the turn and starts again with the
+  next one; it was never reset, so a long session would have had later turns
+  refused for children the first turn spawned.
 
 ## [0.2.0] — 2026-10-04
 

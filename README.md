@@ -221,6 +221,7 @@ Type `/` and the palette opens, filtering as you type — `↑` `↓` choose, `E
 runs, `Esc` closes. `Ctrl+P` opens the same list from anywhere:
 
 ```
+/agents    Watch the child agents working
 /btw       One-shot answer from the session's context, not added to it <question>
 /budget    Show or set the session token budget [tokens]
 /cd        Change working directory <directory>
@@ -267,8 +268,8 @@ runs, `Esc` closes. `Ctrl+P` opens the same list from anywhere:
 
 Only commands that actually run here are listed — no aliases, no dead entries.
 The rest still work when typed in full: an alias (`/q`, `/open`, `/resume`)
-runs the command it stands for, and a name KiCode does not have (`/agents`,
-`/plugins`, `/worktrees`…) answers for itself instead of failing silently:
+runs the command it stands for, and a name KiCode does not have (`/plugins`,
+`/worktrees`…) answers for itself instead of failing silently:
 
 ```
 [ /plugins is not available in KiCode: Zero runtime dependencies is a design
@@ -309,6 +310,7 @@ Command | Does
 `/settings` | The settings panel: a search field, grouped rows, `‹` `›` to change a value. `/settings thinking hide` sets one outright
 `/connect` | Add an endpoint KiCode can reach from a list of known services, and move the session onto it
 `/status` `/stats` `/debug` `/mcps` | What is in play, and what it has cost
+`/agents` | The child agents this session spawned: goal, model, elapsed, and each report in full
 `/reload` | Re-read `kicode.json` without restarting
 
 ### Themes
@@ -785,8 +787,19 @@ is still running. On Windows a backgrounded process ignores a plain `kill` from
 Git Bash, so use `MSYS_NO_PATHCONV=1 taskkill /F /PID <pid>`.
 
 `MOCK_TOOL` picks which tool it asks for (`read`, `write`, `edit`, `glob`,
-`grep`, `bash`, `mcp`), and `MOCK_TOOL=none` makes it answer with prose only —
-useful for exercising compaction.
+`grep`, `bash`, `mcp`, `delegate`), and `MOCK_TOOL=none` makes it answer with
+prose only — useful for exercising compaction.
+
+`MOCK_TOOL=delegate` drives the whole subagent path: the parent delegates a batch
+and each child answers with its own report, so you can watch a delegation
+end-to-end with no key. `MOCK_LOG=1` prints each request's role and the tool names
+it was offered — which is the only way to see from outside the process that a
+child really was handed a read-only toolset:
+
+```
+[mock] parent · 2 messages · tools: read, glob, grep, write, edit, bash, remember, recall, plan, todo, goal, delegate
+[mock] child  · 2 messages · tools: read, glob, grep, recall
+```
 
 ## Tools
 
@@ -799,6 +812,7 @@ useful for exercising compaction.
 | `edit` | **yes** | Replace an exact string; refuses an ambiguous match |
 | `bash` | **yes** | Run a shell command in the working directory |
 | `ask` | — | Put a choice to you as labelled options; only offered when somebody can answer |
+| `delegate` | — | Hand a task, or a batch of them, to child agents; off with `delegation.enabled: false` |
 
 `glob` and `grep` are pure Node — no `ripgrep` binary to install. Both match
 patterns against paths with forward slashes, so patterns behave the same on
@@ -813,6 +827,80 @@ naming the platform, the shell and the commands that shell has and has not — s
 recognized as an internal or external command`. `KICODE_SHELL` overrides the
 choice, and `KICODE_SHELL=cmd.exe` keeps the Windows commands for someone who
 wants them. WSL's `bash.exe` is never picked: its paths are Linux paths.
+
+## Subagents
+
+Some questions are broad: *where is retry handled*, *audit every call site of X*.
+Answering one in the main session means the main session reads forty files, and
+those forty files sit in its context forever afterwards. KiCode can hand the
+reading to child agents instead.
+
+A **child** is an ordinary agent with three differences, and none of them is a
+setting you can argue with:
+
+- **A fresh context.** It knows nothing of your conversation. Everything it needs
+  — paths, the error text, the constraint that matters — travels in the task, so
+  a delegation of *"the bug we were looking at"* is a delegation of nothing.
+- **A read-only toolset.** `read`, `glob`, `grep`, `recall`. No `write`, no
+  `edit`, no `bash`, no `remember`, and no `delegate` of its own. It holds nothing
+  to be talked into using, and there is no second level to bound.
+- **No approval channel and no question channel.** There is nobody to ask, so
+  `ask` is not offered either.
+
+Only a bounded report comes back, and that report is what the main agent reads.
+This is the point of the whole arrangement: the tokens go where nobody has to
+read them, and the parent's context stays small.
+
+A batch runs in parallel and returns in the order you asked:
+
+```jsonc
+// kicode.json
+{
+  "delegation": {
+    "model": "gemini-3.8-flash",   // empty = the parent's own model
+    "maxConcurrent": 4,            // children at once within one call
+    "maxPerTurn": 8,               // children one turn may spawn, in total
+    "maxIterations": 60,           // requests one child may make
+    "staleMs": 450000,             // idle before a child counts as wedged
+    "staleToolMs": 1200000         // …while it is inside a tool
+  }
+}
+```
+
+`model` is empty by default, so a fresh install spends no second model's money
+until someone names a cheaper one — the useful shape is a strong model deciding
+what to do and cheap models doing it. `KICODE_DELEGATION=off`, or
+`"enabled": false`, removes the tool entirely rather than registering something
+the model can see and cannot use.
+
+While children run, a dock above the prompt says who is working on what:
+
+```
+  ◐ audit the retry paths · gemini-3.8-flash · 7 tools · 12s
+    ✓ where is X handled · gemini-3.8-flash · 3 tools · 5s
+    +2 more · /agents for the roster
+```
+
+`/agents` opens the whole roster; choosing a row prints that child's report in
+full. The transcript keeps one row per delegation — it opens as `delegating…`,
+counts `delegating 1 of 2` while the batch runs, and settles to what reported and
+what did not, in place.
+
+Three things worth knowing:
+
+- **A child is not given a clock.** There is no wall-clock timeout, because a cap
+  kills legitimate long work — a deep review needs minutes and keeps making
+  progress throughout. Staleness measures *silence*: after `staleMs` with no sign
+  of life the child is cut loose, and `staleToolMs` is the longer version for
+  while it is inside a tool, where a long grep or a fetch is also silent. It is
+  cut loose rather than waited on, so one wedged child cannot hold your turn open.
+- **A cap is refused, not applied.** Asking for six tasks with two left in the
+  turn's budget is an error naming both numbers, not a batch quietly cut to two.
+  Four tasks that silently became two are four the model believes are running.
+- **Nothing fails quietly.** A child that dies is a line of its own in the
+  report, naming the reason, and the rest of the batch still reports. A child that
+  ran out of turns is reported as stalled rather than complete, so a truncated
+  finding is never read as a whole one.
 
 ## Sessions
 
@@ -1198,7 +1286,14 @@ through named values.
 | `compaction.targetPercent` | `KICODE_COMPACT_TARGET` |
 | `compaction.compactAt` | `KICODE_COMPACT_AT` |
 | `compaction.enabled` | `--no-compact` disables it |
+| `delegation.enabled` | `KICODE_DELEGATION=off` disables it, and removes the tool |
+| `delegation.model` | `KICODE_DELEGATION_MODEL` (empty = the parent's own model) |
+| `delegation.maxConcurrent` | `KICODE_DELEGATION_CONCURRENT` |
+| `delegation.maxPerTurn` | `KICODE_DELEGATION_PER_TURN` |
+| `delegation.maxIterations` | `KICODE_DELEGATION_ITERATIONS` |
 | `mcp` | — (see [MCP servers](#mcp-servers)) |
+
+See [Subagents](#subagents) for what the delegation block does.
 
 The order is **flags > `kicode.json` > environment > defaults**, and the file
 beats the environment on purpose: an ambient `OPENAI_BASE_URL` usually belongs to
@@ -1268,6 +1363,7 @@ src/routes/quota.ts     what a gateway says about its limits, from its headers
 src/routes/probe.ts     asking a gateway what is left (OpenRouter /key), cached
 src/routes/health.ts    what each route did last time, kept in ~/.kicode/routes.json
 src/agent/loop.ts       the loop: stream -> tools -> feed back -> repeat
+src/agent/subagent.ts   the delegate tool, the child runner, and the live roster
 src/agent/tools/        tool contract, registry, the six tools, diff, walker, glob matcher
 src/agent/compaction.ts summarise older turns when the context window fills
 src/agent/environment.ts which shell `bash` gets, and the prompt that names it
@@ -1322,16 +1418,25 @@ around a failure — a rejected key, a cancellation, and an answer already begun
 
 ## What's next
 
-1. **Sub-agents** — a tool that runs a nested KiCode loop would let a long task
-   be split across contexts instead of filling one, and would turn `/agents`
-   from a dimmed row into a real one.
-2. **MCP resources and prompts** — the client speaks the `tools/*` surface only;
+1. **Charge children's tokens to the session.** A child's spending rides on its
+   own report but not on the parent's ledger, so `/context` and `/usage`
+   under-report a session that delegated. The fix is an `Agent.absorb(other)` the
+   loop calls for each settled child on the `subagents` event.
+2. **Parallel read-only tools in the main loop.** Tool calls run strictly in
+   sequence, so a model that emits four independent reads waits four round trips.
+   Resolving arguments and approvals in order, launching concurrently, and
+   pushing results back in call order would keep the transcript and the approval
+   card honest while taking the wait out.
+3. **MCP resources and prompts** — the client speaks the `tools/*` surface only;
    `resources/*` and `prompts/*` are the next slice of the protocol.
-3. **Memory and skills** — a long-lived memory layer and a skills directory
+4. **Write-capable children.** Read-only is a deliberate v1 limit: a child that
+   could edit would need worktree isolation, and Git `worktrees` is not in the
+   toolset. Adding it means adding that first, not relaxing the tool list.
+5. **Memory and skills** — a long-lived memory layer and a skills directory
    would let a session start from what the last one learned. The design
    decision, and how (or whether) to bridge to Hermes Agent, is written down in
    [`ROADMAP.md`](ROADMAP.md) rather than left half-built in an afternoon.
-4. **Per-request cost, not just tokens** — the usage footer counts tokens; a
+6. **Per-request cost, not just tokens** — the usage footer counts tokens; a
    price would need a provider-reported rate, which the free routes do not have.
 
 Adding a tool is a single file plus one line in `createDefaultTools()`. Set

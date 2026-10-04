@@ -110,6 +110,48 @@ export type FallbackRoute = {
   keyHint?: string;
 };
 
+/**
+ * How this session hands work to child agents.
+ *
+ * A single pin rather than a per-role one, deliberately: the model that spawns
+ * children is not the thing that should decide which endpoint they run on, and
+ * one predictable pin is one less thing to get wrong. Decomposing a problem
+ * needs frontier judgement; executing a well-specified subtask usually does not —
+ * so the default shape is a frontier parent with cheaper children, and
+ * `model`/`baseUrl` left empty simply mean "whatever the parent is using".
+ */
+export type DelegationSettings = {
+  /** Off means the `delegate` tool is not registered at all, rather than refused. */
+  enabled: boolean;
+  /** Model every child runs on. Empty means the parent's own model. */
+  model: string;
+  /** Endpoint every child runs on. Empty means the parent's own endpoint. */
+  baseUrl: string;
+  /** Children allowed to run at once within one `delegate` call. */
+  maxConcurrent: number;
+  /** Children one parent turn may spawn in total. */
+  maxPerTurn: number;
+  /** Requests one child may make before it returns whatever it has. */
+  maxIterations: number;
+  /**
+   * Idle time after which a child counts as wedged and is abandoned.
+   *
+   * A wall-clock cap is the wrong instrument: it kills legitimate long work —
+   * a deep review needs minutes and keeps making progress the whole time. This
+   * measures *silence*, so a slow child is never touched and a stuck one is
+   * caught. The in-tool figure is higher because a legitimate long command or
+   * fetch is also silent.
+   */
+  staleMs: number;
+  staleToolMs: number;
+};
+
+export const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
+export const DEFAULT_MAX_SUBAGENTS_PER_TURN = 8;
+export const DEFAULT_SUBAGENT_ITERATIONS = 60;
+export const DEFAULT_SUBAGENT_STALE_MS = 450_000;
+export const DEFAULT_SUBAGENT_STALE_TOOL_MS = 1_200_000;
+
 export type Config = {
   apiKey: string;
   baseUrl: string;
@@ -154,6 +196,7 @@ export type Config = {
    */
   learning: "off" | "auto";
   compaction: CompactionSettings;
+  delegation: DelegationSettings;
 };
 
 /** What the bundled mock provider serves, for the `mock` shorthand. */
@@ -249,6 +292,45 @@ export function loadConfig(
       targetPercent: compaction.targetPercent ?? intFrom(env.KICODE_COMPACT_TARGET, DEFAULT_COMPACT_TARGET_PERCENT),
       compactAt: compaction.compactAt ?? intFrom(env.KICODE_COMPACT_AT, DEFAULT_COMPACT_AT_TOKENS),
     },
+    delegation: readDelegation(env, file),
+  };
+}
+
+/**
+ * Whether child agents may be spawned at all, and on what.
+ *
+ * `KICODE_DELEGATION=off` (or `"enabled": false` in `kicode.json`) turns it off;
+ * anything else leaves it on. An environment switch as well as a setting,
+ * because the thing it spends is the user's money per turn and needs to be
+ * stoppable without editing a file that may be committed.
+ */
+function readDelegation(env: NodeJS.ProcessEnv, file: FileSettings): DelegationSettings {
+  const declared = file.delegation ?? {};
+  const flag = env.KICODE_DELEGATION?.trim().toLowerCase();
+  const enabled =
+    flag === "off" || flag === "false" || flag === "0" || flag === "no"
+      ? false
+      : flag !== undefined && flag !== ""
+        ? true
+        : declared.enabled !== false;
+  return {
+    enabled,
+    model: (declared.model ?? env.KICODE_DELEGATION_MODEL ?? "").trim(),
+    baseUrl: (declared.baseUrl ?? "").trim(),
+    maxConcurrent: intFrom(
+      String(declared.maxConcurrent ?? env.KICODE_DELEGATION_CONCURRENT ?? ""),
+      DEFAULT_MAX_CONCURRENT_SUBAGENTS,
+    ),
+    maxPerTurn: intFrom(
+      String(declared.maxPerTurn ?? env.KICODE_DELEGATION_PER_TURN ?? ""),
+      DEFAULT_MAX_SUBAGENTS_PER_TURN,
+    ),
+    maxIterations: intFrom(
+      String(declared.maxIterations ?? env.KICODE_DELEGATION_ITERATIONS ?? ""),
+      DEFAULT_SUBAGENT_ITERATIONS,
+    ),
+    staleMs: intFrom(String(declared.staleMs ?? ""), DEFAULT_SUBAGENT_STALE_MS),
+    staleToolMs: intFrom(String(declared.staleToolMs ?? ""), DEFAULT_SUBAGENT_STALE_TOOL_MS),
   };
 }
 

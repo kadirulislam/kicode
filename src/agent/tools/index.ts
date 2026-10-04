@@ -51,3 +51,17 @@ export function createDefaultTools(extra: Tool[] = [], options: { ask?: boolean 
   if (options.ask) tools.push(askTool);
   return new ToolRegistry([...tools, ...extra]);
 }
+
+/**
+ * What a child agent is given.
+ *
+ * The list is the isolation. `read`, `glob`, `grep` and `recall` cannot change
+ * anything; `bash` is left out on purpose even though a gated read-only command
+ * would be allowed — a child with no approval channel is refused every gated
+ * tool anyway, so including it would only teach the model to try.
+ *
+ * `remember` and the plan tools are left out too: a child's finding belongs to
+ * the session that delegated it, and two agents writing the same brain file is
+ * a race rather than a memory.
+ */
+export const SUBAGENT_TOOLS: readonly string[] = ["read", "glob", "grep", "recall"];

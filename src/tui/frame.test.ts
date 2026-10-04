@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { SubagentView } from "../agent/tools/types";
 import { bg, textWidth } from "./ansi";
 import { EDITOR_MAX_ROWS, LineEditor } from "./editor";
 import { COMMANDS } from "./commands";
@@ -23,6 +24,15 @@ import type { Entry } from "./transcript";
 
 const styles = buildStyles(darkTheme);
 const theme = darkTheme;
+
+/**
+ * The selected palette row's fill, as the escape sequence carries it.
+ *
+ * The palette fills the whole selected row rather than colouring the text, so
+ * "is this row selected" is a question about the background, not about the text
+ * style — which is why it is named once here instead of repeated as a literal.
+ */
+const ACCENT_BG = "48;2;45;212;191";
 
 /**
  * The tab bar is a setting, and `auto` keeps its row for the transcript while
@@ -486,24 +496,33 @@ describe("the command palette", () => {
   });
 
   it("dims the names that cannot run here", () => {
-    // The cursor is parked on /cd — /agents and /btw come before it now that
-    // /attach has moved to the prompt's [+] button.
-    const { frame, plain } = draw({ palette: { items: COMMANDS, selected: 2 } }, { cols: 80, rows: 30 });
-    const agents = plain.findIndex((line) => line.includes("/agents"));
-    const btw = plain.findIndex((line) => line.includes("/btw"));
+    // An explicit list rather than the whole catalogue: the window follows the
+    // selection, so a gated command far down the real list would not be on
+    // screen to be measured.
+    const short = [
+      { name: "budget", description: "Show the token budget" },
+      { name: "plugins", description: "Plugins", unavailable: "nothing behind it" },
+      { name: "sessions", description: "Other sessions" },
+    ];
+    const { frame, plain } = draw({ palette: { items: short, selected: 0 } });
+    const plugins = plain.findIndex((line) => line.includes("/plugins"));
 
-    // /agents exists in the list but is not available here, so it is drawn in
-    // the faint colour rather than the accent one.
-    expect(frame.lines[agents]).toContain(styles.faint);
-    expect(frame.lines[agents]).not.toContain(styles.accent);
-    expect(frame.lines[btw]).toContain(styles.accent);
+    expect(plugins).toBeGreaterThan(-1);
+    // It exists in the list but cannot run, so it reads as dimmed rather than as
+    // something to press.
+    expect(frame.lines[plugins]).toContain(styles.faint);
+    expect(frame.lines[plugins]).not.toContain(styles.accent);
+    // The selected row carries the accent highlight; the dimmed row carries neither
+    // the highlight nor the accent text.
+    expect(frame.lines[plain.findIndex((line) => line.includes("/budget"))]).toContain(ACCENT_BG);
+    expect(frame.lines[plain.findIndex((line) => line.includes("/sessions"))]).not.toContain(ACCENT_BG);
   });
 
   it("leaves unselected rows on the panel background", () => {
     const { frame } = draw({ palette });
     const row = frame.lines.find((line) => line.includes(`/${items[0]?.name}`)) ?? "";
 
-    expect(row).not.toContain("48;2;45;212;191");
+    expect(row).not.toContain(ACCENT_BG);
   });
 
   it("says so when nothing matches", () => {
@@ -1653,6 +1672,87 @@ describe("the settings button", () => {
     // the panel it opens is hidden behind the card, like the state row's chips.
     const { frame } = draw({ modal: permission() });
     expect(frame.rows.some((row) => row.kind === "settings_button")).toBe(false);
+  });
+});
+
+describe("the subagent dock", () => {
+  const child = (over: Partial<SubagentView> = {}): SubagentView => ({
+    id: "sa-1",
+    goal: "find the retry logic",
+    model: "gemini-3.8-flash",
+    status: "running",
+    ms: 4_200,
+    toolCalls: 3,
+    ...over,
+  });
+
+  it("draws nothing when no child is running", () => {
+    expect(draw({ subagents: [] }).plain.join("\n")).not.toContain("gemini-3.8-flash");
+  });
+
+  it("names the child, its model and its progress", () => {
+    // A child can run for minutes while the parent's own words stay silent, so
+    // the row has to say who is working on what without being asked.
+    const row = draw({ subagents: [child()] }).plain.find((line) => line.includes("find the retry logic"));
+
+    expect(row).toBeDefined();
+    expect(row).toContain("gemini-3.8-flash");
+    expect(row).toContain("3 tools");
+    expect(row).toContain("4s");
+  });
+
+  it("says how many it is hiding, because two rows is the cap", () => {
+    // A batch of eight is eight rows of chrome in a fixed-height area; the count
+    // is what tells the user how much of it is off screen, and `/agents` is what
+    // opens the rest.
+    const many = Array.from({ length: 6 }, (_, at) => child({ id: `sa-${at}`, goal: `task ${at}` }));
+    const plain = draw({ subagents: many }).plain.join("\n");
+
+    expect(plain).toContain("task 0");
+    expect(plain).toContain("task 1");
+    expect(plain).not.toContain("task 2");
+    expect(plain).toContain("+4 more");
+    expect(plain).toContain("/agents");
+  });
+
+  it("tells a running child from a finished one and a dead one", () => {
+    const plain = draw({
+      subagents: [child({ id: "a", goal: "still going" }), child({ id: "b", goal: "all done", status: "completed" })],
+    }).plain.join("\n");
+
+    expect(plain).toContain("◐ still going");
+    expect(plain).toContain("✓ all done");
+  });
+
+  it("marks a child that did not finish with a cross", () => {
+    const plain = draw({ subagents: [child({ goal: "dead one", status: "failed" })] }).plain.join("\n");
+
+    expect(plain).toContain("✕ dead one");
+  });
+
+  it("reads the elapsed time in whatever unit fits it", () => {
+    expect(draw({ subagents: [child({ ms: 400 })] }).plain.join("\n")).toContain("400ms");
+    expect(draw({ subagents: [child({ ms: 90_000 })] }).plain.join("\n")).toContain("90s");
+  });
+
+  it("keeps every row inside the terminal width", () => {
+    const many = Array.from({ length: 4 }, (_, at) =>
+      child({ id: `sa-${at}`, goal: "a".repeat(300) }),
+    );
+
+    for (const line of draw({ subagents: many }).plain) {
+      expect(textWidth(line)).toBeLessThanOrEqual(80);
+    }
+  });
+
+  it("copes with a screen too short to give the dock a row", () => {
+    // The dock is chrome above the box; on a short terminal the box and the
+    // prompt win, because a prompt you cannot see is worse than a dock you
+    // cannot see.
+    const { plain } = draw({ subagents: [child()] }, { cols: 80, rows: 6 });
+
+    expect(plain.join("\n")).toContain("find the retry logic");
+    expect(plain.some((line) => line.includes("Ask anything"))).toBe(true);
   });
 });
 

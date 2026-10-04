@@ -5,7 +5,7 @@ import type { AssistantMessage, ChatMessage, ContentPart, FinishReason, Provider
 import type { QuotaReading } from "../routes/quota";
 import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions } from "./compaction";
 import { learnFromSession, type LearnResult } from "./learn";
-import type { PlanSnapshot, ToolRegistry } from "./tools/types";
+import type { PlanSnapshot, SubagentView, ToolContext, ToolRegistry } from "./tools/types";
 
 /**
  * A user turn's content: the words, and any pasted images beside them.
@@ -60,6 +60,16 @@ export type AgentEvent =
    * hold such state emit it.
    */
   | { type: "plan"; snapshot: PlanSnapshot }
+  /**
+   * The child agents this turn has running, as data.
+   *
+   * Same reason as the `plan` event: the model is told a summary in prose, but a
+   * screen needs to draw *who is working on what* — role, goal, model, how long
+   * it has been going — and parsing the prose to get that is how a panel ends up
+   * showing something the user can read but not trust. Emitted after any tool
+   * that owns children, so the list is the runner's state and never a copy.
+   */
+  | { type: "subagents"; state: SubagentView[] }
   /**
    * The model thinking, before it answered. Only from endpoints that stream it.
    *
@@ -306,6 +316,11 @@ export class Agent {
   /** How many tools the next request offers — the `/context` system row. */
   get toolCount(): number {
     return this.tools.list().length;
+  }
+
+  /** What this session can call — names and one-line descriptions, for a screen that lists them. */
+  get toolList(): { name: string; description: string }[] {
+    return this.tools.list().map((tool) => ({ name: tool.name, description: tool.description }));
   }
 
   /** The tool declarations, in request shape — estimated into the system row. */
@@ -783,6 +798,12 @@ export class Agent {
         const snapshot = tool.snapshot?.();
         if (snapshot) yield { type: "plan", snapshot };
 
+        // The same, for the child agents a tool is running: the panel needs to
+        // know who is working on what while it is happening, not only once the
+        // tool has returned a summary of all of it.
+        const children = tool.subagents?.();
+        if (children && children.length > 0) yield { type: "subagents", state: children };
+
         // The tool may have been stopped by the cancellation it was just
         // handed — a killed command still owes the model its result, but the
         // turn is over, so end it here rather than asking the provider for
@@ -830,9 +851,9 @@ export class Agent {
    * is never broken. If the summary call fails we continue over budget rather
    * than losing the conversation.
    */
-  /** What the tools are given: where they run, how to reach the user, and the
-   * signal that stops the turn they belong to. */
-  private toolContext(signal?: AbortSignal): { cwd: string; ask?: AskFn; signal?: AbortSignal } {
+  /** What the tools are given: where they run, how to reach the user, how to
+   * spawn a child agent, and the signal that stops the turn they belong to. */
+  private toolContext(signal?: AbortSignal): ToolContext {
     return {
       cwd: this.cwd,
       ...(this.ask ? { ask: this.ask } : {}),
