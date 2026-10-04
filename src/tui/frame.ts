@@ -22,7 +22,7 @@ import type { PlanSnapshot } from "../agent/tools/types";
 import type { MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
 import { blend, type Styles, type Theme } from "./theme";
-import { type Entry, entrySpans } from "./transcript";
+import { type Entry, entrySpans, isResultClipped } from "./transcript";
 
 /**
  * Layout, as a pure function: state + terminal size -> the exact rows to draw.
@@ -69,6 +69,12 @@ export type Modal = {
   footer?: readonly (readonly [string, string])[];
   /** Optional tone for the card: "error" gives an alert red theme and border. */
   tone?: "warn" | "error" | "accent";
+  /**
+   * Body rows the card may show before cutting with a marker. Six by default —
+   * a permission prompt must stay small — and raised only by cards asked for by
+   * name, like usage, that have more worth showing than six rows.
+   */
+  bodyRows?: number;
 };
 
 /** The slash-command list, floating above the prompt. */
@@ -239,7 +245,7 @@ export type TuiState = {
   /** Set while the user is choosing from a list. */
   picker: Picker | null;
   /**
-   * A full-screen menu over the transcript — `/settings`, `/connect`.
+   * A modal card over the transcript — `/settings`, `/connect`.
    *
    * Separate from `picker` because a menu's rows carry a value that is changed
    * in place rather than a choice that closes the panel, and because both of
@@ -327,6 +333,12 @@ export type PromptBox = {
   bottom: number;
   /** The column the text starts in, 1-based, badges included. */
   textLeft: number;
+  /**
+   * How many cells of badges sit in front of the text (`[Image 1] `,
+   * `[name] `). The caret column is measured past them via `textLeft`, so
+   * this is for hit-testing the badges themselves (click to detach).
+   */
+  badgeWidth: number;
   /** One entry per text row: its screen row, and the text it shows. */
   rows: { row: number; start: number; end: number }[];
   /**
@@ -398,7 +410,14 @@ export type PanelKind =
   /** The `TODO [n/m]` chip on the state row, which opens the plan panel. */
   | "todo_button"
   /** The `[USAGE]` chip on the state row, which opens this session's usage. */
-  | "usage_button";
+  | "usage_button"
+  /** The `[⚙]` button on the footer's left end, which opens the settings panel. */
+  | "settings_button"
+  /**
+   * A clipped tool-result row in the transcript: a click toggles it expanded
+   * in place. `index` is the entry's place in `state.entries`.
+   */
+  | "result";
 
 export type ClipboardMenuState = {
   items: readonly PickItem[];
@@ -461,6 +480,8 @@ const BLOCK_PAD = 2;
 const MODAL_BODY_LINES = 6;
 /** The glyph in a tab that closes it. */
 export const TAB_CLOSE = "×";
+/** The glyph in the footer's settings button, which opens the settings panel. */
+export const SETTINGS_GEAR = "⚙";
 /** Marks a tab with a turn running in it — the session working in the background. */
 const TAB_BUSY = "◐ ";
 /** A tab title longer than this is cut, so one name cannot push the rest off. */
@@ -500,6 +521,11 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
   const page = overlay ? renderBody({ ...state, picker: null, menu: null }, styles, theme, usable - margin, bodyRows, usable, margin) : null;
   const body = page ?? renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin);
   const card = overlay ? renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin) : null;
+  // A menu is a modal in the opencode sense: the page behind goes black
+  // instead of fading. Faded transcript fills and surfaces are what used to
+  // read as a stray second panel beside the card — black cannot be misread.
+  // Pickers keep the faded page; choosing from a list wants its context.
+  const menuOnly = overlay && !state.picker;
 
   const tabRowCount = showTabs ? 1 : 0;
   const allRows: BodyLine[] = [];
@@ -512,10 +538,13 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     const cardLine = card?.lines[i];
     const line = body.lines[i];
     // A card row carrying text covers the page; the card's own blank padding
-    // rows let the faded page show through around it.
+    // rows let the faded page show through around it — or, for a menu, plain
+    // background: the modal owns the whole backdrop.
     if (cardLine && cardLine.spans.length > 0) {
       allRows.push({ spans: cardLine.spans, background: cardLine.background ?? theme.panel, page: cardLine.page ?? theme.bg });
       cardRows.add(allRows.length - 1);
+    } else if (menuOnly) {
+      allRows.push({ spans: [], background: theme.bg, page: theme.bg });
     } else {
       allRows.push({ spans: line?.spans ?? [], background: line?.background ?? theme.bg, page: line?.page ?? theme.bg });
     }
@@ -562,8 +591,9 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
     const boxWidth = Math.min(Math.max(usable - 6, 20), MODAL_BOX_WIDTH);
     // Title + body + decision row must fit between the tab bar and the footer,
     // so the body is the part that gives: it is the only part with a boundary
-    // to cut at, and the row that says how to answer is not negotiable.
-    const bodyBudget = clamp(rows - 4, 1, MODAL_BODY_LINES);
+    // to cut at, and the row that says how to answer is not negotiable. Six by
+    // default; a card asked for by name may ask for more room.
+    const bodyBudget = clamp(rows - 4, 1, state.modal.bodyRows ?? MODAL_BODY_LINES);
     const card = modalCard(state.modal, styles, boxWidth, bodyBudget);
     const box = card.box;
     const left = Math.max(Math.floor((usable - boxWidth) / 2), 0);
@@ -583,7 +613,9 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
       const row = start + offset;
       if (row < 0 || row >= lines.length) return;
       const screenRow = row + 1;
-      const boxSpans = padSpans([span(" ".repeat(left)), ...spans], left + boxWidth);
+      // The centering offset is page, not card: without its own background it
+      // would wear the modal fill all the way to the screen's left edge.
+      const boxSpans = padSpans([span(" ".repeat(left), bg(theme.bg)), ...spans], left + boxWidth);
       const highlighted = state.selection ? selectRow(boxSpans, screenRow, state.selection, styles) : boxSpans;
       lines[row] = paint(highlighted, modalBg, usable, theme.bg);
     });
@@ -861,6 +893,8 @@ function renderBody(
     gutter === 0 ? line : { spans: [edge, ...line.spans, edge], background: line.background };
 
   const lines: BodyLine[] = [];
+  /** Which entry each line belongs to, or null for the air between entries. */
+  const owners: (number | null)[] = [];
   /** The line each entry starts on, so `/timeline` can pin one to the top. */
   const starts: number[] = [];
   for (const [index, entry] of state.entries.entries()) {
@@ -871,10 +905,15 @@ function renderBody(
     // it answered it, everything below is the next thing asked.
     if (previous && !sameRun(previous, entry, view)) {
       const gap = spacing.entry + (previous.kind === "user" || entry.kind === "user" ? spacing.turn : 0);
-      for (let row = 0; row < gap; row++) lines.push({ spans: [], background: theme.bg });
+      for (let row = 0; row < gap; row++) {
+        lines.push({ spans: [], background: theme.bg });
+        owners.push(null);
+      }
     }
     starts.push(lines.length);
-    lines.push(...entryLines(entry, styles, theme, inner, view, state.spinnerFrame));
+    const entryRows = entryLines(entry, styles, theme, inner, view, state.spinnerFrame);
+    lines.push(...entryRows);
+    for (let row = 0; row < entryRows.length; row++) owners.push(index);
   }
 
   const lastEntry = state.entries.at(-1);
@@ -896,6 +935,7 @@ function renderBody(
 
   const dropped = Math.max(drawn.length - MAX_TRANSCRIPT_LINES, 0);
   const capped = dropped > 0 ? drawn.slice(dropped) : drawn;
+  const cappedOwners = dropped > 0 ? owners.slice(dropped) : owners;
   const max = Math.max(capped.length - height, 0);
 
   let offset = Math.min(Math.max(state.scroll, 0), max);
@@ -906,7 +946,8 @@ function renderBody(
   }
 
   const end = capped.length - offset;
-  const visible = capped.slice(Math.max(end - height, 0), end);
+  const firstVisible = Math.max(end - height, 0);
+  const visible = capped.slice(firstVisible, end);
   const blank = height - visible.length;
 
   const hasBar = view.scrollbar !== "off" && max > 0 && visible.length > 0;
@@ -935,6 +976,17 @@ function renderBody(
   }
 
   const hits: Hit[] = [];
+  // Clipped tool results toggle expanded in place on click: every visible row
+  // of one is a target, carrying the entry's own index. Short results stay
+  // plain selectable text with no target at all.
+  for (let cappedIdx = firstVisible; cappedIdx < end; cappedIdx++) {
+    const owner = cappedOwners[cappedIdx];
+    if (owner === null || owner === undefined) continue;
+    const entry = state.entries[owner];
+    if (entry && isResultClipped(entry, view.verbosity)) {
+      hits.push({ kind: "result", row: cappedIdx - firstVisible + blank, index: owner });
+    }
+  }
   const lastLineIdx = height - 1;
   const btnText = " Go to Bottom ↓ ";
   const btnLen = btnText.length;
@@ -1066,7 +1118,7 @@ function entryLines(
     return entry.kind === "tool" ? [ruled([]), ...rows.map(ruled)] : rows.map(ruled);
   }
 
-  return wrappedRows(entrySpans(entry, styles, view, spinnerFrame), width).map((spans) => ({ spans, background: theme.bg }));
+  return wrappedRows(entrySpans(entry, styles, view, spinnerFrame, width), width).map((spans) => ({ spans, background: theme.bg }));
 }
 
 /** The empty-transcript screen: the wordmark, centred, with a hint under it. */
@@ -1092,6 +1144,15 @@ function renderHome(
   ];
   if (state.mcp) block.push([span(`MCP: ${state.mcp}`, styles.faint)]);
   if (state.config) block.push([span(`config: ${state.config}`, styles.faint)]);
+
+  // A short screen cuts from the tail — which is where the MCP and config
+  // lines live, the information amid the decoration. So when the block does
+  // not fit, the blank separators go first and every content row survives.
+  while (block.length > height) {
+    const blank = block.findIndex((row) => row.length === 0);
+    if (blank === -1) break;
+    block.splice(blank, 1);
+  }
 
   const top = Math.max(Math.floor((height - block.length) / 2), 0);
 
@@ -1324,12 +1385,44 @@ function renderMenu(
   usable: number,
   margin: number,
 ): Panel {
-  // A row is `width` cells wide and starts after the indent, so the band stops
-  // a margin short of both edges. The values are right-aligned to `width`,
-  // which is what makes a column of them line up down the screen.
-  const indent = " ".repeat(margin + 2);
-  const width = Math.max(usable - 2 * margin - 2, 20);
+  // A centered modal card, not a bottom band: the card hugs what is in it the
+  // way the picker cards do, and the faded transcript shows around it — the
+  // backdrop is what says "modal". A fixed width would leave a sea of air
+  // around five short rows, and the air is what made the card read as shifted
+  // rather than centered. A row is `inner` cells wide starting after the
+  // indent; the values are right-aligned to `inner`, which is what makes a
+  // column of them line up down the card.
+  const avail = Math.max(usable - 2 * margin - 2, 20);
+  // Widest content wins: the title with its close chip, the search field, the
+  // longest label-plus-value row, the widest description the panel can show,
+  // the footer — plus two cells
+  // of air inside each edge, the way the reference card breathes. `menuRow`
+  // keeps one cell back (label, gap, value), so a row needs its parts plus
+  // three, and the air needs four more.
+  // Sized by the widest description rather than the current one: the sentence
+  // changes with every row the cursor lands on, so the current one would
+  // resize the card on every hover. Every sentence fits, and the card never
+  // moves. The row itself is still drawn truncated to whatever width wins.
+  const need =
+    Math.max(
+      textWidth(menu.title) + 1 + textWidth(CLOSE_CHIP),
+      textWidth(menu.query ? ` ${menu.query}▌` : "▌Search") + 1,
+      ...menu.rows.map((row) => 2 + textWidth(row.label) + 1 + textWidth(row.trailing ?? "")),
+      menu.descriptionWidth ?? 0,
+      textWidth(menu.footer),
+      PANEL_MIN,
+    ) + 4;
+  const inner = Math.min(Math.max(need, PANEL_MIN), avail, MENU_CARD_MAX);
+  // Page, not card: the centering offset is painted with the page background,
+  // or it wears the card fill all the way to the screen's left edge — the
+  // smear that read as a second panel beside the card.
+  const indent = span(" ".repeat(margin + 2 + Math.max(Math.floor((avail - inner) / 2), 0)), bg(theme.bg));
+  // The text column inside the air: every row is built to this and wrapped
+  // with it, so the card is one solid rectangle with the text inset.
+  const width = Math.max(inner - 4, 8);
   const selected = clamp(menu.selected, 0, Math.max(menu.rows.length - 1, 0));
+  /** One card row: indent, air, content padded to the column, air. */
+  const cardRow = (spans: Span[]): Span[] => [indent, span("  "), ...padSpans(spans, width), span("  ")];
 
   // The rows that scroll. A heading is printed when the group changes, so a
   // filtered list keeps the headings that still have rows under them.
@@ -1347,7 +1440,7 @@ function renderMenu(
         listIndex.push(null);
       }
       headingRow = list.length;
-      list.push([span(row.group, styles.heading)]);
+      list.push(cardRow([span(row.group, styles.heading)]));
       listIndex.push(null);
       group = row.group;
     }
@@ -1355,51 +1448,55 @@ function renderMenu(
       cursorRow = list.length;
       cursorHeading = headingRow;
     }
-    list.push(menuRow(row, index === selected, width, styles));
+    list.push(cardRow(menuRow(row, index === selected, width, styles)));
     listIndex.push(index);
   }
 
-  // The chrome around the list: a blank row at each edge of the band, the
-  // title, the search field, and the footer. The description is the first thing
-  // dropped on a short terminal, because it explains a row rather than being
-  // one.
+  // The chrome around the list: air, the title, the search field, more air, the
+  // list, air again, and the footer on its own air. The description is the
+  // first thing dropped on a short terminal, because it explains a row rather
+  // than being one.
   const showDescription = menu.description !== undefined && height >= 12;
-  const chrome = 5 + (showDescription ? 1 : 0) + (list.length === 0 ? 1 : 0);
+  const chrome = 6 + (showDescription ? 1 : 0) + (list.length === 0 ? 1 : 0);
   const room = Math.max(height - 2 - chrome, 1);
   const first = firstRowFor(list.length, cursorRow, cursorHeading, Math.min(room, list.length));
   const visible = list.slice(first, first + room);
 
-  // A blank row of the band's own fill, not an empty one: the surface is a solid
+  // A blank row of the card's own fill, not an empty one: the surface is a solid
   // rectangle, and a gap that let the page through would break it into two.
-  const blank = (): Span[] => [span(indent), span(" ".repeat(width))];
+  const blank = (): Span[] => [indent, span(" ".repeat(inner))];
   const band: Span[][] = [];
   band.push(blank());
-  band.push([span(indent), ...menuTitleRow(menu.title, width, styles)]);
-  band.push([span(indent), ...searchRow(menu.query, width, styles)]);
+  band.push(cardRow(menuTitleRow(menu.title, width, styles)));
+  band.push(cardRow(searchRow(menu.query, width, styles)));
   band.push(blank());
-  if (list.length === 0) band.push([span(indent), span("nothing matches", styles.faint), span(` ${menu.query}`, styles.dim)]);
+  if (list.length === 0)
+    band.push(cardRow([span("nothing matches", styles.faint), span(` ${menu.query}`, styles.dim)]));
   const bandTop = band.length;
   const hits: Hit[] = [];
   for (const [offset, row] of visible.entries()) {
-    band.push(row.length === 0 ? blank() : [span(indent), ...row]);
+    // A group gap is already a blank row; every other list row arrived wrapped.
+    band.push(row.length === 0 ? blank() : row);
     const index = listIndex[first + offset];
     if (index !== null && index !== undefined) hits.push({ kind: "menu", row: bandTop + offset + 1, index });
   }
   band.push(blank());
-  if (showDescription)  band.push([span(indent), ...truncateSpans([span(menu.description ?? "", styles.faint)], width)]);
-  band.push([span(indent), ...hintLine(menu.footer, styles)]);
+  if (showDescription)
+    band.push(cardRow(truncateSpans([span(menu.description ?? "", styles.faint)], width)));
+  band.push(cardRow(hintLine(menu.footer, styles)));
+  band.push(blank());
 
-  // The band sits low on the page, just above the rule, for the same reason the
-  // picker does: a menu is answered from the keyboard while the eye is down by
-  // the prompt. `band` is drawn one row down, inside the blank row that gives
-  // the surface its top edge — so every hit moves with it, and with the padding
-  // that pushes the whole band down.
-  const padTop = Math.max(height - (band.length + 2), 0);
+  // The card floats in the middle of the page rather than docking at its
+  // foot: a modal is answered by looking at it, not by glancing down at the
+  // prompt. `band` is drawn after the blank rows that center it — so every hit
+  // moves with it, and with the padding around it.
+  const padTop = Math.max(Math.floor((height - (band.length + 2)) / 2), 0);
   for (const hit of hits) hit.row += padTop;
-  // The two ways out of the band: the chip in its title row and the one in its
-  // footer, in the rows those land on once the band is pushed down.
+  // The two ways out of the card: the chip in its title row and the one in its
+  // footer, in the rows those land on once the card is pushed down. The footer
+  // is second to last — a blank row of air sits under it.
   hits.push(...closeChipHits(padTop + 2, band[1] ?? [], 0));
-  hits.push(...closeChipHits(padTop + band.length, band.at(-1) ?? [], 0));
+  hits.push(...closeChipHits(padTop + band.length - 1, band.at(-2) ?? [], 0));
   const out: BodyLine[] = [];
   for (let i = 0; i < padTop; i++) out.push({ spans: [], background: theme.bg });
   out.push({ spans: [], background: theme.bg });
@@ -1409,9 +1506,11 @@ function renderMenu(
   return { lines: out.slice(0, height), hits };
 }
 
-/** `Title` left, the close chip right, inside the band. */
+/** `Title` left, the close chip right, inside the card. */
 function menuTitleRow(title: string, inner: number, styles: Styles): Span[] {
-  const head = truncateSpans([span(title, styles.bold)], Math.max(inner - 6, 4));
+  // The head may take everything but the gap and the chip: the card hugs its
+  // content, so a title that arrived truncated would shrink the card it names.
+  const head = truncateSpans([span(title, styles.bold)], Math.max(inner - 4, 4));
   return [...head, span(" ".repeat(Math.max(inner - spansWidth(head) - 3, 1))), span(CLOSE_CHIP, styles.hintKey)];
 }
 
@@ -1437,6 +1536,8 @@ function menuRow(row: MenuRow, isSelected: boolean, inner: number, styles: Style
 
 /** How wide a card may get, and how narrow it may be before a flat list wins. */
 const PANEL_MAX = 76;
+/** How wide a menu card may get before it stops following the terminal wider. */
+const MENU_CARD_MAX = 76;
 const PANEL_MIN = 24;
 /** The air inside a card's own edge, on both sides of every row. */
 const CARD_PAD = "  ";
@@ -1947,70 +2048,56 @@ function renderBottom(
     }
   }
 
-  // Right-click / attachment clipboard menu opened directly in the chat input area
+  // Clipboard & attachment menu: one filled surface like the pickers, not a
+  // wireframe box. Border glyphs were a second card language (ADR-022 made
+  // pickers/menus fill-only); the menu now uses the same material: panel
+  // fill, heading hue for group names, filled selected row, hint footer.
   if (state.clipboardMenu) {
     const cm = state.clipboardMenu;
     const boxWidth = Math.min(width, 76);
-    const inside = Math.max(boxWidth - 2, 20);
-    const borderStyle = styles.faint;
-    const leftPad = span(indent);
+    const inner = Math.max(boxWidth - CARD_PAD.length * 2, 20);
 
-    const row = (spans: Span[]): void => {
-      const truncated = truncateSpans(spans, inside);
-      const gap = Math.max(inside - spansWidth(truncated), 0);
-      push([leftPad, span("│", borderStyle), ...truncated, span(" ".repeat(gap)), span("│", borderStyle)], theme.bg);
+    const rowPanel = (content: readonly Span[]): void => {
+      push([span(indent), span(CARD_PAD), ...padSpans(content, inner), span(CARD_PAD)], theme.panel);
+    };
+    const blankPanel = (): void => {
+      rowPanel([]);
     };
 
     const divider = (title?: string): void => {
-      if (title) {
-        const titleText = `─ ${title} `;
-        const filler = Math.max(inside - textWidth(titleText), 0);
-        push([leftPad, span("├", borderStyle), span(titleText, borderStyle), span("─".repeat(filler), borderStyle), span("┤", borderStyle)], theme.bg);
-      } else {
-        push([leftPad, span("├", borderStyle), span("─".repeat(inside), borderStyle), span("┤", borderStyle)], theme.bg);
-      }
+      if (title) rowPanel([span(title, styles.heading)]);
+      else blankPanel();
     };
 
-    const titlePrefix = " Clipboard & Recent History (Last 5) ";
-    const closeSuffix = ` ${CLOSE_CHIP} `;
-    const fillerTop = Math.max(inside - textWidth(titlePrefix) - textWidth(closeSuffix), 0);
-    const titleRow = rows.length;
-    push([
-      leftPad,
-      span("┌─", borderStyle),
-      span("Clipboard & Recent History (Last 5) ", styles.bold),
-      span("─".repeat(fillerTop), borderStyle),
-      span(` ${CLOSE_CHIP}`, styles.hintKey),
-      span(" ┐", borderStyle),
-    ], theme.bg);
-    hits.push(...closeChipHits(titleRow, rows[titleRow]?.spans ?? [], 0));
+    blankPanel();
+    const cmTitleRow = rows.length;
+    rowPanel(panelTitle("Clipboard & Recent History (Last 5)", CLOSE_CHIP, inner, styles));
+    hits.push(...closeChipHits(cmTitleRow, rows[cmTitleRow]?.spans ?? [], 0));
 
-    // Preview area: Real image grid (true-color half-blocks or ANSI grid) or line-numbered text
+    // Preview area: image grid (true-color half-blocks) or line-numbered text.
     if (cm.preview) {
       if (cm.preview.kind === "image" && cm.preview.image) {
         const img = cm.preview.image;
         const dims = img.width && img.height ? `${img.width}×${img.height} px · ` : "";
         const sizeKb = Math.max(Math.round(img.bytes / 1024), 1);
-        const imgHeader = `Image Preview: ${img.mime} · ${dims}${sizeKb} KB`;
-        row([span(" "), span(imgHeader, styles.accentBold)]);
+        rowPanel([span(`Image Preview: ${img.mime} · ${dims}${sizeKb} KB`, styles.heading)]);
         if (img.pixelRows && img.pixelRows.length > 0) {
           for (const pixelRow of img.pixelRows) {
-            row([span("   "), ...pixelRow]);
+            rowPanel([span("  "), ...truncateSpans(pixelRow, Math.max(inner - 2, 8))]);
           }
         } else if (img.grid && img.grid.length > 0) {
           for (const gridLine of img.grid) {
-            row([span("   "), span(gridLine)]);
+            rowPanel([span("  "), span(gridLine, styles.dim)]);
           }
         }
       } else if (cm.preview.kind === "text" && cm.preview.lines) {
-        const info = `Text Preview (${cm.preview.totalLines ?? cm.preview.lines.length} lines · ${cm.preview.totalChars ?? cm.preview.text?.length ?? 0} chars):`;
-        row([span(" "), span(info, styles.accentBold)]);
+        const info = `Text Preview (${cm.preview.totalLines ?? cm.preview.lines.length} lines · ${cm.preview.totalChars ?? cm.preview.text?.length ?? 0} chars)`;
+        rowPanel([span(info, styles.heading)]);
         for (const line of cm.preview.lines) {
-          row([span("   "), span(line, styles.dim)]);
+          rowPanel([span("  "), span(line, styles.dim)]);
         }
       } else {
-        const emptyMsg = "Clipboard is currently empty (no recent copies)";
-        row([span(" "), span(emptyMsg, styles.faint)]);
+        rowPanel([span("Clipboard is currently empty (no recent copies)", styles.faint)]);
       }
       divider("Choose from History or Actions");
     }
@@ -2026,30 +2113,25 @@ function renderBottom(
       hits.push({ kind: "clipboard_menu", row: rowIdx, index: offset });
       const hasLeadingNumber = /^\d+\.\s/.test(item.label);
       const numPrefix = hasLeadingNumber ? "" : `${offset + 1}. `;
+      const body = isSelected ? styles.paletteSelected : styles.text;
       const marker = isSelected ? "❯ " : "  ";
-
-      const itemSpans: Span[] = [
-        span(" "),
-        span(marker, isSelected ? styles.accent : styles.faint),
-        ...(numPrefix ? [span(numPrefix, isSelected ? styles.accentBold : styles.dim)] : []),
-        span(item.label, isSelected ? styles.accentBold : styles.text),
-        ...(item.description ? [span(`  ${item.description}`, isSelected ? styles.accent : styles.dim)] : []),
+      const markerStyle = isSelected ? styles.paletteSelected : styles.faint;
+      const numStyle = isSelected ? styles.paletteSelected : styles.dim;
+      const descStyle = isSelected ? styles.paletteSelected : styles.dim;
+      const label: Span[] = [
+        span(marker, markerStyle),
+        ...(numPrefix ? [span(numPrefix, numStyle)] : []),
+        span(item.label, body),
+        ...(item.description ? [span(`  ${item.description}`, descStyle)] : []),
       ];
-      row(itemSpans);
+      rowPanel(padSpans(truncateSpans(label, inner), inner));
     }
 
-    const footerText = ` ${CLOSE_CHIP} close · ↑↓ select · 1-5 choose · enter paste `;
-    const fillerBottom = Math.max(inside - textWidth(footerText), 0);
-    const footerRow = rows.length;
-    push([
-      leftPad,
-      span("└─", borderStyle),
-      span(CLOSE_CHIP, styles.hintKey),
-      span(" close · ↑↓ select · 1-5 choose · enter paste", styles.hint),
-      span(` ${"─".repeat(fillerBottom)}`, borderStyle),
-      span("┘", borderStyle),
-    ], theme.bg);
-    hits.push(...closeChipHits(footerRow, rows[footerRow]?.spans ?? [], 0));
+    blankPanel();
+    const cmFooterRow = rows.length;
+    rowPanel(hintRow([[CLOSE_CHIP, "close"], ["↑↓", "select"], ["1-5", "choose"], ["enter", "paste"]], inner, styles));
+    hits.push(...closeChipHits(cmFooterRow, rows[cmFooterRow]?.spans ?? [], 0));
+    blankPanel();
   }
 
   // A permission prompt is not drawn here: it floats centered over the
@@ -2165,14 +2247,14 @@ function renderBottom(
       badgeWidth += text.length + 1;
     }
 
-    // Right controls: `UPLOAD[+]` — plain text, no emoji, and it is spelled out
+    // Right controls: `UPLOAD [+]` — plain text, no emoji, and it is spelled out
     // so the glyph is not a riddle. The button opens the platform's
     // file-selection window, so attaching is a click and not a slash command to
     // remember. Send has no button of its own: a filled arrow was the loudest
     // thing on a quiet screen for the one action the keyboard already has
     // (enter). The variant is changed with `/effort`, which needs no button
     // either.
-    const uploadText = "UPLOAD[+]";
+    const uploadText = "UPLOAD [+]";
     const uploadLen = textWidth(uploadText);
     // The trailing space is part of the control, so the gap arithmetic matches
     // exactly what is drawn and the row never overflows. Queuing is a keyboard
@@ -2207,7 +2289,7 @@ function renderBottom(
       span(modeWordText, mode.style),
       span("]", styles.pillBorder),
     ];
-    const rightControls: Span[] = [span("UPLOAD", styles.hintKey), span("[+]", styles.plusButton), span(" ")];
+    const rightControls: Span[] = [span("UPLOAD ", styles.hintKey), span("[+]", styles.plusButton), span(" ")];
 
     // The box is fill and nothing else: no bar down its left edge, no border,
     // and two rows of its own fill above the text and two below. The fill is
@@ -2248,7 +2330,10 @@ function renderBottom(
       );
     });
     caretRow = firstTextRow + view.caretRow;
-    caretCol = badgeWidth + view.caretCol;
+    // Past the badges: `textLeft` already points at the first text cell, so
+    // the badge width must not be added again — it was, and the caret sat one
+    // badge-width right of the character it belonged to.
+    caretCol = view.caretCol;
     // Two rows of air under the text: what is being typed and where it will go
     // are two different answers, and stacked flush they read as one run of
     // text. The box carries its mass below the text so the words are not pinned
@@ -2261,6 +2346,7 @@ function renderBottom(
       // One-based, which is what a mouse reports: the gutter and its two cells,
       // the pill and its gap, then whatever the badges take.
       textLeft: margin + 4 + pillWidth + badgeWidth,
+      badgeWidth,
       rows: view.rows.map((row, index) => ({ row: firstTextRow + index, start: row.start, end: row.end })),
       // Both controls, in the columns they were drawn in — the boxes the app
       // presses, so neither it nor a future change has to redo this arithmetic.
@@ -2326,9 +2412,29 @@ function renderBottom(
     push(stateSpans, stateRowBg);
   }
   // The footer's own chips close whatever is open, so escape is a mouse action
-  // here too. Its columns are read off the packed row, which is the only place
-  // that knows where they landed.
-  const footer = footerSpans(state, styles, usable);
+  // here too. The gutter matches the prompt box and the state row above, so
+  // the three bottom rows share one left edge; its columns are read off the
+  // packed row, which is the only place that knows where they landed.
+  const footer = footerSpans(state, styles, usable, `${indent}  `);
+  // The settings glyph trails the row past the usage numbers, so its columns
+  // are read off the packed row — the only place that knows where it landed —
+  // 1-based the way a mouse reports. Only while no card owns the screen.
+  if (boxShown) {
+    let column = 0;
+    for (const item of footer) {
+      if (item.text === SETTINGS_GEAR) {
+        hits.push({
+          kind: "settings_button",
+          row: rows.length,
+          index: 0,
+          colStart: column + 1,
+          colEnd: column + textWidth(item.text),
+        });
+        break;
+      }
+      column += textWidth(item.text);
+    }
+  }
   hits.push(...closeChipHits(rows.length, footer, 0));
   push(footer, theme.bg);
 
@@ -2541,7 +2647,7 @@ function renderPlanPanel(
  * The path is shortened last, so the numbers and the hint survive a narrow
  * terminal — a path is recognisable from its tail, a percentage is not.
  */
-function footerSpans(state: TuiState, styles: Styles, usable: number): Span[] {
+function footerSpans(state: TuiState, styles: Styles, usable: number, gutter: string): Span[] {
   // Packed right to left, dropping whole pieces rather than truncating one.
   // A session that has used nothing shows nothing rather than a bare zero.
   const spent = state.usage.tokens > 0 || state.usage.tools > 0;
@@ -2555,11 +2661,23 @@ function footerSpans(state: TuiState, styles: Styles, usable: number): Span[] {
     if (spansWidth(candidate) + 12 <= usable) packed = candidate;
   }
 
-  const room = Math.max(usable - spansWidth(packed) - 5, 4);
-  const left: Span[] = [span(shortenPath(state.cwd, room), styles.hint), span("  ·", styles.faint)];
+  // The settings glyph trails the footer, past the usage numbers: the mouse way
+  // to reach what `/settings` does by name, without remembering a slash
+  // command. A bare glyph, no brackets — and bold accent so it reads as a
+  // button, not text. Not while a card is up: the panel it opens is hidden
+  // then, and a button that visibly does nothing is worse than one that is
+  // not there.
+  const boxShown = !state.modal && !state.picker && !state.menu && !(state.ask && !state.askTyping);
+  const tail: Span[] = boxShown ? [span("   "), span(SETTINGS_GEAR, styles.accentBold)] : [];
+  // The path starts under the rows above it, in the same gutter the prompt box
+  // and the state row keep — a status bar flush to the terminal's left edge
+  // reads as a second, unrelated column next to them.
+  const gutterWidth = textWidth(gutter);
+  const room = Math.max(usable - spansWidth(packed) - spansWidth(tail) - gutterWidth - 4, 4);
+  const left: Span[] = [span(gutter), span(shortenPath(state.cwd, room), styles.hint), span(" ·", styles.faint)];
 
-  const gap = Math.max(usable - spansWidth(left) - spansWidth(packed) - 1, 1);
-  return [...left, span(" ".repeat(gap)), ...packed];
+  const gap = Math.max(usable - spansWidth(left) - spansWidth(packed) - spansWidth(tail) - 1, 1);
+  return [...left, span(" ".repeat(gap)), ...packed, ...tail];
 }
 
 /** Context used, and how much of the window that is. */

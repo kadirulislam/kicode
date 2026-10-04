@@ -2,7 +2,7 @@ import type { FallbackRoute } from "../config";
 import type { RouteOutcome } from "../routes/health";
 import { preferredSnapshot, type QuotaReading, type QuotaSnapshot } from "../routes/quota";
 import type { ChatRequest, Provider, StreamEvent } from "../types";
-import { OpenAIProvider, ProviderError } from "./openai";
+import { MissingKeyError, OpenAIProvider, ProviderError } from "./openai";
 
 /**
  * A chain of routes, tried in order until one answers.
@@ -42,6 +42,9 @@ const RETRY_AFTER_CEILING_MS = 60_000;
 /** Whether a failure is worth another route. */
 export function isRetryable(error: unknown): boolean {
   if (!(error instanceof ProviderError)) return false;
+  // A missing key walks the chain: a keyed backup further down still answers,
+  // and only a chain with no key anywhere reports it.
+  if (error instanceof MissingKeyError) return true;
   // No status at all is a connection or DNS failure — the next route may reach.
   if (error.status === undefined) return true;
   return RETRYABLE_STATUS.has(error.status);
@@ -49,6 +52,7 @@ export function isRetryable(error: unknown): boolean {
 
 /** A short, human reason for the route change. */
 export function fallbackReason(error: unknown): string {
+  if (error instanceof MissingKeyError) return "no API key";
   const status = error instanceof ProviderError ? error.status : undefined;
   if (status === 429) return "rate-limited (HTTP 429)";
   if (status === 402) return "out of credit (HTTP 402)";
@@ -112,6 +116,7 @@ export class FallbackProvider implements Provider {
         new OpenAIProvider({
           apiKey: route.apiKey,
           baseUrl: route.baseUrl,
+          ...(route.keyHint ? { missingKeyHint: route.keyHint } : {}),
           ...(options.sessionId ? { sessionId: options.sessionId } : {}),
           ...(options.userAgent ? { userAgent: options.userAgent } : {}),
         }));

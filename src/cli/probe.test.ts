@@ -61,7 +61,7 @@ describe("probeEndpoint", () => {
     expect(result.verdict).toContain("could not reach the model list");
   });
 
-  it("names opencode's client restriction from the gateway's own error", async () => {
+  it("names both suspects from the gateway's own error", async () => {
     const result = await probeEndpoint({
       apiKey: "sk-opencode-real",
       baseUrl: "https://opencode.ai/zen/v1",
@@ -71,8 +71,8 @@ describe("probeEndpoint", () => {
     });
 
     expect(result.steps[1]?.ok).toBe(false);
-    expect(result.verdict).toContain("client-restricted");
-    expect(result.verdict).toContain("Go-plan");
+    expect(result.verdict).toContain("client gate");
+    expect(result.verdict).toContain("--probe --model");
   });
 
   it("tells a wrong key from a restricted client", async () => {

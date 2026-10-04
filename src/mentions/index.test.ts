@@ -9,7 +9,9 @@ import {
   defaultBrainDir,
   ensureBrainDir,
   expandMentions,
+  indexSkillsFromRoots,
   resolveBrainDirSync,
+  skillRoots,
   type MentionIndex,
 } from "./index";
 
@@ -18,7 +20,7 @@ const index: MentionIndex = {
   brain: null,
   files: ["src/app.ts", "src/tui/frame.ts", "README.md"],
   dirs: ["src", "src/tui"],
-  skills: [{ name: "seo-audit", description: "Audit a site for SEO.", file: "/brain/skills/seo/SKILL.md" }],
+  skills: [{ name: "seo-audit", description: "Audit a site for SEO.", file: "/brain/skills/seo/SKILL.md", source: "learned" }],
   projects: [{ slug: "kicode", file: "/brain/memories/projects/kicode.md" }],
 };
 
@@ -97,13 +99,13 @@ describe("buildMentionIndex", () => {
       await mkdir(path.join(root, "ki-agent-brain", "memories", "projects"), { recursive: true });
       await writeFile(path.join(root, "ki-agent-brain", "memories", "projects", "demo.md"), "# demo\n");
 
-      const built = await buildMentionIndex(path.join(root, "proj"), { KICODE_HOME: path.join(root, "home") });
+      const built = await buildMentionIndex(path.join(root, "proj"), { KICODE_HOME: path.join(root, "home") }, path.join(root, "home"));
 
       expect(built.files).toContain("src/a.ts");
       expect(built.dirs).toContain("src");
       expect(built.brain).toBe(path.join(root, "ki-agent-brain"));
       expect(built.skills).toEqual([
-        { name: "demo-skill", description: "Does a demo.", file: expect.stringContaining("SKILL.md") },
+        { name: "demo-skill", description: "Does a demo.", file: expect.stringContaining("SKILL.md"), source: "learned" },
       ]);
       expect(built.projects.map((p) => p.slug)).toEqual(["demo"]);
     } finally {
@@ -115,7 +117,7 @@ describe("buildMentionIndex", () => {
     const root = await mkdtemp(path.join(tmpdir(), "kicode-mentions-"));
     try {
       await writeFile(path.join(root, "a.txt"), "hi\n");
-      const built = await buildMentionIndex(root, { KICODE_HOME: path.join(root, "home") });
+      const built = await buildMentionIndex(root, { KICODE_HOME: path.join(root, "home") }, path.join(root, "home"));
 
       expect(built.brain).toBeNull();
       expect(built.files).toContain("a.txt");
@@ -135,6 +137,88 @@ describe("buildMentionIndex", () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe("skill roots", () => {
+  const skillFile = (dir: string, name: string, description: string): Promise<void> =>
+    mkdir(path.join(dir, name), { recursive: true }).then(() =>
+      writeFile(path.join(dir, name, "SKILL.md"), `---\nname: ${name}\ndescription: "${description}"\n---\n\nbody\n`),
+    );
+
+  it("orders brain first, then project, then user", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "kicode-roots-"));
+    try {
+      const cwd = path.join(root, "proj");
+      await mkdir(cwd, { recursive: true });
+      const home = path.join(root, "home");
+      await mkdir(path.join(root, "brain"), { recursive: true });
+      const env = { KI_BRAIN_PATH: path.join(root, "brain") };
+
+      expect(skillRoots(cwd, env, home)).toEqual([
+        { dir: path.join(root, "brain", "skills"), source: "learned" },
+        { dir: path.join(cwd, ".agents", "skills"), source: "installed" },
+        { dir: path.join(home, ".agents", "skills"), source: "installed" },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the brain root when there is no brain, keeping the convention", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "kicode-roots-"));
+    try {
+      const cwd = path.join(root, "proj");
+      await mkdir(cwd, { recursive: true });
+
+      expect(skillRoots(cwd, { KICODE_HOME: path.join(root, "home") }, path.join(root, "home"))).toEqual([
+        { dir: path.join(cwd, ".agents", "skills"), source: "installed" },
+        { dir: path.join(root, "home", ".agents", "skills"), source: "installed" },
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("merges roots with provenance, first root winning a name", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "kicode-roots-"));
+    try {
+      const brainSkills = path.join(root, "brain", "skills");
+      const projectSkills = path.join(root, "proj", ".agents", "skills");
+      await skillFile(brainSkills, "shared", "Ours.");
+      await skillFile(brainSkills, "learned-only", "From sessions.");
+      await skillFile(projectSkills, "shared", "Generic.");
+      await skillFile(projectSkills, "installed-only", "From the registry.");
+
+      const skills = await indexSkillsFromRoots([
+        { dir: brainSkills, source: "learned" },
+        { dir: projectSkills, source: "installed" },
+      ]);
+
+      expect(skills.map((skill) => `${skill.name}:${skill.source}`)).toEqual([
+        "installed-only:installed",
+        "learned-only:learned",
+        "shared:learned",
+      ]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("marks installed skills in completions", () => {
+    const completions = completeMention(
+      {
+        cwd: "/work",
+        brain: null,
+        files: [],
+        dirs: [],
+        skills: [{ name: "code-review", description: "Review a diff.", file: "/x/SKILL.md", source: "installed" }],
+        projects: [],
+      },
+      "code",
+    );
+
+    expect(completions.map((item) => item.description)).toContain("Review a diff. (installed)");
   });
 });
 

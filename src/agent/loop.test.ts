@@ -182,6 +182,45 @@ describe("Agent.send", () => {
     expect(provider.requests).toHaveLength(2);
   });
 
+  it("reports the turn's cost on done, for the machine-wide log", async () => {
+    const call: ToolCall = { id: "c1", type: "function", function: { name: "read", arguments: '{"path":"a"}' } };
+    const provider = new FakeProvider([
+      [
+        { type: "tool-call", call },
+        {
+          type: "finish",
+          message: { role: "assistant", content: null, tool_calls: [call] },
+          finishReason: "tool_calls",
+          usage: { promptTokens: 100, completionTokens: 50, totalTokens: 150 },
+        },
+      ],
+      [
+        { type: "text", delta: "done" },
+        {
+          type: "finish",
+          message: { role: "assistant", content: "done" },
+          finishReason: "stop",
+          usage: { promptTokens: 200, completionTokens: 25, totalTokens: 225 },
+        },
+      ],
+    ]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });
+
+    const events = await collect(agent, "read a");
+    const done = events.at(-1);
+
+    // Across both requests: the ledger is the turn's, not one request's.
+    expect(done).toMatchObject({
+      type: "done",
+      reason: "complete",
+      model: "m",
+      promptTokens: 300,
+      completionTokens: 75,
+      toolCalls: 1,
+    });
+    expect(typeof (done as { ms?: unknown }).ms).toBe("number");
+  });
+
   it("appends the tool result as a tool message before the next turn", async () => {
     const provider = new FakeProvider([toolCallTurn("call_1", "read", '{"path":"a.txt"}'), answerTurn("ok")]);
     const agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });

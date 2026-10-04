@@ -77,6 +77,8 @@ type Harness = {
   cancels: number;
   /** Every token ceiling `/budget` set, in order. */
   budgets: number[];
+  /** Whether a `/compact` that never answers was stopped with Ctrl+C. */
+  compactAborted: boolean;
   /** What `/settings` asked to have written down. */
   viewSaves: Partial<ViewSettings>[];
   /** The services `/connect` was told to add. */
@@ -99,6 +101,10 @@ function harness(
     failWith?: Error;
     plan?: PlanSnapshot;
     learn?: LearnResult;
+    /** Yield the answer as separate text events with a pause between, like a real stream. */
+    streamChunks?: string[];
+    /** Make `/compact` hang until its signal aborts, like a summariser gone quiet. */
+    compactHang?: boolean;
   } = {},
 ): Harness {
   const { slow = 0, approve = false, questions, failWith } = flags;
@@ -120,6 +126,7 @@ function harness(
   const settings: AgentSettings[] = [];
   const sideQuestions: string[] = [];
   let compactions = 0;
+  let compactAborted = false;
   const sentImages: PastedImage[][] = [];
   const sentPrompts: string[] = [];
   const steers: string[] = [];
@@ -152,6 +159,13 @@ function harness(
       get turns(): ChatMessage[] {
         return messages;
       },
+      get history(): ChatMessage[] {
+        return messages;
+      },
+      get toolCount(): number {
+        // The fake offers a fixed set: `/context` costs it out by number.
+        return 9;
+      },
       get contextTokens(): number {
         return 1000;
       },
@@ -168,8 +182,21 @@ function harness(
       rewind(turns: readonly ChatMessage[]): void {
         messages.splice(0, messages.length, ...turns);
       },
-      async compactNow(): Promise<{ before: number; after: number; summarized: number } | null> {
+      async compactNow(signal?: AbortSignal): Promise<{ before: number; after: number; summarized: number } | null> {
         compactions += 1;
+        // A summariser gone quiet: nothing resolves until the signal aborts,
+        // the way the real provider stream ends on Ctrl+C.
+        if (flags.compactHang) {
+          await new Promise<void>((_, reject) => {
+            const onAbort = (): void => {
+              compactAborted = true;
+              reject(new Error("aborted"));
+            };
+            if (signal?.aborted) onAbort();
+            else signal?.addEventListener("abort", onAbort, { once: true });
+          });
+          throw new Error("aborted");
+        }
         return { before: 1000, after: 400, summarized: 3 };
       },
       async *sideQuestion(text: string): AsyncGenerator<string, void, void> {
@@ -210,8 +237,24 @@ function harness(
         // A turn stopped while a prompt was up sees it here, the way a real
         // request sees its signal aborted.
         abortIfStopped();
-        yield { type: "text", delta: `echo: ${prompt}` };
-        messages.push({ role: "assistant", content: `echo: ${prompt}` });
+        // A streamed answer arrives in pieces, with time passing between them —
+        // the shape a live speed estimate needs, which one instant delta is not.
+        // The dwell after the last chunk matters: the spinner paints on its own
+        // 90ms tick, so without it the turn is done before any frame carries
+        // the rate the last chunk set.
+        if (flags.streamChunks) {
+          for (const chunk of flags.streamChunks) {
+            await tick(400);
+            abortIfStopped();
+            yield { type: "text", delta: chunk };
+            messages.push({ role: "assistant", content: chunk });
+          }
+          await tick(400);
+          abortIfStopped();
+        } else {
+          yield { type: "text", delta: `echo: ${prompt}` };
+          messages.push({ role: "assistant", content: `echo: ${prompt}` });
+        }
         // A turn that ran a plan tool hands its state over as data too.
         if (flags.plan) yield { type: "plan", snapshot: flags.plan };
         yield { type: "done", reason: "complete" };
@@ -302,6 +345,9 @@ function harness(
     get compactions() {
       return compactions;
     },
+    get compactAborted() {
+      return compactAborted;
+    },
   };
 }
 
@@ -325,15 +371,42 @@ describe("runTui", () => {
     ]);
   });
 
-  it("shows the caller's notice on the screen it opens, so a first run knows what to do", async () => {
+  it("holds the caller's notice for the first chat, so a first run opens on home", async () => {
     // The case this exists for: no key, so `run.ts` opens the UI instead of
-    // exiting — the UI is where `/connect` and `/key` are.
+    // exiting — the UI is where `/connect` and `/key` are. The warning must
+    // not claim the transcript of a fresh session: with any entry at all the
+    // home screen gives way to a page carrying only the warning.
     const app = harness({ notice: "No API key found. Add one with /connect, or /key to paste it for this session." });
     const done = runTui(app.options);
     await tick();
 
+    expect(app.screen()).toContain("Where should we begin?");
+    expect(app.screen()).not.toContain("No API key found");
+
+    app.input.write("hello\r");
+    await tick(20);
+    app.input.write("/exit\r");
+    expect(await done).toBe(0);
+
     expect(app.screen()).toContain("No API key found");
     expect(app.screen()).toContain("/connect");
+    expect(app.screen()).toContain("echo: hello");
+  });
+
+  it("shows the caller's notice at once on a resumed session", async () => {
+    const app = harness({
+      notice: "No API key found. Add one with /connect, or /key to paste it for this session.",
+      initial: {
+        id: "session-1",
+        createdAt: "2026-09-30T00:00:00.000Z",
+        messages: [{ role: "user", content: "earlier" }],
+      },
+    });
+    const done = runTui(app.options);
+    await tick();
+
+    // A transcript is already on screen, so there is no home to protect.
+    expect(app.screen()).toContain("No API key found");
 
     app.input.write("/exit\r");
     expect(await done).toBe(0);
@@ -484,6 +557,59 @@ describe("runTui", () => {
     for (const row of rawLast.split("\r\n")) expect(row).not.toContain("\u001b[7m");
 
     app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("opens the settings panel from the footer \u2699 glyph", async () => {
+    const app = harness({});
+    const done = runTui(app.options);
+    await tick(20);
+
+    // The glyph trails the footer's last row past the usage, so the press
+    // way a mouse would — the mouse way to reach what `/settings` does.
+    const lines = app.lastFrame().split(/\r?\n/);
+    const row = lines.findIndex((line) => line.includes("\u2699"));
+    expect(row).toBeGreaterThanOrEqual(0);
+    const col = (lines[row] ?? "").indexOf("\u2699") + 1;
+    app.input.write(clickAt(row + 1, col));
+    await tick(40);
+
+    expect(app.lastFrame()).toContain("Settings");
+
+    app.input.write("\u001b");
+    await tick(120);
+    expect(app.lastFrame()).not.toContain("‹/› change");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("opens the usage card on alt+u, and ctrl+u still clears a line", async () => {
+    const app = harness({});
+    const done = runTui(app.options);
+    await tick();
+
+    // The keystroke the [USAGE] chip answers to by mouse. Alt owns no
+    // editing job, so unlike a plain `u` (which would eat the first letter
+    // of every word starting with one) or ctrl+u (which clears the line)
+    // it collides with nothing — empty box or not.
+    app.input.write("\u001bu");
+    await tick(30);
+    expect(app.lastFrame()).toContain("Session usage");
+    expect(app.lastFrame()).toContain("System tools");
+
+    app.input.write("\u001b");
+    await tick(120);
+
+    // With words in the box it keeps its old job: clear back to the caret.
+    app.input.write("hello");
+    await tick(20);
+    app.input.write("\u0015");
+    await tick(20);
+    expect(app.lastFrame()).toContain("Ask anything");
+    expect(app.lastFrame()).not.toContain("hello");
+
+    app.input.write("/exit\r");
     await done;
   });
 
@@ -684,6 +810,81 @@ describe("runTui", () => {
 
     expect(app.decisions).toEqual(["always"]);
     expect(app.screen()).toContain("echo: run the tests");
+  });
+
+  it("asks again after a mode switch — an 'always' does not survive it", async () => {
+    // The build notice promises "changes and commands need approval again" on
+    // the way back from plan mode. The agent is rebuilt on a switch (clearing
+    // its own approvals), so the app-level shortcut has to go too — otherwise
+    // the second turn is auto-allowed and no modal ever appears.
+    const app = harness({}, { approve: true });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("run the tests\r");
+    await tick(20);
+    expect(app.screen()).toContain("bash wants to run");
+
+    app.input.write("a");
+    await tick(20);
+    expect(app.decisions).toEqual(["always"]);
+
+    // Build → plan → build, the round trip the notice describes.
+    app.input.write("[Z");
+    await tick(30);
+    app.input.write("[Z");
+    await tick(30);
+    expect(app.lastFrame()).toContain("[BUILD]");
+
+    app.input.write("run the tests again\r");
+    await tick(20);
+    // Still waiting on the user — without the clear above this would already
+    // be ["always", "always"], auto-allowed with no modal ever drawn.
+    expect(app.decisions).toEqual(["always"]);
+    expect(app.screen()).toContain("bash wants to run");
+
+    app.input.write("y");
+    await tick(20);
+    app.input.write("/exit\r");
+    await done;
+
+    expect(app.decisions).toEqual(["always", "allow"]);
+  });
+
+  it("names the live streaming speed on the state row while the answer arrives", async () => {
+    // Two chunks 400ms apart: the first sets the clock, the second is past
+    // the quarter-second floor, so the spinner row carries a rate mid-stream.
+    // `screen()` is cumulative, so the mid-stream frame is still in it.
+    const app = harness(
+      {},
+      { streamChunks: ["hello world, this is chunk one of the answer. ", "and this is chunk two arriving later."] },
+    );
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("go\r");
+    await tick(1500);
+    expect(app.screen()).toContain("tok/s");
+
+    app.input.write("/exit\r");
+    await done;
+  });
+
+  it("keeps the spinner plain while streaming when TPS is off", async () => {
+    const app = harness(
+      { view: { ...defaultViewSettings(), sidebar: "on", tps: "off" } },
+      { streamChunks: ["hello world, this is chunk one of the answer. ", "and this is chunk two arriving later."] },
+    );
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("go\r");
+    await tick(1500);
+    // Neither the live row nor the per-answer line names a speed.
+    expect(app.screen()).not.toContain("tok/s");
+
+    app.input.write("/exit\r");
+    await done;
   });
 
   it("treats escape as a refusal, never a yes", async () => {
@@ -1278,6 +1479,10 @@ describe("the queue and the commands that fill it", () => {
 
     expect(app.lastFrame()).toContain("Session usage");
     expect(app.lastFrame()).toContain("messages");
+    // The chip answers with both halves now: the context breakdown above the
+    // session's own numbers.
+    expect(app.lastFrame()).toContain("System tools");
+    expect(app.lastFrame()).toContain("9 tools");
 
     // The start reads as `DD-MM-YYYY HH:mm` on the local clock. It used to print
     // the stored stamp verbatim — `2026-10-02T05:38:58.828Z` — which is UTC, so
@@ -1796,6 +2001,61 @@ describe("the tab bar", () => {
 
     app.input.write("\u0015/exit\r");
     await done;
+  });
+
+  it("marks the tab in front, so a restart can return to it", async () => {
+    const marked: Array<{ cwd: string; id: string }> = [];
+    const app = harness({
+      saveActiveSession: async (cwd, id) => {
+        marked.push({ cwd, id });
+      },
+    });
+    const done = runTui(app.options);
+    await tick(20);
+
+    app.input.write("hello\r");
+    await tick(30);
+    // A new front tab: the pointer moves at once, not only at exit — a crash
+    // between the switch and the quit would otherwise lose it.
+    app.input.write("/new\r");
+    await tick(30);
+    expect(marked.at(-1)).toEqual({ cwd: "C:\\dev\\projects\\kicode", id: "session-new" });
+
+    app.input.write("second hello\r");
+    await tick(30);
+    app.input.write("/exit\r");
+    expect(await done).toBe(0);
+    // And the quit leaves the pointer on the tab that was in front.
+    expect(marked.at(-1)).toEqual({ cwd: "C:\\dev\\projects\\kicode", id: "session-new" });
+  });
+
+  it("clears the remembered tab when its session is deleted", async () => {
+    const cleared: Array<{ cwd: string; id: string }> = [];
+    const app = harness({
+      // Two sessions: the picker never lists the one on screen, so the row
+      // under the cursor is the other one.
+      listSessions: async () => [
+        { id: "session-1", title: "this one" },
+        { id: "session-2", title: "the other one" },
+      ],
+      clearActiveSession: async (cwd, id) => {
+        cleared.push({ cwd, id });
+      },
+    });
+    const done = runTui(app.options);
+    await tick(20);
+
+    // The picker's own delete key, which is the supported path: typing
+    // `/delete-session <id>` by hand goes through the palette, which drops a
+    // typed argument when it fills the command in.
+    app.input.write("/sessions\r");
+    await tick(30);
+    app.input.write("");
+    await tick(30);
+
+    expect(cleared).toEqual([{ cwd: "C:\\dev\\projects\\kicode", id: "session-2" }]);
+
+    await finish(app, done);
   });
 
   it("keeps a running turn going in the background when a new session is opened", async () => {
@@ -2901,6 +3161,40 @@ describe("the slash commands", () => {
     }
   });
 
+  it("names each skill's provenance in /skills, and refuses to delete an installed one", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "kicode-skills-"));
+    await mkdir(path.join(dir, "ki-agent-brain", "skills", "demo"), { recursive: true });
+    await writeFile(
+      path.join(dir, "ki-agent-brain", "skills", "demo", "SKILL.md"),
+      "---\nname: demo-skill\ndescription: Does a demo.\n---\n\nDemo skill body.\n",
+    );
+    await mkdir(path.join(dir, ".agents", "skills", "review"), { recursive: true });
+    await writeFile(
+      path.join(dir, ".agents", "skills", "review", "SKILL.md"),
+      "---\nname: review-skill\ndescription: Reviews diffs.\n---\n\nReview body.\n",
+    );
+    try {
+      const { app, done } = await drive([], { cwd: dir });
+      await tick(120);
+
+      app.input.write("/skills\r");
+      await tick(60);
+      // Each row names where it came from: learned or installed.
+      expect(app.lastFrame()).toContain("demo-skill");
+      expect(app.lastFrame()).toContain("learned");
+      expect(app.lastFrame()).toContain("review-skill");
+      expect(app.lastFrame()).toContain("installed");
+      await finish(app, done);
+
+      // Installed skills belong to their installer: the retire path refuses.
+      const second = await drive(["/skills delete review-skill"], { cwd: dir });
+      await finish(second.app, second.done);
+      expect(second.app.screen()).toContain("is installed, not learned");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("starts an empty session on /new", async () => {
     const { app, done } = await drive(["hello", "/new", "/status"]);
     await finish(app, done);
@@ -2968,12 +3262,70 @@ describe("the slash commands", () => {
     expect(text).toContain("~1.0K tokens");
     expect(text).toContain("tool calls");
     expect(text).toContain("node ");
-    expect(text).toContain("no MCP servers configured");
     expect(text).toContain("type / for the palette");
     expect(text).toContain("/variants");
     // Asserted on a phrase shorter than the wrap, so a break cannot split it.
     expect(text).toContain("built it from");
     expect(text).toContain("npm run build");
+  });
+
+  it("shows the machine rollup on /usage", async () => {
+    const history = [
+      {
+        at: "2026-09-30T10:00:00.000Z",
+        model: "deepseek-v4-flash:free",
+        host: "api.example.com",
+        promptTokens: 100,
+        completionTokens: 50,
+        toolCalls: 1,
+        ms: 10_000,
+      },
+    ];
+    const { app, done } = await drive(["/usage"], { usage: { record: async () => {}, history: async () => history } });
+    await finish(app, done);
+
+    expect(app.screen()).toContain("all time: 1 turn");
+    expect(app.screen()).toContain("deepseek-v4-flash:free");
+  });
+
+  it("says so on /usage when nothing is recording it", async () => {
+    const { app, done } = await drive(["/usage"]);
+    await finish(app, done);
+
+    expect(app.screen()).toContain("not being recorded");
+  });
+
+  it("opens the context breakdown on /context", async () => {
+    // No brain on the test machine: the skill and memory rows are absent, and
+    // the system row is the bare prompt beside its tools.
+    const { app, done } = await drive(["hello", "/context"]);
+    await tick(300);
+
+    expect(app.lastFrame()).toContain("Context");
+    expect(app.screen()).toContain("9 tools");
+    expect(app.screen()).toContain("Messages");
+
+    await finish(app, done);
+  });
+
+  it("adds the machine total to /stats when usage is recorded", async () => {
+    const history = [
+      {
+        at: "2026-09-30T10:00:00.000Z",
+        model: "m",
+        host: "api.example.com",
+        promptTokens: 1000,
+        completionTokens: 500,
+        toolCalls: 4,
+        ms: 60_000,
+      },
+    ];
+    const { app, done } = await drive(["hello", "/stats"], {
+      usage: { record: async () => {}, history: async () => history },
+    });
+    await finish(app, done);
+
+    expect(app.screen()).toContain("across sessions: 1 turn");
   });
 
   it("puts a free and a paid tab on the model list", async () => {
@@ -3323,6 +3675,27 @@ describe("the slash commands", () => {
     expect(app.screen()).toContain("compacted 3 earlier messages · ~1.0K → ~400");
   });
 
+  it("stays usable while compacting, and stops it on ctrl+c", async () => {
+    // The summariser gone quiet used to hang the whole CLI: the input loop
+    // awaited the request, so no key — not even Ctrl+C — was ever read.
+    const app = harness({}, { compactHang: true });
+    const done = runTui(app.options);
+    await tick();
+
+    app.input.write("/compact\r");
+    await tick(60);
+    // The wait says what it is instead of a frozen screen.
+    expect(app.screen()).toContain("compacting");
+
+    app.input.write("");
+    await tick(60);
+    expect(app.compactAborted).toBe(true);
+    expect(app.screen()).toContain("compaction stopped");
+
+    app.input.write("/exit\r");
+    await done;
+  });
+
   it("answers a side question without recording it", async () => {
     const { app, done } = await drive(["/btw is this idiomatic?"]);
     await finish(app, done);
@@ -3585,6 +3958,48 @@ describe("/settings", () => {
     app.input.write(LEFT);
     await tick(30);
     expect(app.viewSaves.at(-1)).toEqual({ theme: "kicode" });
+
+    await finish(app, done);
+  });
+
+  it("sizes the card by the longest description, so moving never resizes it", async () => {
+    // Down to `Sidebar`, whose sentence is the longest of the list. Sized by
+    // the row under the cursor, the card would jump on every step — and this
+    // sentence would be cut short on rows narrower than it. Sized by the
+    // longest, it fits in full and the card never moves.
+    const { app, done } = await open("/settings");
+
+    app.input.write(`${DOWN}${DOWN}${DOWN}`);
+    await tick(30);
+    expect(app.screen()).toContain("Auto shows it once a second session exists.");
+
+    await finish(app, done);
+  });
+
+  it("moves at once even when the write is slow, and still saves", async () => {    // Every arrow used to await the file write, so a slow disk held the panel
+    // hostage between steps. The value is adopted before the write lands; the
+    // write follows behind and is still owed.
+    const saved: Partial<ViewSettings>[] = [];
+    const app = harness({
+      saveView: async (patch) => {
+        await tick(200);
+        saved.push(patch);
+        return { ok: true, file: "C:\\Users\\me\\.kicode\\kicode.json" };
+      },
+    });
+    const done = runTui(app.options);
+    await tick();
+    app.input.write("/settings\r");
+    await tick(30);
+
+    app.input.write(RIGHT);
+    await tick(30);
+    // The screen already moved on, while the write is still in flight.
+    expect(painted(app)).toContain(bg(themeByName("dark").bg));
+    expect(saved).toHaveLength(0);
+
+    await tick(250);
+    expect(saved.at(-1)).toEqual({ theme: "dark" });
 
     await finish(app, done);
   });
@@ -4142,6 +4557,41 @@ describe("pasting", () => {
     await finish(app, done);
 
     expect(app.screen()).toContain("echo: pasted with alt");
+  });
+
+  it("reads the clipboard on an empty paste, so ctrl+v with an image attaches it", async () => {
+    const image: PastedImage = { data: "AAAA", mime: "image/png", bytes: 4096 };
+    const app = harness({ readClipboard: async () => ({ kind: "image", image }) });
+    const done = runTui(app.options);
+    await tick(15);
+
+    // What a terminal forwards when ctrl+v had no text to paste with — an
+    // image has no text form, so without this the key silently dies.
+    app.input.write("\u001b[200~\u001b[201~");
+    await tick(40);
+
+    expect(app.lastFrame()).toContain("attached image 1");
+    expect(app.lastFrame()).toContain("[Image 1]");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
+  it("stays silent on an empty paste with an empty clipboard", async () => {
+    const app = harness({ readClipboard: async () => ({ kind: "empty" }) });
+    const done = runTui(app.options);
+    await tick(15);
+
+    app.input.write("\u001b[200~\u001b[201~");
+    await tick(40);
+
+    // Nothing was pasted and nothing was asked for: no warning blaming the
+    // wrong key, and the prompt is untouched.
+    expect(app.lastFrame()).not.toContain("clipboard is empty");
+    expect(app.lastFrame()).toContain("Ask anything");
+
+    app.input.write("\u0015/exit\r");
+    await done;
   });
 
   it("pastes into a panel search field, not into the prompt hidden behind it", async () => {

@@ -86,8 +86,7 @@ function finishOf(events: StreamEvent[]): Extract<StreamEvent, { type: "finish" 
 }
 
 describe("OpenAIProvider.stream", () => {
-  it("streams text deltas and finishes with the assembled message", async () => {
-    const sse = [
+  it("streams text deltas and finishes with the assembled message", async () => {    const sse = [
       chunk({ role: "assistant", content: "Hel" }),
       chunk({ content: "lo" }),
       chunk({}, "stop"),
@@ -183,17 +182,20 @@ describe("OpenAIProvider.stream", () => {
     await expect(collect(provider)).rejects.toThrow(/Invalid API key/);
   });
 
-  it("names opencode's client restriction rather than a bare 401", async () => {
-    // The exact shape the gateway returns to any third-party client on the
-    // free models: an OpenCode AuthError. The key is fine; the client is the
-    // problem, and the error has to say so.
+  it("names both suspects on an opencode 401 rather than asserting the gate", async () => {
+    // The exact shape the gateway returns — but "Invalid API key" is what the
+    // gate says about a third-party client *and* what a genuinely wrong key
+    // says. The key may be fine or it may be bad, so the error names both and
+    // the one request that tells them apart, instead of sending a user with a
+    // typo'd key hunting for a policy.
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ type: "error", error: { type: "AuthError", message: "Invalid API key." } }), {
         status: 401,
       })) as unknown as typeof fetch;
     const provider = new OpenAIProvider({ apiKey: "sk-opencode-real", baseUrl: "https://opencode.ai/zen/v1", fetchImpl });
 
-    await expect(collect(provider)).rejects.toThrow(/restricted to the OpenCode client/);
+    await expect(collect(provider)).rejects.toThrow(/either the key or the client gate/);
+    await expect(collect(provider)).rejects.toThrow(/--probe --model/);
   });
 
   it("names the client restriction on a bare 403, whatever the body says", async () => {
@@ -310,9 +312,40 @@ describe("OpenAIProvider.stream", () => {
   });
 });
 
+describe("a route with no key", () => {
+  it("refuses before any request when the caller names the missing variable", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return new Response(streamFrom(answerSse()), { status: 200 });
+    }) as unknown as typeof fetch;
+    const provider = new OpenAIProvider({
+      apiKey: "",
+      baseUrl: "https://gw.example/v1",
+      fetchImpl,
+      missingKeyHint: "No API key for gw.example — set GW_API_KEY.",
+    });
+
+    await expect(collect(provider)).rejects.toThrow("No API key for gw.example");
+    // The gateway never saw this: nothing was sent to 401 about.
+    expect(calls).toBe(0);
+  });
+
+  it("still sends keyless when nothing names a variable (a local server)", async () => {
+    let calls = 0;
+    const fetchImpl = (async () => {
+      calls += 1;
+      return new Response(streamFrom(answerSse()), { status: 200 });
+    }) as unknown as typeof fetch;
+    const provider = new OpenAIProvider({ apiKey: "", baseUrl: "http://localhost:11434/v1", fetchImpl });
+
+    expect(textOf(await collect(provider))).toBe("hi");
+    expect(calls).toBe(1);
+  });
+});
+
 describe("asking for token counts", () => {
-  it("opts into the usage block, which a streamed answer does not carry by default", async () => {
-    // Without this the `finish` event has no usage, so the line under an answer
+  it("opts into the usage block, which a streamed answer does not carry by default", async () => {    // Without this the `finish` event has no usage, so the line under an answer
     // has no rate and the session's token budget never moves.
     const { provider, bodies } = recording([() => new Response(streamFrom(answerSse()), { status: 200 })]);
     await collect(provider);

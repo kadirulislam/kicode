@@ -27,7 +27,7 @@ export type Entry =
    */
   | { kind: "thought"; text: string; ms: number; open: boolean; since: number }
   | { kind: "tool"; name: string; args: unknown }
-  | { kind: "result"; name: string; content: string; isError: boolean }
+  | { kind: "result"; name: string; content: string; isError: boolean; expanded?: boolean }
   | { kind: "note"; text: string; tone: Tone; /** How many identical notes in a row this one stands for. */ count?: number }
   /** The line under an answer: mode, model, time, tokens a second. */
   | { kind: "meta"; text: string };
@@ -96,9 +96,18 @@ export function summarizeArgs(args: unknown, tool?: string): string {
     .join(", ");
 }
 
-function resultLines(content: string, verbosity: ViewSettings["verbosity"]): string {
+function resultLines(content: string, verbosity: ViewSettings["verbosity"], expanded = false): string {
+  const normalized = content.replace(/\r/g, "");
+  // Expanded shows the whole output in place, bounded so one enormous dump
+  // cannot flood the transcript — `/copy` still yields the full text.
+  if (expanded) {
+    const all = normalized.split("\n");
+    const capped = all.slice(0, 200).join("\n");
+    const text = capped.length > 8000 ? `${capped.slice(0, 8000)}…` : capped;
+    return all.length > 200 ? `${text}\n… ${all.length - 200} more lines · /copy for full` : text;
+  }
   const { lines: maxLines, chars } = VERBOSITY[verbosity];
-  const all = content.replace(/\r/g, "").split("\n");
+  const all = normalized.split("\n");
   // Medium is the everyday setting, and mid-turn a result is usually not what
   // anyone is reading — the tool and what it touched are. One line says both;
   // low keeps its single clipped line, high keeps everything it showed before.
@@ -111,6 +120,24 @@ function resultLines(content: string, verbosity: ViewSettings["verbosity"]): str
   const kept = all.slice(0, maxLines).join("\n");
   const clipped = kept.length > chars ? `${kept.slice(0, chars)}…` : kept;
   return all.length > maxLines ? `${clipped}\n… ${all.length - maxLines} more lines` : clipped;
+}
+
+/**
+ * Whether a result entry offers expand/collapse: anything the verbosity
+ * budget clips, or anything already expanded. Frame emits click targets only
+ * for these, so short results stay plain selectable text.
+ */
+export function isResultClipped(entry: Entry, verbosity: ViewSettings["verbosity"]): boolean {
+  if (entry.kind !== "result") return false;
+  if (entry.expanded) return true;
+  const { lines: maxLines, chars } = VERBOSITY[verbosity];
+  const all = entry.content.replace(/\r/g, "").split("\n");
+  if (verbosity === "medium" && !/^(error|denied|refused)/i.test(entry.content.trim())) {
+    const first = (all[0] ?? "").trim();
+    return all.length > 1 || first.length > chars;
+  }
+  const kept = all.slice(0, maxLines).join("\n");
+  return all.length > maxLines || kept.length > chars;
 }
 
 /**
@@ -345,6 +372,20 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
+ * The live speed beside the spinner, while the answer is still arriving.
+ *
+ * No usage block has arrived yet — that comes with `done` — so this is an
+ * estimate from streamed characters at four per token, the same convention
+ * `estimateTokens` uses. Under a quarter of a second there is no rate: the
+ * first delta would read as thousands of tokens per second, which is
+ * arithmetic, not information.
+ */
+export function liveRate(streamedChars: number, elapsedMs: number): string | null {
+  if (streamedChars <= 0 || elapsedMs < 250) return null;
+  return `${(streamedChars / 4 / (elapsedMs / 1000)).toFixed(1)} tok/s`;
+}
+
+/**
  * The transcript as plain text, for `/copy`, `/export` and the clipboard.
  *
  * Styling is dropped here rather than stripped later: the clipboard wants the
@@ -388,6 +429,7 @@ export function entrySpans(
   styles: Styles,
   view: ViewSettings = defaultViewSettings(),
   spinnerFrame = 0,
+  width?: number,
 ): Span[] {
   switch (entry.kind) {
     case "user":
@@ -409,7 +451,7 @@ export function entrySpans(
       // table is exactly the half that goes wrong.
       const content = view.markdown === "raw"
         ? [span(entry.text.trim(), styles.text), span("\n")]
-        : [...markdownSpans(entry.text.trim(), styles), span("\n")];
+        : [...markdownSpans(entry.text.trim(), styles, width), span("\n")];
       return [...content];
     }
     case "thought": {
@@ -451,12 +493,20 @@ export function entrySpans(
         span("\n"),
       ];
     }
-    case "result":
+    case "result": {
+      const clipped = isResultClipped(entry, view.verbosity);
+      const toggleHint = !clipped
+        ? null
+        : entry.expanded
+          ? " · click to collapse"
+          : " · click to expand";
       return [
         span(entry.isError ? "✕ " : "✓ ", entry.isError ? styles.error : styles.ok),
-        span(resultLines(entry.content, view.verbosity), entry.isError ? styles.error : styles.text),
+        span(resultLines(entry.content, view.verbosity, entry.expanded), entry.isError ? styles.error : styles.text),
+        ...(toggleHint ? [span(toggleHint, styles.faint)] : []),
         span("\n"),
       ];
+    }
     case "note":
       return [span("\n"), span(`[${noteText(entry)}]`, styles[entry.tone]), span("\n")];
     case "meta":

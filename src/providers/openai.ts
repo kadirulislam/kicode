@@ -26,6 +26,12 @@ export type OpenAIProviderOptions = {
   /** Extra headers, e.g. OpenRouter's `HTTP-Referer` / `X-Title`. */
   headers?: Record<string, string>;
   /**
+   * What to say when there is no key to send. Set when the caller knows which
+   * variable is missing; absent means keyless is legitimate (a local server),
+   * and the request goes out as before.
+   */
+  missingKeyHint?: string;
+  /**
    * Stable per-conversation id, sent as `x-opencode-session`. Gateways that
    * route and cache per conversation — OpenCode Go among them — require it,
    * and name it in their client-validation docs. Absent means no header.
@@ -49,6 +55,21 @@ export class ProviderError extends Error {
   }
 }
 
+/**
+ * Thrown before any request when the route has no key to send.
+ *
+ * A missing key is not a refused one: sending `Bearer ` and reading the
+ * gateway's 401 back teaches nothing and burns a request. The message names
+ * the missing variable, and the chain walks past the route instead of failing
+ * on it — a keyed backup further down still answers.
+ */
+export class MissingKeyError extends ProviderError {
+  constructor(message: string) {
+    super(message);
+    this.name = "MissingKeyError";
+  }
+}
+
 export class OpenAIProvider implements Provider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -56,6 +77,7 @@ export class OpenAIProvider implements Provider {
   private readonly headers: Record<string, string>;
   private readonly sessionId?: string;
   private readonly userAgent?: string;
+  private readonly missingKeyHint?: string;
 
   constructor(options: OpenAIProviderOptions) {
     this.apiKey = options.apiKey;
@@ -64,9 +86,15 @@ export class OpenAIProvider implements Provider {
     this.headers = options.headers ?? {};
     this.sessionId = options.sessionId;
     this.userAgent = options.userAgent;
+    this.missingKeyHint = options.missingKeyHint;
   }
 
   async *stream(request: ChatRequest): AsyncGenerator<StreamEvent, void, void> {
+    // No key to send is refused before any request: the gateway could only
+    // answer 401, and its message ("send a Bearer key") would read as if a key
+    // had been sent and rejected. Keyless-by-design endpoints (no hint) still
+    // go out as before.
+    if (!this.apiKey && this.missingKeyHint) throw new MissingKeyError(this.missingKeyHint);
     const url = chatCompletionsUrl(this.baseUrl);
 
     let response: Response;
@@ -422,22 +450,27 @@ async function describeHttpError(response: Response, url: string): Promise<strin
 /**
  * Gateways that restrict which client may call them say so with a bare 401/403
  * — the same status a wrong key gets. On an opencode.ai endpoint the two are
- * worth telling apart, because the fix is not "check your key":
+ * worth telling apart, because the fix is not always "check your key":
  *
  * - A **403** is the client gate. Credentials are the thing a 403 must not be
  *   about — a rejected key is a 401 — so this needs no confirmation from the
  *   body, and their gateway does not always send the OpenCode-shaped
  *   `AuthError` that older clients saw. Reading a bare 403 as "bad key" sends
  *   the user hunting for a key that is fine.
- * - A **401** may be either, so the body has to confirm it: an OpenCode-shaped
- *   `AuthError`, or words that name a client/restriction rather than a key.
+ * - A **401** may be either, so the body has to confirm it — and even then the
+ *   note must not pick a side. "Invalid API key" is what the gate says about a
+ *   third-party client *and* what a genuinely wrong key says, so the note names
+ *   both suspects and the one request that tells them apart: a paid model
+ *   answers on a good key and 401s on a bad one.
  */
 function clientRestrictionHint(url: string, status: number, detail: string): string {
   if (status !== 401 && status !== 403) return "";
   const isOpenCode = /(^|\.)opencode\.ai/i.test(hostOf(url) ?? "");
   if (!isOpenCode) return "";
-  const confirmed =
-    status === 403 || /AuthError|Invalid API key|client|forbidden|restricted|not allowed/i.test(detail);
+  if (status === 403) {
+    return "\nnote: opencode.ai free models are restricted to the OpenCode client itself — a paid Zen key works from any client, or switch routes with /models (free models on OpenRouter still accept any key)";
+  }
+  const confirmed = /AuthError|Invalid API key|client|forbidden|restricted|not allowed/i.test(detail);
   if (!confirmed) return "";
-  return "\nnote: opencode.ai free models are restricted to the OpenCode client itself — a paid Zen key works from any client, or switch routes with /models (free models on OpenRouter still accept any key)";
+  return "\nnote: opencode.ai refused the key — which is either the key or the client gate (free models reject third-party clients). Settles it fast: `kicode --probe --model deepseek-v4-flash` — a paid model answers on a good key and 401s on a bad one. Paid Zen keys work anywhere; OpenRouter free takes any key";
 }

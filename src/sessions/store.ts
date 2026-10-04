@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveHome } from "../paths";
@@ -130,6 +130,63 @@ export async function listSessions(env: NodeJS.ProcessEnv = process.env): Promis
 export async function latestSessionFor(cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<SessionRecord | null> {
   const records = await listSessions(env);
   return records.find((record) => samePath(record.cwd, cwd)) ?? null;
+}
+
+/**
+ * Which tab was in front, per directory — so a restart returns to where the
+ * user was rather than to the newest session.
+ *
+ * One small file per directory (`active-<sha1 of cwd>.json`), holding the
+ * session id and the directory it was front in. Per-directory files rather
+ * than one shared map, so two instances in different directories never
+ * clobber each other on a read-modify-write. Written on every front-tab
+ * change and at exit; read only when resuming. Anything unreadable is a miss,
+ * never an error — the caller falls back to the newest session.
+ */
+function activePointerFile(cwd: string, env: NodeJS.ProcessEnv = process.env): string {
+  const normalized = process.platform === "win32" ? path.resolve(cwd).toLowerCase() : path.resolve(cwd);
+  const hash = createHash("sha1").update(normalized).digest("hex").slice(0, 16);
+  return path.join(sessionsDir(env), `active-${hash}.json`);
+}
+
+export async function readActiveSessionId(cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<string | null> {
+  try {
+    const parsed = JSON.parse(await readFile(activePointerFile(cwd, env), "utf8")) as Partial<{
+      id: string;
+      cwd: string;
+    }>;
+    if (typeof parsed.id !== "string" || !parsed.id) return null;
+    // The directory moved out from under the pointer, or two hashes collided:
+    // either way this pointer is not about here.
+    if (typeof parsed.cwd !== "string" || !samePath(parsed.cwd, cwd)) return null;
+    return parsed.id;
+  } catch {
+    return null;
+  }
+}
+
+export async function writeActiveSessionId(cwd: string, id: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  const dir = sessionsDir(env);
+  await mkdir(dir, { recursive: true });
+  const file = activePointerFile(cwd, env);
+  const temp = `${file}.tmp`;
+  // Write then rename, like the sessions themselves: a crash mid-write must
+  // not leave a half-parsed pointer.
+  await writeFile(temp, JSON.stringify({ id, cwd: path.resolve(cwd), updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  await rename(temp, file);
+}
+
+/**
+ * Forgets the remembered tab, but only when it names `id` — a delete must not
+ * clear a pointer a later switch has already moved on from.
+ */
+export async function clearActiveSessionId(cwd: string, id: string, env: NodeJS.ProcessEnv = process.env): Promise<void> {
+  if ((await readActiveSessionId(cwd, env)) !== id) return;
+  try {
+    await rm(activePointerFile(cwd, env), { force: true });
+  } catch {
+    return;
+  }
 }
 
 /** Keeps the store from growing without bound. */

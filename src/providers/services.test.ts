@@ -23,12 +23,19 @@ describe("the service catalogue", () => {
     }
   });
 
+  it("holds the four curated services, and nothing else", () => {
+    expect(SERVICES.map((service) => service.name)).toEqual(["opencode", "openai", "anthropic", "openrouter"]);
+  });
+
   it("points at the service by its config name or by the name on the panel", () => {
-    expect(serviceByName("groq")?.baseUrl).toBe("https://api.groq.com/openai/v1");
-    expect(serviceByName("Groq")?.name).toBe("groq");
-    expect(serviceByName("ollama")?.apiKeyEnv).toBeUndefined();
-    expect(serviceByName("kenari")?.baseUrl).toBe("https://api.kenari.ai/v1");
-    expect(serviceByName("experiential")?.apiKeyEnv).toBe("EXPERIENTIAL_LABS_API_KEY");
+    expect(serviceByName("openai")?.baseUrl).toBe("https://api.openai.com/v1");
+    expect(serviceByName("OpenAI")?.name).toBe("openai");
+    expect(serviceByName("opencode")?.baseUrl).toBe("https://opencode.ai/zen/v1");
+    expect(serviceByName("openrouter")?.apiKeyEnv).toBe("OPENROUTER_API_KEY");
+    expect(serviceByName("anthropic")?.apiKeyEnv).toBe("ANTHROPIC_API_KEY");
+    // The model family name reaches the row labelled by its company.
+    expect(serviceByName("claude")?.name).toBe("anthropic");
+    expect(serviceByName("groq")).toBeUndefined();
     expect(serviceByName("nope")).toBeUndefined();
   });
 
@@ -57,21 +64,22 @@ describe("the rows the connect panel shows", () => {
 
   it("says which variable to set when there is no key, and leaves it unchosen", () => {
     const rows = serviceRows({});
-    const groq = rows.find((row) => row.value === "groq");
+    const openrouter = rows.find((row) => row.value === "openrouter");
 
-    expect(groq?.checked).toBe(false);
-    expect(groq?.trailing).toBe("set GROQ_API_KEY");
-  });
-
-  it("treats a server that needs no key as ready", () => {
-    const ollama = serviceRows({}).find((row) => row.value === "ollama");
-    expect(ollama?.checked).toBe(true);
-    expect(ollama?.trailing).toBe("no key needed");
+    expect(openrouter?.checked).toBe(false);
+    expect(openrouter?.trailing).toBe("set OPENROUTER_API_KEY");
   });
 
   it("ignores a variable that is set to nothing", () => {
-    const rows = serviceRows({ GROQ_API_KEY: "   " });
-    expect(rows.find((row) => row.value === "groq")?.checked).toBe(false);
+    const rows = serviceRows({ OPENROUTER_API_KEY: "   " });
+    expect(rows.find((row) => row.value === "openrouter")?.checked).toBe(false);
+  });
+
+  it("ticks one service without ticking the others", () => {
+    // The double tick this pins: two entries used to read each other's
+    // variable, so one key checked both rows.
+    const rows = serviceRows({ OPENAI_API_KEY: "sk-x" });
+    expect(rows.filter((row) => row.checked).map((row) => row.value)).toEqual(["openai"]);
   });
 
   it("marks a service the config already declares", () => {

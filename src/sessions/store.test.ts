@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { ChatMessage } from "../types";
-import { latestSessionFor, listSessions, loadSession, newSessionId, pruneSessions, saveSession, sessionPreview, sessionsDir } from "./store";
+import { clearActiveSessionId, latestSessionFor, listSessions, loadSession, newSessionId, pruneSessions, readActiveSessionId, saveSession, sessionPreview, sessionsDir, writeActiveSessionId } from "./store";
 
 let home = "";
 const env = (): NodeJS.ProcessEnv => ({ ...process.env, KICODE_HOME: home });
@@ -149,6 +149,73 @@ describe("session store", () => {
 
     expect(ids.size).toBe(50);
     for (const id of ids) expect(id).toMatch(/^[A-Za-z0-9-]+$/);
+  });
+});
+
+describe("active tab pointer", () => {
+  it("round-trips the tab that was in front", async () => {
+    await writeActiveSessionId("/project/front", "s-front", env());
+
+    expect(await readActiveSessionId("/project/front", env())).toBe("s-front");
+  });
+
+  it("keeps one pointer per directory", async () => {
+    await writeActiveSessionId("/project/a", "s-a", env());
+    await writeActiveSessionId("/project/b", "s-b", env());
+
+    expect(await readActiveSessionId("/project/a", env())).toBe("s-a");
+    expect(await readActiveSessionId("/project/b", env())).toBe("s-b");
+  });
+
+  it("misses when the pointer names another directory", async () => {
+    await writeActiveSessionId("/project/here", "s-here", env());
+
+    expect(await readActiveSessionId("/project/elsewhere", env())).toBeNull();
+  });
+
+  it("ignores a pointer whose directory moved out from under it", async () => {
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-moved-"));
+    const onlyVisible = { ...process.env, KICODE_HOME: own };
+    try {
+      await writeActiveSessionId("/project/there", "s-moved", onlyVisible);
+      const names = await readdir(sessionsDir(onlyVisible));
+      const pointer = names.find((name) => name.startsWith("active-")) ?? "";
+      await writeFile(path.join(sessionsDir(onlyVisible), pointer), JSON.stringify({ id: "s-moved", cwd: "/project/gone" }), "utf8");
+
+      expect(await readActiveSessionId("/project/there", onlyVisible)).toBeNull();
+    } finally {
+      await rm(own, { recursive: true, force: true });
+    }
+  });
+
+  it("misses when there is nothing or garbage to read", async () => {
+    expect(await readActiveSessionId("/project/never", env())).toBeNull();
+
+    // Its own home: the other tests in this file count what is in the shared
+    // one, and stray files there would be picked up by the listing tests.
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-active-"));
+    const onlyVisible = { ...process.env, KICODE_HOME: own };
+    try {
+      await writeActiveSessionId("/project/x", "s-x", onlyVisible);
+      const names = await readdir(sessionsDir(onlyVisible));
+      const pointer = names.find((name) => name.startsWith("active-")) ?? "";
+      await writeFile(path.join(sessionsDir(onlyVisible), pointer), "{ not json", "utf8");
+
+      expect(await readActiveSessionId("/project/x", onlyVisible)).toBeNull();
+    } finally {
+      await rm(own, { recursive: true, force: true });
+    }
+  });
+
+  it("clears only the pointer it names", async () => {
+    await writeActiveSessionId("/project/clear", "s-old", env());
+    await clearActiveSessionId("/project/clear", "s-other", env());
+
+    expect(await readActiveSessionId("/project/clear", env())).toBe("s-old");
+
+    await clearActiveSessionId("/project/clear", "s-old", env());
+
+    expect(await readActiveSessionId("/project/clear", env())).toBeNull();
   });
 });
 

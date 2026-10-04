@@ -134,9 +134,13 @@ export async function probeEndpoint(options: {
   let verdict: string;
   if (chat.ok) {
     verdict = `this endpoint accepts KiCode — if a session still fails, the difference is the model or route, not the client`;
-  } else if (/restricted to the OpenCode client/i.test(chat.detail)) {
+  } else if (/third-party clients/i.test(chat.detail)) {
+    // The 401 note's own words: the gateway refused, and the body fits the
+    // client gate as well as a bad key. The probe cannot tell them apart from
+    // one failed request, so the verdict names the request that can — a paid
+    // model answers on a good key and 401s on a bad one.
     verdict =
-      "the gateway refused KiCode by name of its own policy: free models are client-restricted. Paid Zen keys or Go-plan access are the documented paths for third-party clients — or switch routes with /models";
+      "bad key or client gate — the refusal fits both. `kicode --probe --model deepseek-v4-flash` tells them apart: a paid model answers on a good key. Paid Zen keys work anywhere; OpenRouter free takes any key";
   } else if (/401|403/i.test(chat.detail)) {
     verdict = "the key was refused — check it is set for this endpoint and has not expired";
   } else if (/429/i.test(chat.detail)) {

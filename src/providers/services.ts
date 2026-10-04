@@ -36,33 +36,6 @@ export type Service = {
 
 export const SERVICES: readonly Service[] = [
   {
-    name: "tokenharbor",
-    label: "TokenHarbor",
-    group: "Popular",
-    baseUrl: "https://tokenharbor.ai/v1",
-    apiKeyEnv: "TOKENHARBOR_API_KEY",
-    doc: "https://tokenharbor.ai/",
-    note: "AI model aggregator and router",
-  },
-  {
-    name: "tokenharbour",
-    label: "TokenHarbour",
-    group: "Popular",
-    baseUrl: "https://api.tokenharbour.com/v1",
-    apiKeyEnv: "TOKENHARBOUR_API_KEY",
-    doc: "https://tokenharbour.com/",
-    note: "AI model aggregator and router",
-  },
-  {
-    name: "opencode-go",
-    label: "OpenCode Go",
-    group: "Popular",
-    baseUrl: "https://opencode.ai/zen/go/v1",
-    apiKeyEnv: "OPENCODE_API_KEY",
-    doc: "https://opencode.ai/docs/go/",
-    note: "subscription models, OpenAI-compatible",
-  },
-  {
     name: "opencode",
     label: "OpenCode Zen",
     group: "Popular",
@@ -80,6 +53,15 @@ export const SERVICES: readonly Service[] = [
     doc: "https://platform.openai.com/docs/api-reference",
   },
   {
+    name: "anthropic",
+    label: "Anthropic",
+    group: "Popular",
+    baseUrl: "https://api.anthropic.com/v1",
+    apiKeyEnv: "ANTHROPIC_API_KEY",
+    doc: "https://docs.anthropic.com/en/api/openai-sdk",
+    note: "Claude, through its OpenAI-compatible surface",
+  },
+  {
     name: "openrouter",
     label: "OpenRouter",
     group: "Popular",
@@ -87,98 +69,6 @@ export const SERVICES: readonly Service[] = [
     apiKeyEnv: "OPENROUTER_API_KEY",
     doc: "https://openrouter.ai/docs",
     note: "many free models, reached with a :free suffix",
-  },
-  {
-    name: "groq",
-    label: "Groq",
-    group: "Popular",
-    baseUrl: "https://api.groq.com/openai/v1",
-    apiKeyEnv: "GROQ_API_KEY",
-    doc: "https://console.groq.com/docs/openai",
-    note: "fast, and reports its own rate limits",
-  },
-  {
-    name: "github-copilot",
-    label: "Github Copilot",
-    group: "Popular",
-    baseUrl: "https://api.githubcopilot.com",
-    apiKeyEnv: "GITHUB_TOKEN",
-    doc: "https://docs.github.com/en/copilot",
-    note: "a fine-grained token with the Copilot scope",
-  },
-  {
-    name: "anthropic",
-    label: "Anthropic",
-    group: "Popular",
-    baseUrl: "https://api.anthropic.com/v1",
-    apiKeyEnv: "ANTHROPIC_API_KEY",
-    doc: "https://docs.anthropic.com/en/api/openai-sdk",
-    note: "through its OpenAI-compatible surface",
-  },
-  {
-    name: "google",
-    label: "Google",
-    group: "Popular",
-    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
-    apiKeyEnv: "GEMINI_API_KEY",
-    doc: "https://ai.google.dev/gemini-api/docs/openai",
-  },
-  {
-    name: "ai302",
-    label: "302.AI",
-    group: "Services",
-    baseUrl: "https://api.302.ai/v1",
-    apiKeyEnv: "AI302_API_KEY",
-    doc: "https://doc-en.302.ai/",
-  },
-  {
-    name: "abacus",
-    label: "Abacus",
-    group: "Services",
-    baseUrl: "https://routellm.abacus.ai/v1",
-    apiKeyEnv: "ABACUS_API_KEY",
-    doc: "https://abacus.ai/help/route-llm/",
-    note: "self-serve organisations only",
-  },
-  {
-    name: "abliteration",
-    label: "abliteration.ai",
-    group: "Services",
-    baseUrl: "https://api.abliteration.ai/v1",
-    apiKeyEnv: "ABLITERATION_API_KEY",
-    doc: "https://abliteration.ai/docs/openai-compatibility",
-  },
-  {
-    name: "agentrouter",
-    label: "AgentRouter",
-    group: "Services",
-    baseUrl: "https://agentrouter.org/v1",
-    apiKeyEnv: "AGENTROUTER_API_KEY",
-    doc: "https://agentrouter.org/",
-  },
-  {
-    name: "kenari",
-    label: "Kenari",
-    group: "Popular",
-    baseUrl: "https://api.kenari.ai/v1",
-    apiKeyEnv: "KENARI_API_KEY",
-    doc: "https://kenari.ai/",
-  },
-  {
-    name: "experiential",
-    label: "Experiential Labs",
-    group: "Services",
-    baseUrl: "https://api.experiential.ai/v1",
-    apiKeyEnv: "EXPERIENTIAL_LABS_API_KEY",
-    doc: "https://experiential.ai/",
-  },
-  {
-    name: "ollama",
-    label: "Ollama (local)",
-    group: "Services",
-    baseUrl: "http://localhost:11434/v1",
-    doc: "https://docs.ollama.com/openai",
-    note: "no key — a local server",
   },
 ];
 
@@ -260,17 +150,14 @@ export type AddProviderResult =
 /** The catalogue entry a name points at, by config name or by label. */
 export function serviceByName(name: string): Service | undefined {
   const needle = name.trim().toLowerCase();
+  // The model family name, for the row labelled by its company.
+  if (needle === "claude") return SERVICES.find((service) => service.name === "anthropic");
   return SERVICES.find((service) => service.name.toLowerCase() === needle || service.label.toLowerCase() === needle);
 }
 
 export function serviceApiKey(env: NodeJS.ProcessEnv, service: Service): string {
   if (!service.apiKeyEnv) return "";
-  const direct = (env[service.apiKeyEnv] ?? "").trim();
-  if (direct) return direct;
-  if (service.name === "tokenharbor" || service.name === "tokenharbour") {
-    return (env.TOKENHARBOR_API_KEY ?? env.TOKENHARBOUR_API_KEY ?? "").trim();
-  }
-  return "";
+  return (env[service.apiKeyEnv] ?? "").trim();
 }
 
 /**

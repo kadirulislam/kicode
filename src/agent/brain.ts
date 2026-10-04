@@ -1,7 +1,8 @@
 import { readdirSync, readFileSync, type Dirent } from "node:fs";
 import { mkdir, rename } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { resolveBrainDirSync } from "../mentions";
+import { resolveBrainDirSync, skillRoots, type SkillRoot, type SkillSource } from "../mentions";
 
 /**
  * The agent's brain: what earlier sessions saved, read back to the model.
@@ -21,9 +22,9 @@ import { resolveBrainDirSync } from "../mentions";
  * promises in the path. The reads are a handful of small files, bounded below.
  */
 
-export type BrainSkill = { name: string; description: string; file: string };
+export type BrainSkill = { name: string; description: string; file: string; source: SkillSource };
 export type BrainProject = { slug: string; file: string };
-export type Brain = { dir: string; skills: BrainSkill[]; projects: BrainProject[] };
+export type Brain = { dir: string | null; skills: BrainSkill[]; projects: BrainProject[] };
 
 /** Caps, so a brain that grew large cannot bloat every request. */
 const MAX_SKILLS = 200;
@@ -75,50 +76,57 @@ export function projectSlug(cwd: string): string {
 }
 
 /** Reads the brain's skills and project memories, or null when there is none. */
-export function readBrain(cwd: string, env: NodeJS.ProcessEnv = process.env): Brain | null {
+export function readBrain(cwd: string, env: NodeJS.ProcessEnv = process.env, homeDir: string = os.homedir()): Brain | null {
   const dir = resolveBrainDirSync(env, cwd);
-  if (!dir) return null;
-  return {
-    dir,
-    skills: readSkillIndex(path.join(dir, "skills")),
-    projects: readProjectIndex(path.join(dir, "memories", "projects")),
-  };
+  const skills = readSkillRoots(skillRoots(cwd, env, homeDir));
+  const projects = dir ? readProjectIndex(path.join(dir, "memories", "projects")) : [];
+  // Null means nowhere: no brain, no installed set, no memories. Callers read
+  // that as "nothing saved yet" rather than as an empty library.
+  if (!dir && skills.length === 0 && projects.length === 0) return null;
+  return { dir, skills, projects };
 }
 
 /**
- * Every `SKILL.md` under the skills root, frontmatter only — never a body.
+ * Every `SKILL.md` under each root, frontmatter only — never a body.
  *
  * Walked rather than listed one level deep, because a brain organises skills
  * into folders: `remember` writes `skills/<name>/SKILL.md`, but a maintained
  * brain nests them under categories (`skills/android/adb-webview/SKILL.md`),
  * and a reader that only looked one level down would miss most of the library.
- * Bounded by directories visited as well as skills found, so a deep tree cannot
- * stall a session's first request.
+ * One shared budget across roots, and the first root wins a name: the brain's
+ * own skill shadows an installed one of the same name. Bounded by directories
+ * visited as well as skills found, so a deep tree cannot stall a session's
+ * first request.
  */
-function readSkillIndex(root: string): BrainSkill[] {
+function readSkillRoots(roots: readonly SkillRoot[]): BrainSkill[] {
   const skills: BrainSkill[] = [];
-  const queue: string[] = [root];
+  const seen = new Set<string>();
   let visited = 0;
 
-  while (queue.length > 0 && skills.length < MAX_SKILLS && visited < MAX_SKILL_DIRS) {
-    const dir = queue.shift()!;
-    visited += 1;
-    let entries: Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const file = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        queue.push(file);
+  for (const root of roots) {
+    const queue: string[] = [root.dir];
+    while (queue.length > 0 && skills.length < MAX_SKILLS && visited < MAX_SKILL_DIRS) {
+      const dir = queue.shift()!;
+      visited += 1;
+      let entries: Dirent[];
+      try {
+        entries = readdirSync(dir, { withFileTypes: true });
+      } catch {
         continue;
       }
-      if (entry.name !== "SKILL.md") continue;
-      const front = readFrontmatter(file);
-      if (front) skills.push({ ...front, file });
-      if (skills.length >= MAX_SKILLS) break;
+      for (const entry of entries) {
+        const file = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          queue.push(file);
+          continue;
+        }
+        if (entry.name !== "SKILL.md") continue;
+        const front = readFrontmatter(file);
+        if (!front || seen.has(front.name)) continue;
+        seen.add(front.name);
+        skills.push({ ...front, file, source: root.source });
+        if (skills.length >= MAX_SKILLS) break;
+      }
     }
   }
 
@@ -185,8 +193,26 @@ function readProjectIndex(root: string): BrainProject[] {
  */
 export const SKILLS_HEADING = "## Skills you have";
 
-export function brainBriefing(cwd: string, env: NodeJS.ProcessEnv = process.env): string | null {
-  const brain = readBrain(cwd, env);
+/**
+ * The briefing's two halves, as they are sent — memory first, then skills.
+ *
+ * `/context` costs them out separately, so the briefing is built from these
+ * rather than beside them: one construction, two readers, and the numbers
+ * always describe the words the model actually gets.
+ */
+export type BrainSections = {
+  /** This project's memory block, or null when the briefing carries none. */
+  memory: { text: string; files: number } | null;
+  /** The skill list block, or null when the briefing carries none. */
+  skills: { text: string; loaded: number; total: number } | null;
+};
+
+export function brainSections(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): BrainSections | null {
+  const brain = readBrain(cwd, env, homeDir);
   if (!brain) return null;
 
   const slug = projectSlug(cwd);
@@ -196,22 +222,47 @@ export function brainBriefing(cwd: string, env: NodeJS.ProcessEnv = process.env)
 
   if (!own && skills.length === 0 && others.length === 0) return null;
 
+  let memory: BrainSections["memory"] = null;
+  if (own) {
+    memory = {
+      text: [`## This project's memory (${own.slug})`, "", readCapped(own.file, MAX_BRIEFING_MEMORY_CHARS)].join("\n"),
+      files: brain.projects.length,
+    };
+  } else if (others.length > 0) {
+    memory = {
+      text: `- No memory saved for this directory yet. Other project memories: ${others.join(", ")}.`,
+      files: brain.projects.length,
+    };
+  }
+
+  let skillSection: BrainSections["skills"] = null;
+  if (skills.length > 0) {
+    const rows = skills.map(
+      (skill) => `- ${skill.name} — ${skill.description || "skill"}${skill.source === "installed" ? " (installed)" : ""}`,
+    );
+    if (brain.skills.length > skills.length) rows.push(`- … ${brain.skills.length - skills.length} more`);
+    skillSection = {
+      text: [`${SKILLS_HEADING} (load one with the recall tool when its name looks relevant)`, ...rows].join("\n"),
+      loaded: skills.length,
+      total: brain.skills.length,
+    };
+  }
+
+  if (!memory && !skillSection) return null;
+  return { memory, skills: skillSection };
+}
+
+export function brainBriefing(cwd: string, env: NodeJS.ProcessEnv = process.env, homeDir: string = os.homedir()): string | null {
+  const sections = brainSections(cwd, env, homeDir);
+  if (!sections) return null;
+
   const lines = [
     "# Your brain",
     "What earlier sessions saved. This is not the user's request — it is what you already know, and it is cheaper than rediscovering it.",
   ];
 
-  if (own) {
-    lines.push("", `## This project's memory (${own.slug})`, "", readCapped(own.file, MAX_BRIEFING_MEMORY_CHARS));
-  } else if (others.length > 0) {
-    lines.push("", `- No memory saved for this directory yet. Other project memories: ${others.join(", ")}.`);
-  }
-
-  if (skills.length > 0) {
-    lines.push("", `${SKILLS_HEADING} (load one with the recall tool when its name looks relevant)`);
-    for (const skill of skills) lines.push(`- ${skill.name} — ${skill.description || "skill"}`);
-    if (brain.skills.length > skills.length) lines.push(`- … ${brain.skills.length - skills.length} more`);
-  }
+  if (sections.memory) lines.push("", sections.memory.text);
+  if (sections.skills) lines.push("", sections.skills.text);
 
   const text = lines.join("\n").trimEnd();
   return text.length > MAX_BRIEFING_CHARS ? `${text.slice(0, MAX_BRIEFING_CHARS).trimEnd()}\n… (brain briefing truncated)` : text;
@@ -229,8 +280,9 @@ export function recallFromBrain(
   cwd: string,
   input: { name?: string; query?: string },
   env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
 ): { content: string; isError: boolean } {
-  const brain = readBrain(cwd, env);
+  const brain = readBrain(cwd, env, homeDir);
   if (!brain) {
     return {
       content:
@@ -246,7 +298,12 @@ export function recallFromBrain(
     const skill = brain.skills.find((entry) => entry.name === name);
     if (skill) {
       return {
-        content: [`# Skill: ${name}`, skill.description ? `_${skill.description}_` : "", "", readCapped(skill.file, MAX_RECALL_CHARS)]
+        content: [
+          `# Skill: ${name}${skill.source === "installed" ? " (installed)" : ""}`,
+          skill.description ? `_${skill.description}_` : "",
+          "",
+          readCapped(skill.file, MAX_RECALL_CHARS),
+        ]
           .filter(Boolean)
           .join("\n"),
         isError: false,
@@ -278,7 +335,11 @@ export function recallFromBrain(
 
   const blocks: string[] = [];
   for (const skill of skillHits.slice(0, MAX_RECALL_HITS)) {
-    blocks.push([`# Skill: ${skill.name}`, skill.description ? `_${skill.description}_` : "", "", readCapped(skill.file, MAX_RECALL_CHARS)].filter(Boolean).join("\n"));
+    blocks.push(
+      [`# Skill: ${skill.name}${skill.source === "installed" ? " (installed)" : ""}`, skill.description ? `_${skill.description}_` : "", "", readCapped(skill.file, MAX_RECALL_CHARS)]
+        .filter(Boolean)
+        .join("\n"),
+    );
   }
   for (const project of projectHits.slice(0, MAX_RECALL_HITS)) {
     blocks.push([`# Project memory: ${project.slug}`, "", readCapped(project.file, MAX_RECALL_CHARS)].join("\n"));
@@ -286,9 +347,11 @@ export function recallFromBrain(
   return { content: blocks.join("\n\n"), isError: false };
 }
 
-/** What is in the brain, for a miss. */
+/** What is in the brain, for a miss — learned and installed kept apart. */
 function inventory(brain: Brain): string {
-  const skills = brain.skills.map((entry) => entry.name).join(", ") || "none";
+  const learned = brain.skills.filter((entry) => entry.source === "learned").map((entry) => entry.name);
+  const installed = brain.skills.filter((entry) => entry.source === "installed").map((entry) => entry.name);
+  const skills = [...learned, ...installed.map((name) => `${name} (installed)`)].join(", ") || "none";
   const projects = brain.projects.map((entry) => entry.slug).join(", ") || "none";
   return `Skills: ${skills}.\nProject memories: ${projects}.`;
 }

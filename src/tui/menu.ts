@@ -37,6 +37,13 @@ export type MenuPanel = {
   footer: string;
   /** What the highlighted row does, printed above the footer. */
   description?: string;
+  /**
+   * The widest description the panel can show, in cells. The card is sized by
+   * this instead of by `description`: the sentence changes with every row the
+   * cursor lands on, so sizing by the current one resizes the card on every
+   * hover. Sized by the longest, every sentence fits and the card never moves.
+   */
+  descriptionWidth?: number;
 };
 
 /**

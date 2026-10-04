@@ -324,13 +324,15 @@ export type CompactionResult = {
 /**
  * Returns the compacted transcript, or null when there is nothing to do.
  * Throws only if the summarisation call itself fails; the caller decides
- * whether to carry on over budget.
+ * whether to carry on over budget. A signal lets a caller (Ctrl+C on a manual
+ * `/compact`) stop a summariser that is not answering.
  */
 export async function compactMessages(
   provider: Provider,
   model: string,
   messages: readonly ChatMessage[],
   options: CompactionOptions,
+  signal?: AbortSignal,
 ): Promise<CompactionResult | null> {
   const plan = planCompaction(messages, options);
   if (plan === null) return null;
@@ -348,6 +350,7 @@ export async function compactMessages(
       { role: "system", content: summaryPrompt(plan.summaryBudget) },
       { role: "user", content: transcriptToText(older) },
     ],
+    ...(signal ? { signal } : {}),
   })) {
     if (event.type === "text") summary += event.delta;
   }

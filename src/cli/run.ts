@@ -10,6 +10,7 @@ import { allowPredicate } from "../agent/allow";
 import { createDefaultTools } from "../agent/tools";
 import { apiKeyEnvFor, loadConfig, validateConfig, type Config, type FallbackRoute } from "../config";
 import { addGlobalProvider, writeGlobalSettings } from "../settings-write";
+import { keysFilePath, readStoredKeys, writeStoredKey } from "../keys-file";
 import { type AddProviderResult, parseCustomService, serviceByName, serviceRows, SERVICES, serviceApiKey } from "../providers/services";
 import { readConfigFiles } from "../config-file";
 import { writeProjectConfig } from "./init";
@@ -29,18 +30,22 @@ import { FallbackProvider } from "../providers/fallback";
 import { readClipboard } from "../clipboard";
 import { pickFile } from "../pickFile";
 import {
+  clearActiveSessionId,
   deleteSession,
   latestSessionFor,
   listSessions,
   loadSession,
   newSessionId,
   pruneSessions,
+  readActiveSessionId,
   samePath,
   saveSession,
   sessionPreview,
   sessionTitle,
+  writeActiveSessionId,
 } from "../sessions/store";
 import { withoutImages, type ChatMessage } from "../types";
+import { readUsage, recordUsage, renderUsage, summarizeUsage, turnRecord, usageReportJson, type UsageRecord } from "../usage";
 import { buildMentionIndex, expandMentions } from "../mentions";
 import { VERSION } from "../version";
 
@@ -172,6 +177,8 @@ const USAGE = [
   "  -c, --continue             Resume the most recent session for this directory",
   "      --session <id>         Resume a specific session (or `latest`)",
   "      --models               List the models the endpoint serves, then exit",
+  "      --usage                Show recorded token usage (daily and per-model), then exit",
+  "      --json                 With --usage: print the rollup as JSON",
   "      --probe                Test the endpoint: model list, then a tiny chat request,",
   "      --init                 Write the current settings to ./kicode.json",
   "      --no-tui               Use the plain prompt instead of the full-screen UI",
@@ -292,9 +299,28 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
     return 0;
   }
 
+  // Needs nothing — no config, no key, no endpoint — so it runs before all of
+  // them: usage is a local log being read back, not a session.
+  if (flags.usage) {
+    const records = await readUsage().catch((): UsageRecord[] => []);
+    const summary = summarizeUsage(records);
+    if (flags.json) io.writeLine(usageReportJson(summary));
+    else for (const line of renderUsage(summary)) io.writeLine(line);
+    return 0;
+  }
+
   const configFiles = await readConfigFiles(io.cwd);
   const fileSettings = fileSettingsFromEntries(configFiles.entries);
   for (const warning of [...configFiles.warnings, ...fileSettings.warnings]) io.writeError(warning);
+
+  // Keys a previous `/key` (or `/connect` with a pasted key) kept in
+  // `~/.kicode/keys.json` rejoin the environment here, before anything reads
+  // it — so every lookup below behaves as if they had been exported. Only
+  // gaps are filled: a variable the shell already sets wins, and the stored
+  // copy is ignored for the run rather than overwriting it.
+  for (const [name, value] of Object.entries(await readStoredKeys(process.env))) {
+    if (!(process.env[name] ?? "").trim() && value.trim()) process.env[name] = value;
+  }
 
   const config = loadConfig(process.env, fileSettings.settings, {
     apiKey: flags.apiKey,
@@ -401,7 +427,16 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
   if (resuming) {
     const requested = flags.session && flags.session !== "latest" ? flags.session : null;
-    const record = requested ? await loadSession(requested) : await latestSessionFor(io.cwd);
+    let record = requested ? await loadSession(requested) : null;
+    if (!record && !requested) {
+      // The tab that was in front when the UI last closed, rather than the
+      // newest session: a restart returns to where the user was. Anything
+      // unreadable — no pointer, a pruned session, another directory's file —
+      // falls back to the newest session for this directory.
+      const activeId = await readActiveSessionId(io.cwd).catch(() => null);
+      const active = activeId ? await loadSession(activeId).catch(() => null) : null;
+      record = active && samePath(active.cwd, io.cwd) ? active : await latestSessionFor(io.cwd);
+    }
 
     if (record) {
       restored = record.messages;
@@ -537,13 +572,24 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
     const instructions = instructionsFor(cwd);
 
     const model = settings.model ?? config.model;
+    // Which variable a keyless route is missing, so the turn fails naming it
+    // instead of sending an empty Bearer and reading the gateway's 401 back. A
+    // URL nobody named a variable for is keyless by design (a local server)
+    // and gets no hint — its request goes out as before.
+    const keyHintFor = (url: string): string | undefined => {
+      const variable =
+        providers.find((p) => p.baseUrl === url)?.apiKeyEnv ?? SERVICES.find((s) => s.baseUrl === url)?.apiKeyEnv;
+      if (!variable) return undefined;
+      return `No API key for ${hostOf(url)} — set ${variable} in this shell and send again${tuiWanted ? ", or /key to paste one for this session" : ""}.`;
+    };
+    const hinted = (route: FallbackRoute): FallbackRoute => {
+      const hint = keyHintFor(route.baseUrl);
+      return hint ? { ...route, keyHint: hint } : route;
+    };
     // The route in use leads the chain, then whatever `kicode.json` declared as
     // a backup. A single route stays a plain provider, so a session with no
     // fallbacks behaves and errors exactly as it did before this existed.
-    const routes: FallbackRoute[] = [
-      { label: activeProvider ? `${activeProvider}/${model}` : model, provider: activeProvider, baseUrl, apiKey, model },
-      ...config.fallback,
-    ];
+    const routes: FallbackRoute[] = [hinted({ label: activeProvider ? `${activeProvider}/${model}` : model, provider: activeProvider, baseUrl, apiKey, model }), ...config.fallback.map(hinted)];
     // Auto free→free: a free model that just hit its quota is followed by the
     // endpoint's other free models, discovered from its own `/models` list the
     // first time the chain runs dry. Never a paid model, never configured
@@ -636,6 +682,22 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
     if (persist) await pruneSessions().catch(() => undefined);
 
+    // One finished turn's numbers, filed to the machine-wide log. Best-effort:
+    // a usage line is convenience, and a full disk must not fail the run that
+    // produced it. Outside the TUI the session never moves endpoints, so the
+    // config's model and URL are the turn's.
+    const recordTurn = (done: Extract<AgentEvent, { type: "done" }>): void => {
+      const record = turnRecord({
+        model: done.model ?? config.model,
+        baseUrl: config.baseUrl,
+        promptTokens: done.promptTokens ?? 0,
+        completionTokens: done.completionTokens ?? 0,
+        toolCalls: done.toolCalls ?? 0,
+        ms: done.ms ?? 0,
+      });
+      if (record) void recordUsage(record).catch(() => undefined);
+    };
+
     const inlinePrompt = flags.prompt.join(" ").trim();
     if (oneShot) {
       const prompt = inlinePrompt || (await readStdin());
@@ -643,7 +705,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         io.writeError("No prompt given. Pass text as an argument or pipe it on stdin.");
         return 2;
       }
-      await render(agent.send(await withMentions(prompt, io.cwd)), io);
+      await render(agent.send(await withMentions(prompt, io.cwd)), io, recordTurn);
       await save();
       return 0;
     }
@@ -673,11 +735,16 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
         const written = await addGlobalProvider(service.name, {
           baseUrl: service.baseUrl,
-          // No key: it is read from `apiKeyEnv` on every run. `addService`
-          // returns the value for this session only.
+          // No key in the declaration: it is read from `apiKeyEnv` on every
+          // run. A key pasted here is kept in the key file alongside, and
+          // `addService` returns the value for this session either way.
           ...(service.apiKeyEnv ? { apiKeyEnv: service.apiKeyEnv } : {}),
         });
         if (!written.ok) return { ok: false, reason: written.reason };
+        if (directApiKey?.trim() && service.apiKeyEnv) {
+          const kept = await writeStoredKey(service.apiKeyEnv, directApiKey.trim(), process.env);
+          if (!kept.ok) io.writeError(kept.reason);
+        }
 
         const ready = service.apiKeyEnv === undefined || apiKey !== "";
         endpoints.set(service.baseUrl, apiKey);
@@ -717,9 +784,9 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         /** `/settings` writes to the user's own kicode.json, one key at a time. */
         saveView: (patch) => writeGlobalSettings(patch),
         saveProvider: async (name, provider) => {
-          // The key is deliberately not persisted — `addGlobalProvider` has
-          // nowhere to put one. It stays in memory for this session, and the
-          // file records the variable to read it from next time.
+          // The declaration carries no key — `addGlobalProvider` has nowhere
+          // to put one — but a pasted key is still kept in the key file, so
+          // adding a custom endpoint is a one-time act like `/key` is.
           const apiKeyEnv = provider.apiKeyEnv ?? apiKeyEnvFor(name);
           await addGlobalProvider(name, {
             baseUrl: provider.baseUrl,
@@ -728,6 +795,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
           });
           if (provider.apiKey) {
             endpoints.set(provider.baseUrl, provider.apiKey);
+            const kept = await writeStoredKey(apiKeyEnv, provider.apiKey, process.env);
+            if (!kept.ok) io.writeError(kept.reason);
           }
           providers = providers.filter((p) => p.name !== name && p.baseUrl !== provider.baseUrl);
           providers.push({
@@ -740,9 +809,11 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
           activeProvider = name;
         },
         saveApiKey: async (apiKey, baseUrl = config.baseUrl) => {
-          // Usable at once, but held in memory only: the endpoint is declared
-          // with the variable its key belongs in and the value is never
-          // written. Returns that variable so the UI can name it.
+          // Usable at once and kept for the next runs: the endpoint is
+          // declared with the variable its key belongs in, and the value
+          // itself is stored beside it in `~/.kicode/keys.json` — never in
+          // `kicode.json`, which is shown and copied around. Returns that
+          // variable so the UI can name it.
           endpoints.set(baseUrl, apiKey);
           const matched = providers.find((p) => p.baseUrl === baseUrl);
           const name = matched?.name ?? providerNameFor(baseUrl);
@@ -750,6 +821,8 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
           const apiKeyEnv = declared && !declared.startsWith("(") ? declared : apiKeyEnvFor(name);
           const written = await addGlobalProvider(name, { baseUrl, apiKeyEnv });
           if (!written.ok) io.writeError(written.reason);
+          const kept = await writeStoredKey(apiKeyEnv, apiKey, process.env);
+          if (!kept.ok) io.writeError(kept.reason);
           const entry = providers.find((p) => p.name === name);
           if (entry) {
             entry.baseUrl = baseUrl;
@@ -795,6 +868,18 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         },
         deleteSession: async (id) => {
           return await deleteSession(id);
+        },
+        usage: {
+          record: async (record) => {
+            await recordUsage(record);
+          },
+          history: async () => readUsage(),
+        },
+        saveActiveSession: async (cwd, id) => {
+          await writeActiveSessionId(cwd, id);
+        },
+        clearActiveSession: async (cwd, id) => {
+          await clearActiveSessionId(cwd, id);
         },
         // No `.catch` here on purpose: an unreachable or unauthorised gateway
         // and an endpoint that serves nothing must not look the same in /models.
@@ -910,7 +995,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         continue;
       }
 
-      await render(agent.send(await withMentions(prompt, io.cwd)), io);
+      await render(agent.send(await withMentions(prompt, io.cwd)), io, recordTurn);
       await save();
     }
 
@@ -1232,7 +1317,11 @@ function createApprover(io: Io, autoApprove: boolean): ApproveFn | undefined {
 }
 
 /** Renders agent events to the terminal as they arrive. */
-async function render(events: AsyncGenerator<AgentEvent, void, void>, io: Io): Promise<void> {
+async function render(
+  events: AsyncGenerator<AgentEvent, void, void>,
+  io: Io,
+  record?: (done: Extract<AgentEvent, { type: "done" }>) => void,
+): Promise<void> {
   for await (const event of events) {
     switch (event.type) {
       case "text":
@@ -1266,6 +1355,8 @@ async function render(events: AsyncGenerator<AgentEvent, void, void>, io: Io): P
         // A turn that ran out of requests ended on its own account, and the
         // blank line underneath would otherwise be the whole explanation.
         if (event.reason === "max-turns") io.writeLine("\u001b[2mturn budget reached\u001b[0m");
+        // The turn's own cost, filed where `--usage` reads it back.
+        record?.(event);
         io.writeLine();
         break;
     }
@@ -1293,6 +1384,8 @@ type Flags = {
   print: boolean;
   yes: boolean;
   models: boolean;
+  usage: boolean;
+  json: boolean;
   init: boolean;
   probe: boolean;
   tui: boolean;
@@ -1317,6 +1410,8 @@ function parseArgs(argv: string[]): { flags: Flags } | { error: string } {
     print: false,
     yes: false,
     models: false,
+    usage: false,
+    json: false,
     init: false,
     probe: false,
     tui: true,
@@ -1357,6 +1452,14 @@ function parseArgs(argv: string[]): { flags: Flags } | { error: string } {
     }
     if (arg === "--models") {
       flags.models = true;
+      continue;
+    }
+    if (arg === "--usage") {
+      flags.usage = true;
+      continue;
+    }
+    if (arg === "--json") {
+      flags.json = true;
       continue;
     }
     if (arg === "--init") {

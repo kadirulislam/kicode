@@ -102,6 +102,12 @@ export type FallbackRoute = {
   baseUrl: string;
   apiKey: string;
   model: string;
+  /**
+   * What to say when the route has no key to send. Set when the caller knows
+   * which variable is missing; absent means keyless is legitimate and the
+   * request goes out as before.
+   */
+  keyHint?: string;
 };
 
 export type Config = {

@@ -12,8 +12,7 @@ npm install -g @kadirulislam/kicode
 kicode --version
 ```
 
-That is the whole install: KiCode has no runtime dependencies and no account,
-and the `bin` entry resolves to a single bundled file. To run it without
+That is the whole install:KiCode has no runtime dependencies and no account, and the `bin` entry resolves to a single bundled file. It is licensed as a commercial/proprietary product — see the [license](#license). To run it without
 installing globally, `npx @kadirulislam/kicode "…"` works the same way.
 
 ### Connect an endpoint, then set its key
@@ -75,11 +74,7 @@ rather than copying it, so `npm run build` is the only step needed to publish a
 change. It drops a `kicode` shim into npm's global prefix (`npm prefix -g`); on
 Windows that is usually `%APPDATA%\npm`, which is already on `PATH`, so
 `kicode` works from PowerShell, `cmd`, and Git Bash in any directory. To install
-a standalone copy instead of a symlink, `npm install -g .`.
-
-The published package ships a single **minified** `dist/cli.js` (plus the
-README, CHANGELOG and licence), so there is nothing else to install at runtime
-and the shipped bundle does not read as the source it was built from.
+a standalone copy instead of a symlink, `npm install -g .`.The published package ships a single **minified** `dist/cli.js` (plus the README, CHANGELOG and license), so there is nothing else to install at runtime and the shipped bundle does not read as the source it was built from.
 
 ### Pointing it elsewhere
 
@@ -1316,8 +1311,7 @@ Adding a tool is a single file plus one line in `createDefaultTools()`. Set
 
 ## License
 
-KiCode is **proprietary software**, not open source. See [`LICENSE`](LICENSE):
-installing and using it for your own personal or internal business purposes is
-permitted, but copying, redistributing, sublicensing, selling, or reverse
-engineering it is not — with the usual disclaimer of warranty. The npm package
-is published under the `UNLICENSED` identifier for exactly this reason.
+KiCode is **commercial software**. See [`LICENSE`](LICENSE) (a proprietary/
+commercial license) for the exact terms. Installing it for your own personal or
+internal business purposes is permitted; copying, redistributing,
+sublicensing, selling, or reverse engineering it is not.

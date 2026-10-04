@@ -7,7 +7,9 @@ import {
   entriesToText,
   entrySpans,
   formatElapsed,
+  isResultClipped,
   lastThoughtFragment,
+  liveRate,
   summarizeArgs,
   type Entry,
   type EventTiming,
@@ -184,6 +186,27 @@ describe("result lines", () => {
 
     expect(rendered).toContain("a\nb\nc");
   });
+
+  it("names the expand affordance on a clipped result", () => {
+    const rendered = text([result("line one\nline two\nline three")]);
+
+    expect(rendered).toContain("click to expand");
+  });
+
+  it("shows the whole result in place once expanded", () => {
+    const expanded: Entry = { kind: "result", name: "read", content: "line one\nline two\nline three", isError: false, expanded: true };
+    const rendered = text([expanded]);
+
+    expect(rendered).toContain("line three");
+    expect(rendered).toContain("click to collapse");
+  });
+
+  it("knows which results offer expand/collapse", () => {
+    expect(isResultClipped(result("short"), view.verbosity)).toBe(false);
+    expect(isResultClipped(result("line one\nline two"), view.verbosity)).toBe(true);
+    const expanded: Entry = { kind: "result", name: "read", content: "short", isError: false, expanded: true };
+    expect(isResultClipped(expanded, view.verbosity)).toBe(true);
+  });
 });
 
 describe("the line under an answer", () => {
@@ -211,6 +234,20 @@ describe("the line under an answer", () => {
   it("says nothing at all when the setting is off", () => {
     const off = { at: 0, turn: { startedAt: 0, mode: "Build", model: "m", tps: false } };
     expect(feed(answered, off).some((entry) => entry.kind === "meta")).toBe(false);
+  });
+
+  it("estimates the live speed from streamed characters, four to a token", () => {
+    // 400 chars in a second is 100 tokens in a second.
+    expect(liveRate(400, 1000)).toBe("100.0 tok/s");
+    expect(liveRate(40, 2000)).toBe("5.0 tok/s");
+  });
+
+  it("shows no live speed before there is anything worth dividing", () => {
+    // The first delta would read as thousands of tokens per second, which is
+    // arithmetic, not information — and nothing streamed is nothing to say.
+    expect(liveRate(400, 0)).toBe(null);
+    expect(liveRate(400, 200)).toBe(null);
+    expect(liveRate(0, 5000)).toBe(null);
   });
 
   it("says what a compaction aimed at, not only how far it fell", () => {

@@ -4,6 +4,7 @@ import { buildStyles, darkTheme } from "./theme";
 
 describe("markdownSpans with syntax highlighting", () => {
   const styles = buildStyles(darkTheme);
+  const spansText = (spans: { text: string }[]): string => spans.map((s) => s.text).join("");
 
   it("renders headings, bold, inline code and bullets", () => {
     const input = "# Title\n- **item 1**\n- `code`";
@@ -51,5 +52,59 @@ describe("markdownSpans with syntax highlighting", () => {
     expect(addSpan?.style).toBe(styles.ok);
     const delSpan = spans.find((s) => s.text === "- removed line");
     expect(delSpan?.style).toBe(styles.error);
+  });
+
+  it("renders a pipe table with aligned columns", () => {
+    const input = "| name | size |\n| --- | --- |\n| src | 12 |\n| tests | 120 |";
+    const spans = markdownSpans(input, styles, 80);
+    const text = spans.map((s) => s.text).join("");
+
+    expect(text).toContain("name");
+    expect(text).toContain("src");
+    expect(text).toContain("│");
+    // Header and body rows share column edges: the separator sits in the
+    // same column on every row.
+    const rows = text.split("\n");
+    const headerBar = rows[0]?.indexOf("│") ?? -1;
+    expect(headerBar).toBeGreaterThan(0);
+    for (const row of rows.slice(2)) {
+      if (!row.trim()) continue;
+      expect(row.indexOf("│")).toBe(headerBar);
+    }
+  });
+
+  it("degrades a wide table to key/value lines at a narrow width", () => {
+    const input = "| name | description |\n| --- | --- |\n| src | the source directory with all code |";
+    const text = spansText(markdownSpans(input, styles, 20));
+
+    expect(text).not.toContain("│");
+    expect(text).toContain("name: src");
+    expect(text).toContain("description: the source directory with all code");
+  });
+
+  it("renders nested and ordered lists with indentation", () => {
+    const input = "- top\n  - nested\n    - deep\n1. first\n2. second";
+    const text = spansText(markdownSpans(input, styles));
+
+    expect(text).toContain("• top");
+    expect(text).toContain("  ◦ nested");
+    expect(text).toContain("    – deep");
+    expect(text).toContain("1. first");
+    expect(text).toContain("2. second");
+  });
+
+  it("renders task list items with their own glyphs", () => {
+    const text = spansText(markdownSpans("- [ ] open\n- [x] done", styles));
+
+    expect(text).toContain("○ open");
+    expect(text).toContain("✓ done");
+    expect(text).not.toContain("[ ]");
+  });
+
+  it("leaves non-tables with pipes alone", () => {
+    const text = spansText(markdownSpans("a | b without a delimiter row", styles));
+
+    expect(text).toContain("a | b without a delimiter row");
+    expect(text).not.toContain("│");
   });
 });

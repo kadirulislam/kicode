@@ -32,7 +32,8 @@
     "openai-compatible"
   ],
   "author": "Kadirul Islam",
-  "license": "UNLICENSED",
+  "license": "proprietary",
+  "licenseFile": "LICENSE",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/kadirulislam/kicode.git"

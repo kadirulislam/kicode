@@ -102,6 +102,16 @@ describe("frame geometry", () => {
     }
   });
 
+  it("keeps a modal's centering offset on the page background", () => {
+    // Same smear as the menu card had: the offset left of a centered box must
+    // not wear the modal fill to the screen's left edge.
+    const { frame } = draw({ modal: permission() }, { cols: 160, rows: 30 });
+    const raw = frame.lines.find((line) => strip(line).includes("allow?")) ?? "";
+    const pageAt = raw.indexOf(bg(theme.bg));
+    expect(pageAt).toBeGreaterThanOrEqual(0);
+    expect(pageAt).toBeLessThan(raw.indexOf("allow?"));
+  });
+
   it("never draws into the last column", () => {
     // Writing the final cell can make the terminal wrap and scroll, which would
     // shift the whole UI by a row.
@@ -261,6 +271,18 @@ describe("the home screen", () => {
     // So "why is it using that model" is answerable without leaving the UI.
     expect(draw({ config: "C:\\Users\\me\\.kicode\\kicode.json" }).plain.join("\n")).toContain("config: C:\\Users");
   });
+
+  it("compresses the wordmark's air rather than cutting the MCP and config lines", () => {
+    // Twenty-two rows leave eleven for the page while the block wants fifteen:
+    // the four blank separators go, and every content row survives.
+    const text = draw(
+      { mcp: "docs, remote", config: "C:\\Users\\me\\.kicode\\kicode.json" },
+      { cols: 80, rows: 22 },
+    ).plain.join("\n");
+
+    expect(text).toContain("MCP: docs, remote");
+    expect(text).toContain("config: C:\\Users");
+  });
 });
 
 describe("the transcript", () => {
@@ -331,6 +353,26 @@ describe("the transcript", () => {
     expect(text).toContain("src/config.ts");
     expect(text).not.toContain("**");
   });
+
+  it("offers a clipped tool result as a click target, by entry index", () => {
+    const entries: Entry[] = [
+      { kind: "user", text: "go" },
+      { kind: "tool", name: "read", args: { file_path: "src/app.ts" } },
+      { kind: "result", name: "read", content: "line one\nline two\nline three", isError: false },
+    ];
+    const { frame } = draw({ entries });
+
+    const hits = frame.rows.filter((row) => row.kind === "result");
+    expect(hits.length).toBeGreaterThan(0);
+    expect(hits.every((hit) => hit.index === 2)).toBe(true);
+  });
+
+  it("leaves a short tool result with no click target", () => {
+    const entries: Entry[] = [{ kind: "result", name: "read", content: "ok", isError: false }];
+    const { frame } = draw({ entries });
+
+    expect(frame.rows.some((row) => row.kind === "result")).toBe(false);
+  });
 });
 
 describe("the bottom bar", () => {
@@ -368,10 +410,17 @@ describe("the bottom bar", () => {
     const { plain } = draw({ cwd: "C:\\dev\\kicode", usage: { tokens: 304_800, budget: 1_048_576, tools: 4 } });
     const footer = plain.at(-1) ?? "";
 
-    expect(footer.trimStart().startsWith("C:\\dev\\kicode")).toBe(true);
+    // The settings glyph trails the row past the usage numbers.
+    expect(footer).toContain("⚙");
+    expect(footer).not.toContain("[⚙]");
+    // The path starts in the same gutter the prompt box and the state row
+    // keep — one left edge for the whole bottom block, not two.
+    expect(footer.startsWith("    C:\\dev\\kicode")).toBe(true);
+    expect(footer).toContain("C:\\dev\\kicode");
     expect(footer).toContain("↓ 4 tools");
     expect(footer).toContain("304.8K");
     expect(footer).toContain("(29%)");
+    expect(footer.indexOf("⚙")).toBeGreaterThan(footer.indexOf("304.8K"));
     expect(footer).not.toContain("ctrl+p");
   });
 
@@ -1465,7 +1514,7 @@ describe("the box's own two buttons", () => {
     // these cells and nothing else. The pill is the mode's own word, so its
     // width is not knowable from outside — this is the only copy of it.
     expect(row.slice(box.modeButton.colStart - 1, box.modeButton.colEnd)).toBe("[BUILD]");
-    expect(row.slice(box.uploadButton.colStart - 1, box.uploadButton.colEnd)).toBe("UPLOAD[+]");
+    expect(row.slice(box.uploadButton.colStart - 1, box.uploadButton.colEnd)).toBe("UPLOAD [+]");
     // Neither of them sits on the text: the pill ends before the words begin and
     // the button starts after them.
     expect(box.modeButton.colEnd).toBeLessThan(box.textLeft);
@@ -1478,11 +1527,43 @@ describe("the box's own two buttons", () => {
     const { frame } = draw({ editor });
     const box = frame.prompt!;
 
-    // One row each: a pill or a `UPLOAD[+]` beside every wrapped row would read
+    // One row each: a pill or a `UPLOAD [+]` beside every wrapped row would read
     // as a column of buttons, and one press would have to say which it meant.
     expect(box.rows.length).toBeGreaterThan(1);
     expect(box.modeButton.row).toBe(box.rows[0]?.row);
     expect(box.uploadButton.row).toBe(box.rows[0]?.row);
+  });
+});
+
+describe("prompt badges", () => {
+  it("puts the caret right after the text, not a badge-width past it", () => {
+    const editor = new LineEditor();
+    editor.setText("ssss");
+    const { frame, plain } = draw({ editor, attachedImages: 1 });
+    const box = frame.prompt!;
+
+    // The bug this pins: the badge width was counted in `textLeft` and again
+    // in the caret column, so the terminal caret sat ~10 cells right of the
+    // text it belonged to.
+    expect(box.badgeWidth).toBe("[Image 1] ".length);
+    const row = plain[box.rows[0]!.row - 1] ?? "";
+    expect(row).toContain("[Image 1] ssss");
+    expect(frame.caret?.row).toBe(box.rows[0]?.row);
+    expect(frame.caret?.col).toBe(box.textLeft + "ssss".length);
+  });
+
+  it("reports the badge run's columns ahead of the text", () => {
+    const editor = new LineEditor();
+    editor.setText("hi");
+    const { frame, plain } = draw({ editor, attachedImages: 1, attachedDocs: ["notes.md"] });
+    const box = frame.prompt!;
+
+    expect(box.badgeWidth).toBe("[Image 1] ".length + "[notes.md] ".length);
+    const row = plain[box.rows[0]!.row - 1] ?? "";
+    // The detach hit-test starts here, so the badges must actually be drawn
+    // in these columns rather than merely reported.
+    expect(row.slice(box.textLeft - box.badgeWidth - 1, box.textLeft - 1)).toBe("[Image 1] [notes.md] ");
+    expect(frame.caret?.col).toBe(box.textLeft + "hi".length);
   });
 });
 
@@ -1494,10 +1575,10 @@ describe("the queue above the box", () => {
     expect(draw({ busy: "thinking…" }).plain.join("\n")).not.toContain("ADD[+]");
 
     const running = draw({ busy: "thinking…" });
-    expect(running.plain.join("\n")).toContain("UPLOAD[+]");
+    expect(running.plain.join("\n")).toContain("UPLOAD [+]");
     const box = running.frame.prompt!;
     const row = running.plain[box.uploadButton.row - 1] ?? "";
-    expect(row.slice(box.uploadButton.colStart - 1, box.uploadButton.colEnd)).toBe("UPLOAD[+]");
+    expect(row.slice(box.uploadButton.colStart - 1, box.uploadButton.colEnd)).toBe("UPLOAD [+]");
   });
 
   it("puts [Add+] before [x] on every tile, each with its own columns", () => {
@@ -1550,6 +1631,28 @@ describe("the usage chip", () => {
     const todo = frame.rows.find((row) => row.kind === "todo_button")!;
     const usage = frame.rows.find((row) => row.kind === "usage_button")!;
     expect(todo.colEnd!).toBeLessThan(usage.colStart!);
+  });
+});
+
+describe("the settings button", () => {
+  it("trails the footer past the usage, and reports its own columns", () => {
+    // The mouse way to reach what `/settings` does by name: a bare bold glyph
+    // at the footer's right end, past the numbers, while no card owns the
+    // screen.
+    const { frame, plain } = draw({ usage: { tokens: 1700, budget: 128_000, tools: 0 } });
+    const hit = frame.rows.find((row) => row.kind === "settings_button");
+    expect(hit).toBeDefined();
+    const line = plain[hit!.row - 1] ?? "";
+    expect(line.slice(hit!.colStart! - 1, hit!.colEnd!)).toBe("⚙");
+    expect(line.indexOf("⚙")).toBeGreaterThan(line.indexOf("1.7K"));
+    expect(line.trimEnd().endsWith("⚙")).toBe(true);
+  });
+
+  it("hides while a card owns the screen", () => {
+    // A button that visibly does nothing is worse than one that is not there:
+    // the panel it opens is hidden behind the card, like the state row's chips.
+    const { frame } = draw({ modal: permission() });
+    expect(frame.rows.some((row) => row.kind === "settings_button")).toBe(false);
   });
 });
 
@@ -1792,9 +1895,13 @@ describe("the rows a click can land on", () => {
   });
 
   it("reports only the transcript's own targets, and the card's when one is up", () => {
-    // The transcript itself is not clickable; the one target an idle frame has
-    // is the `[USAGE]` chip on the state row.
-    expect(draw({ entries: conversation }).frame.rows.map((row) => row.kind)).toEqual(["usage_button"]);
+    // The transcript itself is not clickable; the targets an idle frame has
+    // are the `[USAGE]` chip on the state row and the `[⚙]` button on the
+    // footer's left end.
+    expect(draw({ entries: conversation }).frame.rows.map((row) => row.kind)).toEqual([
+      "usage_button",
+      "settings_button",
+    ]);
     // A card owns the screen: its own chips and the footer's close box are the
     // only things left to press.
     const card = draw({ entries: conversation, modal: permission() }).frame.rows;
@@ -1818,7 +1925,9 @@ describe("the menu panel", () => {
   });
 
   it("draws a title, the way out, a search field and a footer of its own", () => {
-    const { plain } = draw({ menu: menu({ description: "Colours for the whole screen." }) });
+    const { plain } = draw({
+      menu: menu({ description: "Colours for the whole screen.", descriptionWidth: 40 }),
+    });
 
     const body = plain.join("\n");
     expect(body).toContain("Settings");
@@ -1829,6 +1938,32 @@ describe("the menu panel", () => {
     expect(body).toContain("‹/› change · [×] close");
     // The description of the highlighted row, so a value is never a mystery.
     expect(body).toContain("Colours for the whole screen.");
+  });
+
+  it("keeps the card width when the highlighted row — and its description — changes", () => {
+    // The description names the row under the cursor, so sizing by the current
+    // sentence resized the card on every hover: the whole panel jumped
+    // sideways as the cursor moved. The card is sized by the widest sentence
+    // instead, so every row fits and nothing moves. Geometry is leading
+    // whitespace here — the card is centered, so any width change moves every
+    // row's indent.
+    const indents = (plain: string[]): number[] => plain.map((line) => line.length - line.trimStart().length);
+    const rows = menu().rows;
+    const short = draw({ menu: menu({ rows, selected: 0, description: "Short.", descriptionWidth: 64 }) });
+    const long = draw({
+      menu: menu({
+        rows,
+        selected: 2,
+        description: "Whether the sidebar shows every session or just current ones.",
+        descriptionWidth: 64,
+      }),
+    });
+
+    // Both sentences fit in full — sizing by the longest means no truncation
+    // anywhere, not just a steady width.
+    expect(short.plain.join("\n")).toContain("Short.");
+    expect(long.plain.join("\n")).toContain("or just current ones.");
+    expect(indents(short.plain)).toEqual(indents(long.plain));
   });
 
   it("prints a heading above each run of rows, and names every value", () => {
@@ -1897,6 +2032,83 @@ describe("the menu panel", () => {
       const { frame } = draw({ menu: menu({ description: "Colours for the whole screen." }) }, size);
       expect(frame.lines, `${size.cols}x${size.rows}`).toHaveLength(size.rows);
     }
+  });
+
+  it("leaves air inside the card's edges, like the reference", () => {
+    const { plain } = draw({ menu: menu() }, { cols: 120, rows: 30 });
+    const title = plain.find((line) => line.includes("Settings")) ?? "";
+    const theme = plain.find((line) => line.includes("Theme")) ?? "";
+    const footer = plain.find((line) => line.includes("‹/›")) ?? "";
+    // The card is one solid rectangle: every row runs the same width.
+    const widths = new Set([title.length, theme.length, footer.length]);
+    expect(widths.size).toBe(1);
+    // With room to spare past the text — the fill does not hug the glyphs.
+    for (const line of [title, theme, footer]) {
+      expect(line.length - line.trimEnd().length).toBeGreaterThanOrEqual(2);
+    }
+    // And air above the title and below the footer: blank fill rows.
+    const titleAt = plain.findIndex((line) => line.includes("Settings"));
+    expect(plain[titleAt - 1]?.trim()).toBe("");
+    const footerAt = plain.findIndex((line) => line.includes("‹/›"));
+    expect(plain[footerAt + 1]?.trim()).toBe("");
+  });
+
+  it("blacks out the page behind the card instead of fading it", () => {
+    const transcript: Entry[] = [
+      { kind: "user", text: "why is the build failing?" },
+      { kind: "assistant", text: "Because src/config.ts is missing a default." },
+    ];
+    const { plain } = draw({ menu: menu(), entries: transcript }, { cols: 120, rows: 30 });
+
+    // The conversation is gone from the body — the modal owns the backdrop.
+    // (The footer names no transcript text, so any match is the page showing.)
+    expect(plain.join("\n")).not.toContain("why is the build failing?");
+    expect(plain.join("\n")).toContain("Settings");
+  });
+
+  it("hugs its content instead of spreading to a fixed width", () => {
+    const { plain } = draw({ menu: menu() }, { cols: 120, rows: 30 });
+    // The card's own rows, not the tab bar or the state row below it.
+    const card = plain.filter((line) => line.includes("Settings") || line.includes("Theme") || line.includes("‹/›"));
+    const widest = Math.max(...card.map((line) => line.trimEnd().length - (line.length - line.trimStart().length)));
+
+    // Five short rows must not make a 76-wide card: the air is what read as
+    // shifted rather than centered.
+    expect(widest).toBeLessThan(76);
+  });
+
+  it("floats centered as a modal, with the page around it", () => {
+    const size = { cols: 120, rows: 30 };
+    const { frame, plain } = draw({ menu: menu() }, size);
+
+    // The card is capped, not full-width: page on both sides of every row.
+    const row = plain.find((line) => line.includes("Theme")) ?? "";
+    const left = row.length - row.trimStart().length;
+    expect(left).toBeGreaterThan(2);
+    expect(row.trimEnd().length).toBeLessThan(size.cols - 1 - 2);
+    // And centered: roughly as much air left as right.
+    expect(Math.abs(left - (size.cols - 1 - row.trimEnd().length))).toBeLessThanOrEqual(2);
+
+    // The margins are page, not card fill: the centering offset must not wear
+    // the panel surface to the screen's left edge (the smear that read as a
+    // second panel beside the card). Pin surfaces, not columns.
+    const raw = frame.lines.find((line) => strip(line).includes("Theme")) ?? "";
+    const pageAt = raw.indexOf(bg(theme.bg));
+    expect(pageAt).toBeGreaterThanOrEqual(0);
+    expect(pageAt).toBeLessThan(raw.indexOf("Theme"));
+
+    // Air above and below, not docked at the rule: the transcript's
+    // background frames it on all four sides.
+    const surface = bg(theme.panel);
+    const first = frame.lines.findIndex((line) => line.includes(surface));
+    const last = frame.lines.map((line) => line.includes(surface)).lastIndexOf(true);
+    expect(first).toBeGreaterThan(1);
+    expect(last).toBeLessThan(size.rows - 5);
+
+    // The rows still report where they landed, so a press finds them.
+    const hits = frame.rows.filter((r) => r.kind === "menu");
+    expect(hits.map((r) => r.index)).toEqual([0, 1, 2, 3]);
+    for (const hit of hits) expect(plain[hit.row - 1]).toContain(menu().rows[hit.index]?.label ?? "");
   });
 });
 

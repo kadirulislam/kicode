@@ -75,7 +75,7 @@ export type AgentEvent =
    * long the model took, and how fast it wrote. Both are absent when they are
    * not known, and the line is simply not drawn.
    */
-  | { type: "done"; reason: "complete" | "max-turns" | "budget"; ms?: number; completionTokens?: number; model?: string };
+  | { type: "done"; reason: "complete" | "max-turns" | "budget"; ms?: number; completionTokens?: number; model?: string; promptTokens?: number; toolCalls?: number };
 
 export type ApprovalRequest = {
   id: string;
@@ -303,6 +303,16 @@ export class Agent {
     return estimateTokens(this.messages);
   }
 
+  /** How many tools the next request offers — the `/context` system row. */
+  get toolCount(): number {
+    return this.tools.list().length;
+  }
+
+  /** The tool declarations, in request shape — estimated into the system row. */
+  get toolSpecTokens(): number {
+    return estimateTokens(this.tools.specs());
+  }
+
   /** Tokens the provider has reported for this session. */
   get spentTokens(): number {
     return this.spent;
@@ -336,13 +346,14 @@ export class Agent {
   /**
    * Summarises now, whether or not the window is full, so `/compact` can be
    * asked for rather than only waited for. Returns null when there is nothing
-   * to summarise or the summariser failed.
+   * to summarise or the summariser failed. A signal stops a summariser that is
+   * not answering — the caller (Ctrl+C on a manual run) owns it.
    */
-  async compactNow(): Promise<{ before: number; after: number; summarized: number; target: number } | null> {
+  async compactNow(signal?: AbortSignal): Promise<{ before: number; after: number; summarized: number; target: number } | null> {
     const before = estimateTokens(this.messages);
     // Explicit, so the pass runs whether or not the window is full: this is the
     // one compaction the user asked for by name.
-    const result = await this.summarise(true);
+    const result = await this.summarise(true, signal);
     if (!result) return null;
     return { before, after: estimateTokens(this.messages), summarized: result.summarized, target: result.target };
   }
@@ -492,12 +503,18 @@ export class Agent {
     // user actually sat through.
     const startedAt = Date.now();
     let completionTokens = 0;
+    // The turn's own cost ledger, for the machine-wide usage file: what the
+    // provider reported across this turn's requests, and how many tools ran.
+    let promptTokens = 0;
+    let toolCalls = 0;
     const done = (reason: "complete" | "max-turns" | "budget"): AgentEvent => ({
       type: "done",
       reason,
       ms: Date.now() - startedAt,
       model: this.model,
       ...(completionTokens > 0 ? { completionTokens } : {}),
+      ...(promptTokens > 0 ? { promptTokens } : {}),
+      ...(toolCalls > 0 ? { toolCalls } : {}),
     });
 
     // How many replies in a row were not answers. Reset by any turn that ran a
@@ -560,6 +577,7 @@ export class Agent {
             assistant = event.message;
             finishReason = event.finishReason;
             this.countUsage(event.usage);
+            promptTokens += event.usage?.promptTokens ?? 0;
             completionTokens += event.usage?.completionTokens ?? 0;
           }
         }
@@ -742,6 +760,9 @@ export class Agent {
         }
 
         yield { type: "tool-start", id: call.id, name, args };
+        // Past approval and refusal: this call runs, so it counts — toward
+        // the turn's own ledger, not just the session total.
+        toolCalls += 1;
 
         let content: string;
         let isError = false;
@@ -835,12 +856,12 @@ export class Agent {
    * A failed summary is not fatal: going over budget is better than losing the
    * conversation, so the caller carries on either way.
    */
-  private async summarise(manual = false): Promise<{ summarized: number; target: number } | null> {
+  private async summarise(manual = false, signal?: AbortSignal): Promise<{ summarized: number; target: number } | null> {
     if (!this.compaction) return null;
 
     try {
       const options = manual ? { ...this.compaction, manual: true } : this.compaction;
-      const result = await compactMessages(this.provider, this.model, this.messages, options);
+      const result = await compactMessages(this.provider, this.model, this.messages, options, signal);
       if (!result) return null;
       this.messages.splice(0, this.messages.length, ...result.messages);
       return { summarized: result.summarized, target: result.target };

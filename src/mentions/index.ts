@@ -20,6 +20,12 @@ import { walkFiles } from "../agent/tools/walk";
 
 export type MentionKind = "file" | "dir" | "skill" | "project";
 
+/** Where a skill came from: this user's own sessions, or an installed set. */
+export type SkillSource = "learned" | "installed";
+
+/** One place skills are read from, in the order they are read. */
+export type SkillRoot = { dir: string; source: SkillSource };
+
 export type MentionItem = {
   kind: MentionKind;
   /** What is shown and, after `@`, what goes back into the prompt. */
@@ -35,7 +41,7 @@ export type MentionIndex = {
   brain: string | null;
   files: string[];
   dirs: string[];
-  skills: { name: string; description: string; file: string }[];
+  skills: { name: string; description: string; file: string; source: SkillSource }[];
   projects: { slug: string; file: string }[];
 };
 
@@ -162,13 +168,34 @@ function isDirSync(file: string): boolean {
 }
 
 /**
+ * Where skills are read from, in order.
+ *
+ * The brain first — a skill this user's own sessions wrote shadows an
+ * installed one of the same name — then the `.agents/skills/` convention the
+ * `npx skills` CLI installs to, project level before user level. `homeDir`
+ * defaults to the real home and is only ever passed by tests, so the suite
+ * never depends on (or touches) the machine's own `~/.agents/`.
+ */
+export function skillRoots(cwd: string, env: NodeJS.ProcessEnv = process.env, homeDir: string = os.homedir()): SkillRoot[] {
+  const roots: SkillRoot[] = [];
+  const brain = resolveBrainDirSync(env, cwd);
+  if (brain) roots.push({ dir: path.join(brain, "skills"), source: "learned" });
+  roots.push({ dir: path.join(path.resolve(cwd), ".agents", "skills"), source: "installed" });
+  roots.push({ dir: path.join(homeDir, ".agents", "skills"), source: "installed" });
+  return roots;
+}
+/**
  * Builds the completion index for a directory.
  *
  * Bounded everywhere: the file walk is capped, skill bodies are never read
  * here (frontmatter only — a body is read only when its mention is expanded),
  * and project memories are names only. The whole brain is never loaded.
  */
-export async function buildMentionIndex(cwd: string, env: NodeJS.ProcessEnv = process.env): Promise<MentionIndex> {
+export async function buildMentionIndex(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = os.homedir(),
+): Promise<MentionIndex> {
   const brain = await resolveBrainDir(env, cwd);
   const walked = await walkFiles({ root: cwd, maxEntries: MAX_FILES }).catch(() => ({ files: [], truncated: true }));
   const files = walked.files.map((file) => path.relative(cwd, file).split(path.sep).join("/")).sort();
@@ -178,24 +205,38 @@ export async function buildMentionIndex(cwd: string, env: NodeJS.ProcessEnv = pr
     for (let depth = 1; depth < parts.length; depth++) dirSet.add(parts.slice(0, depth).join("/"));
   }
 
-  let skills: MentionIndex["skills"] = [];
+  // Skills come from every root, not just the brain: an installed set is
+  // completable the moment it is on disk, brain or no brain.
+  const skills = await indexSkillsFromRoots(skillRoots(cwd, env, homeDir));
   let projects: MentionIndex["projects"] = [];
   if (brain) {
-    skills = await indexSkills(path.join(brain, "skills"));
     projects = await indexProjects(path.join(brain, "memories", "projects"));
   }
   return { cwd, brain, files, dirs: [...dirSet].sort(), skills, projects };
 }
 
-async function indexSkills(root: string): Promise<MentionIndex["skills"]> {
-  const walked = await walkFiles({ root, maxEntries: MAX_SKILL_FILES }).catch(() => ({ files: [], truncated: true }));
+/**
+ * Every `SKILL.md` under each root, frontmatter only — never a body.
+ *
+ * One shared cap across roots, and the first root wins a name: the brain's
+ * own skill shadows an installed one of the same name, and the project's
+ * shadows the user's. Installed roots are never written, only read — that
+ * separation is what keeps a registry from touching what sessions wrote.
+ */
+export async function indexSkillsFromRoots(roots: readonly SkillRoot[]): Promise<MentionIndex["skills"]> {
   const out: MentionIndex["skills"] = [];
-  for (const file of walked.files) {
-    if (path.basename(file) !== "SKILL.md") continue;
-    const front = await readFrontmatter(file);
-    if (!front) continue;
-    out.push({ ...front, file });
+  const seen = new Set<string>();
+  for (const root of roots) {
     if (out.length >= MAX_SKILL_FILES) break;
+    const walked = await walkFiles({ root: root.dir, maxEntries: MAX_SKILL_FILES }).catch(() => ({ files: [], truncated: true }));
+    for (const file of walked.files) {
+      if (out.length >= MAX_SKILL_FILES) break;
+      if (path.basename(file) !== "SKILL.md") continue;
+      const front = await readFrontmatter(file);
+      if (!front || seen.has(front.name)) continue;
+      seen.add(front.name);
+      out.push({ ...front, file, source: root.source });
+    }
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -247,7 +288,7 @@ export function completeMention(index: MentionIndex, query: string): MentionItem
     ...index.skills.map((skill): MentionItem => ({
       kind: "skill",
       label: `skill:${skill.name}`,
-      description: skill.description || "skill",
+      description: skill.source === "installed" ? `${skill.description || "skill"} (installed)` : skill.description || "skill",
     })),
     ...index.projects.map((project): MentionItem => ({
       kind: "project",

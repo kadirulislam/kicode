@@ -3,7 +3,7 @@ import type { ChatMessage, ChatRequest, Provider, StreamEvent } from "../types";
 import type { FallbackRoute } from "../config";
 import type { RouteOutcome } from "../routes/health";
 import { FallbackProvider, fallbackReason, isRetryable } from "./fallback";
-import { ProviderError } from "./openai";
+import { MissingKeyError, OpenAIProvider, ProviderError } from "./openai";
 
 const route = (model: string, label = model): FallbackRoute => ({
   label,
@@ -72,6 +72,55 @@ describe("fallbackReason", () => {
     expect(fallbackReason(new ProviderError("x", 429))).toBe("rate-limited (HTTP 429)");
     expect(fallbackReason(new ProviderError("x", 402))).toBe("out of credit (HTTP 402)");
     expect(fallbackReason(new ProviderError("x"))).toBe("unreachable");
+  });
+
+  it("names a missing key, which the chain walks past", () => {
+    expect(isRetryable(new MissingKeyError("No API key for gw.example — set GW_API_KEY."))).toBe(true);
+    expect(fallbackReason(new MissingKeyError("No API key for gw.example — set GW_API_KEY."))).toBe("no API key");
+  });
+});
+
+describe("routes with no key", () => {
+  it("walks past a route with no key to one that has", async () => {
+    // The keyless hop is the real provider: it throws before any request, so
+    // this test touches no network and still proves the guard fires in-chain.
+    const keyless = new OpenAIProvider({
+      apiKey: "",
+      baseUrl: "https://gw.example/v1",
+      missingKeyHint: "No API key for gw.example — set GW_API_KEY.",
+    });
+    const provider = new FallbackProvider({
+      routes: [{ ...route("a"), apiKey: "", keyHint: "No API key for gw.example — set GW_API_KEY." }, route("b")],
+      makeProvider: (r) => (r.model === "a" ? keyless : answering("hello")),
+      wait: async () => undefined,
+    });
+
+    const events = await collect(provider);
+
+    expect(events[0]).toEqual({ type: "route", from: "a", to: "b", reason: "no API key" });
+    expect(events.some((event) => event.type === "text" && event.delta === "hello")).toBe(true);
+  });
+
+  it("says which variable is missing when the only route has no key", async () => {
+    const provider = new FallbackProvider({
+      routes: [{ ...route("a"), apiKey: "", keyHint: "No API key for gw.example — set GW_API_KEY." }],
+      wait: async () => undefined,
+    });
+
+    await expect(collect(provider)).rejects.toThrow("No API key for gw.example");
+  });
+
+  it("names the missing key on every route when none has one", async () => {
+    const hint = "No API key for gw.example — set GW_API_KEY.";
+    const provider = new FallbackProvider({
+      routes: [
+        { ...route("a"), apiKey: "", keyHint: hint },
+        { ...route("b"), apiKey: "", keyHint: hint },
+      ],
+      wait: async () => undefined,
+    });
+
+    await expect(collect(provider)).rejects.toThrow(/Every route failed — a \(no API key\), b \(no API key\)/);
   });
 });
 

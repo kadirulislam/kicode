@@ -60,9 +60,10 @@ impossible to tell which one blew the context.
   **the intelligence ships in the binary and is on for everyone**, and the whole
   marketplace can be deleted without changing the CLI.
 
-The remaining piece of this section is the seam that lets KiCode read what the
-`npx skills` CLI installs (the `.agents/skills/` convention first, then a
-first-class `kicode` entry upstream) — Phase B and C of ADR-032.
+The remaining piece of this section is now the upstream half: a first-class
+`kicode` entry in the `npx skills` CLI's agent table (Phase C of ADR-032,
+built as ADR-042's follow-up) — Phase B, reading the `.agents/skills/`
+convention, is done.
 
 ## 2. Hermes Agent
 

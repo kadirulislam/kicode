@@ -27,10 +27,12 @@ import {
   setColorEnabled,
   sliceCells,
   span,
+  textWidth,
   type Span,
 } from "./ansi";
 import { COMMANDS, commandQuery, filterCommands, isAvailable, stepSelectable, type Command } from "./commands";
 import { LineEditor } from "./editor";
+import { keysFilePath } from "../keys-file";
 import { KeyDecoder, type Key, type MouseKey } from "./keys";
 import {
   DEFAULT_VARIANT,
@@ -97,7 +99,10 @@ import { SKILLS_HEADING, brainBriefing, projectSlug, readBrain, trashSkill } fro
 import { planFromHistory } from "../agent/tools/plan";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
-import { applyEvent, entriesFromHistory, entriesToText, summarizeArgs, type Entry, type Tone } from "./transcript";
+import { renderUsage, summarizeUsage, totalsLine, turnRecord, type UsageRecord } from "../usage";
+import { brainSections } from "../agent/brain";
+import { renderContext, summarizeContext } from "../context";
+import { applyEvent, entriesFromHistory, entriesToText, liveRate, summarizeArgs, type Entry, type Tone } from "./transcript";
 import { readAttachedFile, docBlock, type AttachedDoc } from "./attach";
 
 /**
@@ -378,6 +383,14 @@ export type TuiOptions = {
     mode?: SessionMode;
     variant?: string;
   }) => Promise<void>;
+  /**
+   * Remembers which tab is in front for a directory, so a restart with
+   * `--continue` returns to it rather than to the newest session. Absent in
+   * preview renders and in tests that do not care; every call is best-effort.
+   */
+  saveActiveSession?: (cwd: string, id: string) => Promise<void>;
+  /** Forgets the remembered tab, but only when it names `id`. */
+  clearActiveSession?: (cwd: string, id: string) => Promise<void>;
   newSessionId: () => string;
   initial: { id: string; createdAt: string; messages?: ChatMessage[] };
   /** Connected MCP servers, shown on the home screen. */
@@ -476,6 +489,19 @@ export type TuiOptions = {
     list: () => Promise<RouteHealthLine[]>;
     /** Writes whatever the store's debounce was still holding. */
     flush: () => Promise<void>;
+  };
+  /**
+   * Machine-wide usage tracking: counts per finished turn, filed locally.
+   *
+   * Absent when nothing is recording it: a preview render, or a test. `/usage`
+   * then says so rather than showing a state it does not have, and `/stats`
+   * stays session-scoped.
+   */
+  usage?: {
+    /** Files one finished turn's numbers to the machine-wide log. */
+    record: (record: UsageRecord) => Promise<void>;
+    /** Reads the machine-wide log for `/usage` and `/stats`. */
+    history: () => Promise<UsageRecord[]>;
   };
   /** The diff for `/review`, or null when there is nothing to review. */
   gitDiff?: (scope: string, cwd: string) => Promise<string | null>;
@@ -799,6 +825,14 @@ class TuiApp {
   private spinnerTimer: NodeJS.Timeout | null = null;
   private scroll = 0;
   private notice: Span | null = null;
+  /**
+   * The launch config notice (usually "no key") held back from a fresh
+   * session's transcript: with any entry at all the home screen gives way to a
+   * page carrying only the warning, so on an empty session it waits for the
+   * first chat send instead. Cleared once shown, or once a credential is
+   * established through the UI.
+   */
+  private deferredNotice: string | null = null;
   private modal: Modal | null = null;
   /** The key a click on a card named, to be answered as if it had been typed. */
   private clickedKey: Key | null = null;
@@ -923,9 +957,15 @@ class TuiApp {
     void this.ensureMentionIndex().catch(() => undefined);
     await this.refreshTabs();
 
-    // Pushed before the first draw so it is the first thing read on the screen
-    // it applies to. A warning tone, because it is one.
-    if (this.options.notice) this.note(this.options.notice, "warn");
+    // The launch config notice is for the first chat, not the home screen: on
+    // a fresh session it waits for the first send (see runTurn), so opening
+    // the app shows "Where should we begin?" instead of a page carrying only
+    // the warning. A resumed session already has a transcript, so it keeps
+    // the old behaviour and says it at once.
+    if (this.options.notice) {
+      if (this.entries.length > 0) this.note(this.options.notice, "warn");
+      else this.deferredNotice = this.options.notice;
+    }
 
     this.enterTerminal();
 
@@ -1002,6 +1042,10 @@ class TuiApp {
     // A pending approval would otherwise leave the agent waiting forever.
     this.pending?.resolve("deny");
     this.pending = null;
+    // A compaction in flight holds its own controller, not the turn's — stop
+    // it too, or its summariser keeps the process alive after the terminal.
+    this.compactController?.abort();
+    this.compactController = null;
     // Nor should the agent wait forever on a question nobody will answer.
     if (this.askResolver) this.settleAsk();
     // And a turn in flight is stopped, so an abandoned request cannot keep the
@@ -1027,11 +1071,20 @@ class TuiApp {
     setColorEnabled(true);
 
     try {
+      // A setting stepped moments before quitting is still owed its write:
+      // the panel saves behind, so flush what it queued before the session.
+      await this.flushViewSave();
       await this.save();
       // A background session's answer is still worth keeping even though the
       // user never went back to look at it.
       for (const [id, state] of this.parked) {
         await this.saveParked(id, state).catch(() => undefined);
+      }
+      // The tab in front is where the next `--continue` resumes. Skipped for
+      // a front session that was never saved: there is no file to resume, and
+      // the pointer must keep naming one that exists.
+      if (this.agent.turns.length > 0 && !this.deletedSessions.has(this.sessionId)) {
+        await this.options.saveActiveSession?.(this.cwd, this.sessionId).catch(() => undefined);
       }
     } catch {
       // Nothing useful to do at exit; the plain CLI reports save failures.
@@ -1080,6 +1133,18 @@ class TuiApp {
       if ((key.type === "ctrl" || key.type === "alt") && key.key === "v") {
         await this.pasteFromClipboard();
         this.draw();
+        continue;
+      }
+      // Alt+U opens the usage card — the keyboard way to reach what `[USAGE]`
+      // does by mouse. Alt owns no editing job, so unlike a plain `u` (which
+      // would eat the first letter of every word starting with one) or
+      // ctrl+u (which clears the line) it collides with nothing. Covered
+      // panels keep their keys: this only fires when nothing owns the screen.
+      if (key.type === "alt" && key.key.toLowerCase() === "u") {
+        if (!this.coveredBy() && !this.modal && !this.paletteOpen() && !this.mention && !this.clipboardMenu) {
+          this.modal = this.usageModal();
+          this.draw();
+        }
         continue;
       }
       // Suppress terminal auto-paste arriving right after right-click or while clipboard menu is up
@@ -1197,7 +1262,8 @@ class TuiApp {
                 continue;
               }
             }
-            if (this.busy !== null && !this.stopping) this.cancelTurn();
+            if (this.compactController) this.compactController.abort();
+            else if (this.busy !== null && !this.stopping) this.cancelTurn();
             else return this.quit();
           }
           if (key.key === "l") {
@@ -1219,6 +1285,17 @@ class TuiApp {
           await this.submit();
           break;
         case "paste": {
+          // An empty bracketed paste carries nothing to insert — but some
+          // terminals forward the keystroke even when they had no text for it.
+          // The case that matters is Ctrl+V with an image on the clipboard,
+          // which has no text form: the terminal pastes nothing, and without
+          // this the key silently dies. So an empty paste reads the clipboard
+          // itself — an image attaches, text inserts, and an empty clipboard
+          // stays silent rather than reporting an action nobody took.
+          if (key.text.trim() === "" && this.options.readClipboard) {
+            await this.pasteFromClipboard({ silentEmpty: true });
+            break;
+          }
           const trimmed = key.text.trim().replace(/^["']|["']$/g, "");
           if (/\.(png|jpe?g|webp|gif)$/i.test(trimmed)) {
             const attached = await this.tryAttachImagePath(trimmed);
@@ -1668,6 +1745,11 @@ class TuiApp {
    */
   private enterMode(mode: SessionMode): void {
     this.mode = mode;
+    // An "always" is for the mode it was given in: the build notice promises
+    // approval is needed again, and a plan-mode refusal must never be bypassed
+    // by a build-mode yes. The agent is rebuilt below, which clears its own
+    // approvals — but the app-level shortcut above it would otherwise survive.
+    this.approvedTools.clear();
     this.rebuild(this.agent.turns);
     this.notice = span(
       mode === "plan"
@@ -2211,7 +2293,7 @@ class TuiApp {
     saveClipboardHistory(this.clipboardHistory);
   }
 
-  private async pasteFromClipboard(): Promise<void> {
+  private async pasteFromClipboard(opts: { silentEmpty?: boolean } = {}): Promise<void> {
     if (!this.options.readClipboard) {
       this.note("this run cannot read the clipboard", "warn");
       this.draw();
@@ -2228,7 +2310,9 @@ class TuiApp {
     }
 
     if (read.kind === "empty") {
-      this.note("the clipboard is empty — copy text or a screenshot first, then ctrl+v (or alt+v)", "warn");
+      // Silent when this ran as the empty-paste fallback: nothing was pasted
+      // and nothing was asked for, so a warning would blame the wrong key.
+      if (!opts.silentEmpty) this.note("the clipboard is empty — copy text or a screenshot first, then ctrl+v (or alt+v)", "warn");
       this.draw();
       return;
     }
@@ -2302,7 +2386,7 @@ class TuiApp {
   private async attachFile(argument: string): Promise<void> {
     const filePath = argument.trim().replace(/^["']|["']$/g, "");
     if (!filePath) {
-      this.note("no file given — use UPLOAD[+] beside the prompt");
+      this.note("no file given — use UPLOAD [+] beside the prompt");
       this.draw();
       return;
     }
@@ -2398,6 +2482,16 @@ class TuiApp {
    * land in the session that asked for it either way.
    */
   private async runTurn(prompt: string, images: readonly PastedImage[] = [], sessionId = this.sessionId): Promise<void> {
+    // The launch config notice waited for a chat to matter to: the first send
+    // on a fresh session says it, right above whatever the turn itself reports.
+    // A credential established through the UI clears it first (see enterApiKey
+    // and connect), so a fixed key is never followed by a stale warning.
+    if (this.deferredNotice) {
+      const notice = this.deferredNotice;
+      this.deferredNotice = null;
+      if (this.isCurrent(sessionId)) this.note(notice, "warn");
+      else this.parkedState(sessionId).entries.push({ kind: "note", text: notice, tone: "warn" });
+    }
     let settle: () => void = () => {};
     const finished = new Promise<void>((resolve) => {
       settle = resolve;
@@ -2409,6 +2503,11 @@ class TuiApp {
     // user's request started — and the per-answer line is about the wait they
     // sat through, not about one request inside the turn.
     const startedAt = Date.now();
+    // What the spinner's live rate is estimated from: characters streamed so
+    // far, and when the first of them arrived. A turn's tool calls reset
+    // neither — the speed is the turn's, not the current answer chunk's.
+    let streamedChars = 0;
+    let streamStart = 0;
     const turn = {
       startedAt,
       mode: this.goals.has(sessionId) ? "Goal" : MODE_LABELS[this.mode],
@@ -2428,6 +2527,10 @@ class TuiApp {
           if (current) this.plan = event.snapshot;
           else this.parkedState(sessionId).plan = event.snapshot;
         }
+        // The turn's own cost, filed to the machine-wide log under the
+        // endpoint it actually ran on — a background session's model is its
+        // own, not the one on screen.
+        if (event.type === "done") this.recordTurnUsage(sessionId, event);
         // The words the user added have joined the transcript, so the wait the
         // spinner was describing is over.
         if (event.type === "continued" && event.reason === "steered") {
@@ -2435,7 +2538,16 @@ class TuiApp {
         }
         if (event.type === "tool-start") this.setTurnBusy(sessionId, `${event.name}…`);
         else if (event.type === "route-wait") this.setTurnBusy(sessionId, `rate-limited on ${event.from} — waiting ${Math.ceil(event.ms / 1000)}s…`);
-        else if (event.type === "tool-result" || event.type === "text") this.setTurnBusy(sessionId, "thinking…");
+        else if (event.type === "tool-result") this.setTurnBusy(sessionId, "thinking…");
+        else if (event.type === "text") {
+          // The answer is arriving: the spinner names its live speed, when the
+          // toggle wants speeds at all. Before the first quarter-second there
+          // is no rate worth showing, so the row reads as it always did.
+          streamedChars += event.delta.length;
+          if (streamStart === 0) streamStart = Date.now();
+          const rate = this.view.tps === "on" ? liveRate(streamedChars, Date.now() - streamStart) : null;
+          this.setTurnBusy(sessionId, rate ? `thinking… · ${rate}` : "thinking…");
+        }
         this.scheduleDraw();
       }
     } catch (error) {
@@ -2840,7 +2952,14 @@ class TuiApp {
         this.notes(this.statusLines());
         break;
       case "stats":
-        this.notes(this.statsLines());
+        await this.stats();
+        break;
+      case "usage":
+        await this.usage();
+        break;
+      case "context":
+        this.modal = this.contextModal();
+        this.draw();
         break;
       case "debug":
         this.notes(this.debugLines());
@@ -2944,7 +3063,7 @@ class TuiApp {
         await this.chooseTheme(argument);
         break;
       case "compact":
-        await this.compact();
+        this.compact();
         break;
       case "btw":
         await this.sideQuestion(argument);
@@ -3007,7 +3126,7 @@ class TuiApp {
     );
     return [
       "type / for the palette — ↑↓ choose, enter runs, esc closes",
-      "tab switches session · ctrl+w closes a tab · ctrl+p palette · ctrl+v paste text or attach a clipboard image · ctrl+u clear the line · ctrl+c stops a turn, again to quit",
+      "tab switches session · ctrl+w closes a tab · ctrl+p palette · ctrl+v paste text or image · alt+v or /paste when the terminal keeps ctrl+v · ctrl+u clear the line · alt+u usage card · ctrl+c stops a turn, again to quit",
       "click a tab to switch, its × to close, +NEW for a fresh one · the wheel scrolls",
       available.join("  "),
     ];
@@ -3054,6 +3173,32 @@ class TuiApp {
     this.agent.setBudget(Math.trunc(tokens));
     this.note(tokens === 0 ? "token budget removed" : `token budget set to ${formatTokens(tokens)}`);
     this.draw();
+  }
+
+  /**
+   * Files a finished turn's numbers to the machine-wide log.
+   *
+   * Best-effort and unawaited: a usage line is convenience, and a full disk
+   * must not stall a turn that already finished. A turn that cost nothing
+   * files nothing — providers that report no usage would otherwise fill the
+   * log with zeros.
+   */
+  private recordTurnUsage(
+    sessionId: string,
+    done: { model?: string; promptTokens?: number; completionTokens?: number; toolCalls?: number; ms?: number },
+  ): void {
+    const recordFn = this.options.usage?.record;
+    if (!recordFn) return;
+    const parked = sessionId === this.sessionId ? null : this.parked.get(sessionId);
+    const record = turnRecord({
+      model: done.model ?? parked?.model ?? this.model,
+      baseUrl: parked?.baseUrl ?? this.baseUrl,
+      promptTokens: done.promptTokens ?? 0,
+      completionTokens: done.completionTokens ?? 0,
+      toolCalls: done.toolCalls ?? 0,
+      ms: done.ms ?? 0,
+    });
+    if (record) void recordFn(record).catch(() => undefined);
   }
 
   /**
@@ -3106,6 +3251,41 @@ class TuiApp {
     ];
   }
 
+  /**
+   * `/stats` — this session's numbers, plus the machine's when it is recorded.
+   *
+   * The machine line is best-effort: an unreadable log leaves the session's
+   * own numbers standing alone rather than failing the command.
+   */
+  private async stats(): Promise<void> {
+    const lines = this.statsLines();
+    if (this.options.usage) {
+      const records = await this.options.usage.history().catch((): UsageRecord[] => []);
+      const total = summarizeUsage(records).total;
+      if (total.turns > 0) lines.push(totalsLine("across sessions", total));
+    }
+    this.notes(lines);
+    this.draw();
+  }
+
+  /**
+   * `/usage` — the machine-wide rollup: all time, per day, per model.
+   *
+   * Counts only, read from the local log this machine has been appending to.
+   * Capped to recent days and top models so a year of turns does not flood the
+   * transcript; `--usage --json` has everything.
+   */
+  private async usage(): Promise<void> {
+    if (!this.options.usage) {
+      this.note("usage is not being recorded in this run", "warn");
+      this.draw();
+      return;
+    }
+    const records = await this.options.usage.history().catch((): UsageRecord[] => []);
+    this.notes(renderUsage(summarizeUsage(records)));
+    this.draw();
+  }
+
   /** The `[USAGE]` chip: this session's own numbers, as a card. */
   /**
    * The learning pass, fired after a turn that finished.
@@ -3138,10 +3318,48 @@ class TuiApp {
   }
 
   private usageModal(): Modal {
+    const lines = [...this.contextLines(), "", ...this.statsLines()];
     return {
       title: "Session usage",
-      body: this.statsLines().map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.text)),
+      body: lines.map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.text)),
       choices: [{ key: "esc", label: "close" }],
+      bodyRows: lines.length,
+    };
+  }
+
+  /**
+   * `/context` — the window, broken down the way it is spent.
+   *
+   * Estimated throughout (four characters to a token): the system prompt
+   * alongside its tools, the skill list, this project's memory, and the
+   * conversation. The briefing rides inside the system prompt on the wire, so
+   * its rows are lifted out of the system row — the rows add up to the whole.
+   */
+  private contextLines(): string[] {
+    const history = this.agent.history ?? [];
+    const first = history[0];
+    const sections = brainSections(this.cwd);
+    return renderContext(
+      this.model,
+      summarizeContext({
+        systemText: first?.role === "system" ? first.content : "",
+        toolCount: this.agent.toolCount,
+        toolTokens: this.agent.toolSpecTokens,
+        ...(sections?.skills ? { skillText: sections.skills.text, skillsLoaded: sections.skills.loaded } : {}),
+        ...(sections?.memory ? { memoryText: sections.memory.text, memoryFiles: sections.memory.files } : {}),
+        turns: this.agent.turns,
+        budget: this.options.contextTokens,
+      }),
+    );
+  }
+
+  private contextModal(): Modal {
+    const lines = this.contextLines();
+    return {
+      title: "Context",
+      body: lines.map((line, index) => span(`${index === 0 ? "" : "\n"}${line}`, this.styles.text)),
+      choices: [{ key: "esc", label: "close" }],
+      bodyRows: lines.length,
     };
   }
 
@@ -3207,6 +3425,12 @@ class TuiApp {
    * The write is the point of the panel: a setting that is forgotten when the
    * session ends is a keybinding, not a preference. Whatever the caller could
    * not write is said out loud rather than shown as if it had been kept.
+   *
+   * The screen moves first and the disk follows: every arrow press used to
+   * await a full file write, so holding an arrow queued disk IO behind every
+   * step and the panel felt stuck. The value is adopted (and the theme with
+   * it) before this returns; the write runs behind and coalesces — ten fast
+   * steps land as one write of where they ended.
    */
   private async applyView(next: ViewSettings): Promise<void> {
     const patch: Partial<ViewSettings> = {};
@@ -3226,14 +3450,37 @@ class TuiApp {
       return;
     }
 
-    const result = await this.options.saveView(patch).catch((error: unknown) => ({
-      ok: false,
-      file: "",
-      reason: (error as Error).message,
-    }));
-    this.notice = result.ok
-      ? span(`${describePatch(patch)} — saved to ${result.file}`, this.styles.dim)
-      : span(`${describePatch(patch)} — not saved: ${result.reason ?? "write failed"}`, this.styles.warn);
+    this.viewSaveQueued = { ...this.viewSaveQueued, ...patch };
+    void this.flushViewSave();
+  }
+
+  /** Writes whatever `applyView` has queued, one write per burst of steps. */
+  private viewSaveQueued: Partial<ViewSettings> | null = null;
+  private viewSaveInFlight = false;
+
+  private async flushViewSave(): Promise<void> {
+    if (this.viewSaveInFlight || !this.viewSaveQueued) return;
+    if (!this.options.saveView) {
+      this.viewSaveQueued = null;
+      return;
+    }
+    this.viewSaveInFlight = true;
+    try {
+      while (this.viewSaveQueued) {
+        const patch = this.viewSaveQueued;
+        this.viewSaveQueued = null;
+        const result = await this.options.saveView(patch).catch((error: unknown) => ({
+          ok: false as const,
+          file: "",
+          reason: (error as Error).message,
+        }));
+        this.notice = result.ok
+          ? span(`${describePatch(patch)} — saved to ${result.file}`, this.styles.dim)
+          : span(`${describePatch(patch)} — not saved: ${result.reason ?? "write failed"}`, this.styles.warn);
+      }
+    } finally {
+      this.viewSaveInFlight = false;
+    }
   }
 
   /** Uses a theme without adopting it as this run's name — the patch does that. */
@@ -3326,18 +3573,14 @@ class TuiApp {
     }
 
     const all = await this.options.connect.list().catch((): MenuRow[] => []);
+    // One custom row: anything not in the catalogue is declared by URL. A key
+    // for the endpoint in use is entered with `/key`, not from this list.
     const customRows: MenuRow[] = [
       {
         label: "+ Add Custom Provider / Endpoint",
         value: "__add_custom__",
         group: "Custom",
         trailing: "URL & Key",
-      },
-      {
-        label: "+ Manually enter API Key",
-        value: "__enter_key__",
-        group: "Custom",
-        trailing: "for endpoint",
       },
     ];
     const combined = [...all, ...customRows];
@@ -3379,10 +3622,6 @@ class TuiApp {
         this.connectMenu = null;
         if (row.value === "__add_custom__") {
           this.addCustomProvider();
-          return true;
-        }
-        if (row.value === "__enter_key__") {
-          await this.enterApiKey(this.baseUrl);
           return true;
         }
         await this.addService(row.value);
@@ -3434,6 +3673,8 @@ class TuiApp {
 
     // Declared *and* switched to, which is what "connect" means. The endpoint's
     // models are then offered, because the model in use may not exist there.
+    // Ready means a key is present, so the launch warning is spent.
+    this.deferredNotice = null;
     this.baseUrl = result.baseUrl;
     this.rebuild(this.agent.turns);
     await this.chooseModel(result.baseUrl);
@@ -3579,6 +3820,7 @@ class TuiApp {
         this.tabs = this.tabs.slice(0, MAX_TABS);
       }
     }
+    this.markActive();
   }
 
   private async newSession(): Promise<void> {
@@ -3606,6 +3848,7 @@ class TuiApp {
     // A notice, not a note: a transcript entry would make the session
     // non-empty and hide the home screen a fresh session must open on.
     this.notice = span("new session", this.styles.dim);
+    this.markActive();
   }
 
   private async rename(name: string): Promise<void> {
@@ -3639,6 +3882,7 @@ class TuiApp {
     this.rebuild(history);
     await this.save().catch(() => undefined);
     await this.refreshTabs();
+    this.markActive();
     this.note(`forked into a new session · ${history.length} messages`);
   }
 
@@ -3879,16 +4123,24 @@ class TuiApp {
       this.draw();
       return;
     }
+    // Installed skills belong to whoever installed them: retiring one here
+    // would fight `npx skills` over a folder it manages.
+    if (found.source !== "learned") {
+      this.note(`skill:${name} is installed, not learned — remove it where it was installed (${found.file})`, "warn");
+      this.draw();
+      return;
+    }
 
     const brain = readBrain(this.cwd);
-    if (!brain) {
+    const dir = brain?.dir;
+    if (!dir) {
       this.note("no brain to retire it from", "warn");
       this.draw();
       return;
     }
 
     try {
-      const moved = await trashSkill(brain.dir, found.file);
+      const moved = await trashSkill(dir, found.file);
       this.mentionIndex = null;
       this.mentionIndexAt = 0;
       this.mentionIndexPromise = null;
@@ -3914,8 +4166,13 @@ class TuiApp {
       this.note("could not read the skills directory", "warn");
       return;
     }
-    if (!index.brain) {
-      this.note("no skills here — no ki-agent-brain was found above this directory", "warn");
+    if (index.skills.length === 0) {
+      this.note(
+        index.brain
+          ? "no skills in this brain yet — a SKILL.md under skills/ is what shows up here"
+          : "no skills here — neither the brain nor .agents/skills/ (here or home) has any",
+        "warn",
+      );
       return;
     }
     if (argument) {
@@ -3936,16 +4193,17 @@ class TuiApp {
         this.note(`could not read ${found.file}`, "warn");
         return;
       }
-      this.notes([`skill:${found.name} — ${found.description}`, body]);
-      return;
-    }
-    if (index.skills.length === 0) {
-      this.note("no skills in this brain yet — a SKILL.md under ki-agent-brain/skills/ is what shows up here", "warn");
+      this.notes([`skill:${found.name}${found.source === "installed" ? " (installed)" : ""} — ${found.description}`, body]);
       return;
     }
     this.openPicker(
       `Skills · ${index.skills.length}`,
-      index.skills.map((skill) => ({ label: skill.name, description: skill.description, value: skill.name })),
+      index.skills.map((skill) => ({
+        label: skill.name,
+        description: skill.description,
+        value: skill.name,
+        trailing: skill.source,
+      })),
       (name) => {
         this.editor.setText(`@skill:${name} `);
       },
@@ -4536,24 +4794,63 @@ class TuiApp {
     }
   }
 
-  private async compact(): Promise<void> {
+  private compactController: AbortController | null = null;
+
+  private compact(): void {
     if (!this.options.compacting) {
       this.note("compaction is off (--no-compact)");
+      this.draw();
+      return;
+    }
+    // Already running: a second `/compact` would summarise the same transcript
+    // twice, and the keys stay live so Ctrl+C can stop the first one.
+    if (this.compactController) {
+      this.note("already compacting — ctrl+c to stop it");
+      this.draw();
+      return;
+    }
+    // A turn mutates the transcript the summariser is reading; a `/compact`
+    // typed mid-turn waits its turn like any command, it must not race one.
+    if (this.busy !== null) {
+      this.note("wait for the turn to finish before compacting");
+      this.draw();
       return;
     }
 
-    const result = await this.agent.compactNow();
-    // The target is named as well as the result: what a session is compacted
-    // to is the setting now, and a notice that only said how far it fell would
-    // leave the number nobody could check.
-    this.note(
-      result
-        ? `compacted ${result.summarized} earlier messages · ~${formatTokens(result.before)} → ~${formatTokens(result.after)} tokens (target ~${formatTokens(result.target)})`
-        // A named compaction now runs whatever the window holds, so this is
-        // about the session being too short to be worth shrinking, or the
-        // summariser call itself not landing.
-        : "nothing to compact — this session is already short, or the summariser failed",
-    );
+    const controller = new AbortController();
+    this.compactController = controller;
+    this.setBusy("compacting…");
+    this.draw();
+    void (async () => {
+      try {
+        const result = await this.agent.compactNow(controller.signal);
+        if (controller.signal.aborted) {
+          this.note("compaction stopped");
+        } else if (result) {
+          // The target is named as well as the result: what a session is compacted
+          // to is the setting now, and a notice that only said how far it fell would
+          // leave the number nobody could check.
+          this.note(
+            `compacted ${result.summarized} earlier messages · ~${formatTokens(result.before)} → ~${formatTokens(result.after)} tokens (target ~${formatTokens(result.target)})`,
+          );
+          // The transcript changed, so the run that resumes later must find the
+          // compacted one — not the sprawl it replaced. Nothing changed, nothing
+          // written: a short session must not gain a file for being looked at.
+          await this.save().catch(() => undefined);
+        } else {
+          // A named compaction now runs whatever the window holds, so this is
+          // about the session being too short to be worth shrinking, or the
+          // summariser call itself not landing.
+          this.note("nothing to compact — this session is already short, or the summariser failed");
+        }
+      } catch {
+        this.note(controller.signal.aborted ? "compaction stopped" : "compaction failed");
+      } finally {
+        if (this.compactController === controller) this.compactController = null;
+        this.stopBusy();
+        this.draw();
+      }
+    })();
   }
 
   /**
@@ -4651,7 +4948,7 @@ class TuiApp {
       ...(shown
         ? clipped(shown, full ? shown.length : MEMORY_PREVIEW_CHARS).split("\n").filter((line) => line.trim().length > 0)
         : ["nothing saved for this directory yet"]),
-      `brain ${brain.dir} · ${brain.skills.length} skill(s) · ${brain.projects.length} project memory file(s)`,
+      `${brain.dir ? `brain ${brain.dir}` : "no brain — skills below are installed"} · ${brain.skills.length} skill(s) · ${brain.projects.length} project memory file(s)`,
       ...(full ? [] : ["`/memory full` prints the whole briefing, skills included"]),
       ...(others.length > 0 ? [`other projects recorded: ${others.join(", ")}`] : []),
     ]);
@@ -4738,6 +5035,7 @@ class TuiApp {
     this.rebuild(this.agent.turns);
     this.changes = [];
     await this.refreshTabs();
+    this.markActive();
     this.note(`cwd ${target}`);
   }
 
@@ -4867,14 +5165,17 @@ class TuiApp {
       const envName = this.options.saveApiKey
         ? await this.options.saveApiKey(trimmed, targetBaseUrl)
         : undefined;
-      // The key works now but is held in memory, so say where it would live if
-      // it is to survive the next run — otherwise "saved" is a promise the
-      // next launch breaks.
+      // The key works now and is kept for the next runs, so the note names
+      // the file it lives in — pasting again overwrites a rotated key, and
+      // deleting the file forgets it.
       this.note(
         envName
-          ? `using this key for ${name} now — set ${envName} to keep it across runs`
+          ? `saved for ${name} — kept in ${keysFilePath()}, working now and from the next run`
           : `using this key for ${name} now`,
       );
+      // A key is now held for this endpoint, so the launch warning about it
+      // being missing must not fire on the next send.
+      this.deferredNotice = null;
       this.baseUrl = targetBaseUrl;
       this.rebuild(this.agent.turns);
       this.draw();
@@ -4905,6 +5206,8 @@ class TuiApp {
           });
         }
         this.note(`added ${defaultName} (${rawUrl})`);
+        // Only with a key: without one the launch warning still applies.
+        if (apiKey) this.deferredNotice = null;
         this.baseUrl = rawUrl;
         this.rebuild(this.agent.turns);
         this.draw();
@@ -5253,7 +5556,20 @@ class TuiApp {
         this.dragging = false;
         if (this.selection) {
           if (this.selection.from.row === this.selection.to.row && this.selection.from.col === this.selection.to.col) {
+            // A click (not a drag) on a clipped tool result toggles it expanded
+            // in place. Drags keep selecting text: only a press and release in
+            // the same cell on the same result row expands, so selecting across
+            // a result still copies instead of toggling.
+            const resultHit =
+              this.selection.from.row === event.y
+                ? this.panelRows.find((c) => c.kind === "result" && c.row === event.y)
+                : undefined;
+            const entry = resultHit ? this.entries[resultHit.index] : undefined;
             this.selection = null;
+            if (entry && entry.kind === "result") {
+              entry.expanded = !entry.expanded;
+              this.draw();
+            }
           } else {
             const text = this.selectedText();
             if (text.trim()) {
@@ -5409,10 +5725,10 @@ class TuiApp {
         return true;
       }
 
-      // 2. An attached image's badge takes that image back off, drawn from
-      // where the box's own text starts.
+      // 2. An attached image's badge takes that image back off, drawn in the
+      // badge run just before the box's own text starts.
       if (this.attached.length > 0) {
-        let badgeStart = box.textLeft;
+        let badgeStart = box.textLeft - box.badgeWidth;
         for (let i = 0; i < this.attached.length; i++) {
           const badgeLen = `[Image ${i + 1}] `.length;
           if (event.x >= badgeStart && event.x < badgeStart + badgeLen) {
@@ -5425,7 +5741,7 @@ class TuiApp {
         }
       }
 
-      // `UPLOAD[+]` at the row's right edge: the platform's file-selection
+      // `UPLOAD [+]` at the row's right edge: the platform's file-selection
       // window. It is the only other control the row carries — send has no
       // button of its own (enter sends) and the variant has none either
       // (`/effort` changes it). The clipboard menu it once shared this corner
@@ -5504,10 +5820,25 @@ class TuiApp {
       return true;
     }
 
-    // The `[USAGE]` chip on the state row opens this session's numbers as a
-    // card. A card rather than a transcript note: a note scrolls away and
-    // becomes part of the conversation, and the question the button asks is
-    // about the session as it stands right now.
+    // The `⚙` glyph on the footer's right end opens the settings panel —
+    // the mouse way to reach what `/settings` does by name.
+    const settingsButton = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "settings_button" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (settingsButton) {
+      void this.showSettings("");
+      return true;
+    }
+
+    // The `[USAGE]` chip on the state row opens the context and this session's
+    // numbers as one card. A card rather than a transcript note: a note scrolls
+    // away and becomes part of the conversation, and the question the button
+    // asks is about the session as it stands right now.
     const usageChip = this.panelRows.find(
       (candidate) =>
         candidate.kind === "usage_button" &&
@@ -5548,7 +5879,8 @@ class TuiApp {
       row &&
       row.kind !== "picker" &&
       row.kind !== "picker_tab" &&
-      row.kind !== "jump_bottom"
+      row.kind !== "jump_bottom" &&
+      row.kind !== "result"
     ) {
       this.selection = null;
       this.run(this.clickRow(row));
@@ -6077,6 +6409,10 @@ class TuiApp {
   private async deleteSession(id: string): Promise<void> {
     this.deletedSessions.add(id);
     this.closedSessions.add(id);
+    // A deleted session must not stay the remembered tab: without this the
+    // next `--continue` would load a file that is gone and fall back to the
+    // newest, which is correct but only by accident.
+    void this.options.clearActiveSession?.(this.cwd, id).catch(() => undefined);
     // A deleted session must not keep running: there is no file left for its
     // answer to be written to. The turn in the session on screen holds the live
     // agent, so that is the one to stop; a session already parked holds its own.
@@ -6149,6 +6485,15 @@ class TuiApp {
       variant: this.variant,
       ...(this.title ? { title: this.title } : {}),
     });
+  }
+
+  /**
+   * Records the tab in front for this directory, so the next `--continue`
+   * resumes it rather than the newest session. Best-effort and unawaited: a
+   * pointer is convenience, and a full disk must not stall a tab switch.
+   */
+  private markActive(): void {
+    void this.options.saveActiveSession?.(this.cwd, this.sessionId).catch(() => undefined);
   }
 
   /**
@@ -6311,6 +6656,12 @@ class TuiApp {
       const defs = this.visibleSettings();
       const selected = Math.min(Math.max(menu.selected, 0), Math.max(defs.length - 1, 0));
       const current = defs[selected];
+      // Sized by the longest description of any setting, not the current
+      // one: the sentence changes with every row the cursor lands on, so the
+      // current one would resize the card on every hover. Measured over the
+      // whole list rather than the filtered one, so typing keeps the card
+      // still too — and every sentence fits, none truncated.
+      const descriptionWidth = Math.max(0, ...settingDefs(this.view).map((def) => textWidth(def.description)));
       return {
         title: "Settings",
         rows: settingRows(defs, this.view),
@@ -6318,6 +6669,7 @@ class TuiApp {
         query: menu.query,
         footer: "‹/› change · enter value · ↑↓ move · esc close",
         ...(current ? { description: `${current.description}${this.options.saveView ? "" : " (not saved)"}` } : {}),
+        descriptionWidth,
       };
     }
 

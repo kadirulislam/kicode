@@ -45,13 +45,19 @@ const READ_ONLY_COMMANDS = new Set([
   "whoami",
   "date",
   "echo",
-  // Filters: they read a stream and print. A command that can rewrite its
-  // input (`sort -o`, `sed -i`, `tee`, `xargs`) is deliberately absent — the
-  // classifier does not parse flags deeply enough to tell those apart.
+  // Filters: they read a stream and print. `sort` writes only through `-o` /
+  // `--output` (guarded in `checkStage`); a command that can rewrite its
+  // input another way (`sed -i`, `tee`, `xargs`) is deliberately absent —
+  // the classifier does not parse flags deeply enough to tell those apart.
+  // `awk` and `sed` stay out for the same reason (`system()`, `s///e`, `w`).
   "uniq",
   "cut",
   "tr",
   "nl",
+  "sort",
+  "less",
+  "jq",
+  "diff",
   "basename",
   "dirname",
   "realpath",
@@ -138,8 +144,16 @@ const READ_ONLY_GIT = new Set([
   "reflog",
 ]);
 
-/** Flags that turn a browsing command into one that writes or runs things. */
-const DANGEROUS_FLAGS = ["-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls", "-o"];
+/** Flags that turn a browsing command into one that writes or runs things.
+ *
+ * Deliberately *not* in here: `-o`. It used to be, for `sort -o` — but the
+ * same two letters are `grep -o` (print only the match), `ls -o`, `ps -o`
+ * (report formats) and `find`'s OR operator, all of which only read. A bare
+ * `-o` blocked every one of those, which was the plan-mode false negative
+ * that kept biting. `sort`'s output flag is guarded where `sort` is known,
+ * in `checkStage`.
+ */
+const DANGEROUS_FLAGS = ["-exec", "-execdir", "-delete", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"];
 
 /** Whether a command may run in plan mode, and why not when it may not. */
 export type ReadOnlyVerdict = { ok: true } | { ok: false; reason: string };
@@ -149,13 +163,20 @@ export type ReadOnlyVerdict = { ok: true } | { ok: false; reason: string };
  *
  * Conservative on purpose, and refused rather than guessed at:
  *
- * - Redirection, chaining and substitution are refused — `>`, `<`, `;`, `&`, a
- *   backtick or `$(`, plus newlines. Those are how a read-only-looking command
- *   writes, so there is no way to be sure about one.
+ * - Redirection, chaining and substitution are refused — `>`, `<`, `;`, `&`,
+ *   `&&`, `||`, a backtick or `$(`, plus newlines. Those are how a
+ *   read-only-looking command writes, so there is no way to be sure about one.
+ * - Quoted regions are not structure: `grep "a|b" file` and `echo "x && y"`
+ *   only read, so `|`, `;` and `&` inside `'...'` or `"..."` are ignored when
+ *   looking for chains and pipe stages. Substitution is the exception —
+ *   `$(...)` and backticks still run inside double quotes, so only
+ *   single-quoted regions are blind to those (`'$(whoami)'` is literal text).
  * - A pipeline is allowed only when *every* stage is itself a command that only
- *   reads: `ls -la | head -20` changes nothing, and refusing it was the one
- *   false negative users kept hitting.
- * - `find` actions (`-exec`, `-delete`, …) are refused; bare `find` prints.
+ *   reads: `ls -la | sort -rn | head -20` changes nothing, and refusing it was
+ *   the one false negative users kept hitting.
+ * - `find` actions (`-exec`, `-delete`, `-fprint0`, …) are refused; bare `find`
+ *   (and `find ... -o ...`, the OR operator) prints.
+ * - `sort` is allowed except with `-o` / `--output`, which names a file.
  * - `git` is allowed its reporting subcommands, and three more on a stricter
  *   rule: `branch`, `tag`, `remote` and `config` read when they name nothing
  *   (or after a listing flag), and write when they do — `git branch` lists,
@@ -168,25 +189,73 @@ export type ReadOnlyVerdict = { ok: true } | { ok: false; reason: string };
  * `checkReadOnlyCommand` says which of those it was, so the refusal the model
  * reads names the actual problem instead of sending it guessing again.
  */
+/**
+ * The command with its quoted regions removed, so punctuation inside
+ * `'...'` or `"..."` is not read as shell structure. Handles `\"` inside
+ * double quotes; an unterminated quote swallows the rest, which can only
+ * make the verdict stricter downstream (or match what the shell does).
+ */
+function stripQuoted(text: string): string {
+  return stripQuotes(text, false);
+}
+
+/**
+ * The command with only single-quoted regions removed. `$(...)` and
+ * backticks still execute inside double quotes, so those stay visible to the
+ * substitution check — only `'...'` is literal text to the shell.
+ */
+function stripSingleQuoted(text: string): string {
+  return stripQuotes(text, true);
+}
+
+function stripQuotes(text: string, singleOnly: boolean): string {
+  let out = "";
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote !== null) {
+      if (ch === quote) quote = null;
+      else if (quote === '"' && ch === "\\") i += 1;
+      continue;
+    }
+    if (ch === "'" || (!singleOnly && ch === '"')) {
+      quote = ch as "'" | '"';
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
 export function checkReadOnlyCommand(command: string): ReadOnlyVerdict {
   const trimmed = command.trim();
   if (!trimmed) return { ok: false, reason: "the command is empty" };
 
   // A newline is a second command; the rest of these are how one writes.
   if (/[\n\r]/.test(trimmed)) return { ok: false, reason: "it holds more than one line" };
+  // Quoted punctuation is data, not structure: `grep "a|b" f` is one stage,
+  // `echo "x && y"` is one command. Everything structural below reads the
+  // unquoted shape — except substitution, which still fires inside `"..."`.
+  const bare = stripQuoted(trimmed);
   // `2>/dev/null` and `2>&1` are how a noisy command is quieted, and models
   // reach for them constantly while exploring. Neither can write a file — the
   // word after `>` names a stream, `/dev/null` or `&` — so they are allowed
   // where a bare `>` would be refused. A redirect to a real path still is.
   // Stripped first, because `2>&1` holds an `&` the chain check would trip on.
-  const withoutStderr = trimmed.replace(/\d?>\s?(&\d?|\/dev\/null)/g, "");
+  const withoutStderr = bare.replace(/\d?>\s?(&\d?|\/dev\/null)/g, "");
   if (/[<>]/.test(withoutStderr)) return { ok: false, reason: "it redirects input or output (`<` or `>`)" };
+  if (withoutStderr.includes("&&") || withoutStderr.includes("||")) {
+    return { ok: false, reason: "it chains more than one command (`&&` or `||`)" };
+  }
   if (/[;&]/.test(withoutStderr)) return { ok: false, reason: "it chains more than one command (`;` or `&`)" };
-  if (withoutStderr.includes("$(") || withoutStderr.includes("`")) {
+  // Single quotes are the only quoting that stops substitution: `"$(...)"`
+  // runs, `'$(...)'` prints.
+  const unsubstituted = stripSingleQuoted(trimmed);
+  if (unsubstituted.includes("$(") || unsubstituted.includes("`")) {
     return { ok: false, reason: "it substitutes the output of another command" };
   }
 
-  const stages = trimmed.split("|");
+  const stages = bare.split("|");
   for (const stage of stages) {
     const verdict = checkStage(stage.trim(), stages.length > 1);
     if (!verdict.ok) return verdict;
@@ -216,8 +285,22 @@ function checkStage(stage: string, piped: boolean): ReadOnlyVerdict {
     return { ok: false, reason: `${subject} is not a command KiCode knows only reads` };
   }
 
-  const flag = parts.find((token) => DANGEROUS_FLAGS.includes(token.toLowerCase()));
+  const flag = parts.find((token) => {
+    const lower = token.toLowerCase();
+    // `-fprint0` / `-fprintf ...` write files like `-fprint` does; the exact
+    // token list cannot name every suffix, so those two match by prefix.
+    return DANGEROUS_FLAGS.includes(lower) || lower.startsWith("-fprint") || lower.startsWith("-fprintf");
+  });
   if (flag) return { ok: false, reason: `${subject} uses \`${flag}\`, which can run or write something` };
+
+  // `sort` only writes through its output flag; every other flag only orders.
+  if (first === "sort") {
+    const out = parts.find((token) => {
+      const lower = token.toLowerCase();
+      return lower === "-o" || (lower.startsWith("-o") && lower.length > 2) || lower.startsWith("--output");
+    });
+    if (out) return { ok: false, reason: `${subject} uses \`${out}\`, which writes to a file` };
+  }
 
   if (first === "git") {
     const sub = (parts[1] ?? "").toLowerCase();

@@ -174,10 +174,56 @@ describe("what plan mode may run", () => {
   });
 
   it("allows the plain filters, but not one that can rewrite its input", () => {
-    for (const command of ["cut -d, -f1 data.csv", "uniq -c", "tr a-z A-Z", "nl README.md", "dirname src/app.ts"]) {
+    for (const command of [
+      "cut -d, -f1 data.csv",
+      "uniq -c",
+      "tr a-z A-Z",
+      "nl README.md",
+      "dirname src/app.ts",
+      "ls -la | sort -rn | head -20",
+      "git log --oneline | sort | uniq -c | sort -rn",
+      "less notes.md",
+      "jq . package.json",
+      "diff a.txt b.txt",
+    ]) {
       expect(isReadOnlyCommand(command), command).toBe(true);
     }
-    for (const command of ["sort -o out.txt in.txt", "sed -i s/a/b/ file", "tee out.txt", "xargs rm"]) {
+    for (const command of ["sort -o out.txt in.txt", "sort --output=out.txt in.txt", "sed -i s/a/b/ file", "tee out.txt", "xargs rm"]) {
+      expect(isReadOnlyCommand(command), command).toBe(false);
+    }
+  });
+
+  it("scopes `-o` to sort's output flag instead of every command's", () => {
+    // `-o` used to sit in the global dangerous-flag list, which refused
+    // `grep -o`, `ps -o`, `ls -o` and find's `-o` (OR) — all of which read.
+    for (const command of [
+      "grep -o pattern file.txt",
+      "grep -ro TODO src",
+      "ps -o pid,comm",
+      "find . -name '*.ts' -o -name '*.js'",
+    ]) {
+      expect(isReadOnlyCommand(command), command).toBe(true);
+    }
+    expect(isReadOnlyCommand("sort -o out.txt in.txt")).toBe(false);
+  });
+
+  it("does not read quoted punctuation as shell structure", () => {
+    for (const command of ['grep "a|b" file.txt', "grep 'a|b' file.txt", 'echo "x && y"', "echo 'x; y'", 'echo "a > b"']) {
+      expect(isReadOnlyCommand(command), command).toBe(true);
+    }
+    // The quotes are gone but the structure is still there.
+    for (const command of ['echo "a" > file.txt', 'grep "a" f | tee out.txt', "ls || cat file.txt", "ls && cat file.txt"]) {
+      expect(isReadOnlyCommand(command), command).toBe(false);
+    }
+  });
+
+  it("still refuses substitution inside double quotes, but not single quotes", () => {
+    expect(isReadOnlyCommand('echo "$(whoami)"')).toBe(false);
+    expect(isReadOnlyCommand("echo '$(whoami)'")).toBe(true);
+  });
+
+  it("refuses the find actions that write under any spelling", () => {
+    for (const command of ["find . -fprint out.txt", "find . -fprint0 out.txt", "find . -fprintf out.txt '%p\\n'"]) {
       expect(isReadOnlyCommand(command), command).toBe(false);
     }
   });
@@ -212,7 +258,7 @@ describe("what plan mode may run", () => {
     expect(reason("git push")).toContain("git push");
     expect(reason("git push")).toContain("not a read-only git subcommand");
     expect(reason("find . -delete")).toContain("-delete");
-    expect(reason("ls -la | sort")).toContain("pipeline stage `sort`");
+    expect(reason("ls -la | tac")).toContain("pipeline stage `tac`");
     expect(reason("ls > out.txt")).toContain("redirects");
     expect(reason("ls && rm -rf src")).toContain("chains");
     expect(reason("echo $(whoami)")).toContain("substitutes");

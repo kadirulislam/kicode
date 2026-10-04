@@ -35,6 +35,7 @@ export const COMMANDS: readonly Command[] = [
   { name: "cd", description: "Change working directory", usage: "<directory>" },
   { name: "clear", description: "Clear session" },
   { name: "compact", description: "Compact session" },
+  { name: "context", description: "Context window breakdown" },
   {
     name: "connect",
     description: "Connect an integration",
@@ -108,6 +109,7 @@ export const COMMANDS: readonly Command[] = [
   { name: "timeline", description: "Jump to message", usage: "[number]" },
   { name: "undo", description: "Undo previous message" },
   { name: "update", description: "How to update KiCode" },
+  { name: "usage", description: "Token usage across sessions" },
   { name: "variants", description: "Switch model variant" },
   {
     name: "web",
