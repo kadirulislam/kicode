@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  SUBAGENT_SYSTEM_PROMPT,
   SubagentRegistry,
   childRunner,
   delegateTool,
@@ -74,6 +75,31 @@ describe("what a child is given", () => {
     const available = createDefaultTools([], { ask: true }).list().map((tool) => tool.name);
 
     for (const name of SUBAGENT_TOOLS) expect(available).toContain(name);
+  });
+
+  it("has a prompt that matches the tool list it is actually given", () => {
+    // The prompt claimed the child could "run commands that only read" while it
+    // is never given `bash` — so a child followed the instruction, called a tool
+    // that did not exist, and spent a turn on the answer "unknown tool". What
+    // the prompt may promise is exactly what the toolset contains.
+    const capabilities: Record<string, RegExp> = {
+      read: /\bread files\b/i,
+      glob: /\blist them\b/i,
+      grep: /\bsearch them\b/i,
+    };
+
+    for (const [name, promised] of Object.entries(capabilities)) {
+      expect(SUBAGENT_TOOLS).toContain(name);
+      expect(SUBAGENT_SYSTEM_PROMPT).toMatch(promised);
+    }
+    // And it must not *grant* anything the toolset took away. The `\b` after
+    // `can` matters: without it the pattern matches inside "You **can**not",
+    // which is the opposite of a promise.
+    for (const gone of ["bash", "write", "edit"]) {
+      expect(SUBAGENT_TOOLS).not.toContain(gone);
+    }
+    expect(SUBAGENT_SYSTEM_PROMPT).not.toMatch(/you can\b[^.]*\b(run|execute|change|write|edit)\b/i);
+    expect(SUBAGENT_SYSTEM_PROMPT).toMatch(/you cannot run commands/i);
   });
 });
 

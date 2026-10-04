@@ -270,7 +270,10 @@ export const SUBAGENT_SYSTEM_PROMPT = [
   "Rules:",
   "- You start with no memory of the conversation that sent you. Everything you need is in the task.",
   "- Inspect the real files before you conclude anything. Never guess at file contents.",
-  "- You can read, search and run commands that only read. You cannot change anything, and asking for it is a wasted turn — if the task needs a change made, report what the change should be and stop.",
+  // The tool list is the truth here, and the prompt has to match it: told it
+  // could run commands, a child spends a turn calling `bash` — which it was
+  // never given — and the call comes back "unknown tool".
+  "- You can read files, list them and search them. You cannot run commands, change anything, or ask the user a question, and asking for any of those is a wasted turn — if the task needs a change made, report what the change should be and stop.",
   "- Answer with a report, not a conversation: what you found, where (file paths and line numbers), and anything you could not determine.",
   "- If the task is ambiguous or you hit something only the user can decide, say so in a line under open questions rather than guessing.",
   "- Be brief. Your report is read by another agent with a full task of its own; detail you do not need is cost paid twice.",
