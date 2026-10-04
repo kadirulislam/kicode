@@ -125,11 +125,11 @@ In a terminal, `kicode` opens a full-screen UI:
 
 ──────────────────────────────────────────────────────────────────────────
 
-    [BUILD] Ask anything…  "find the TODO in the parser"        UPLOAD[+]
+    [BUILD] Ask anything…  "find the TODO in the parser"        UPLOAD [+]
 
 
-    deepseek-v4-flash:free · default
- C:\dev\projects\kicode          ↓ 12 tools · 304.8K (29%)   ctrl+p commands
+    deepseek-v4-flash:free · default                                   [USAGE]
+    C:\dev\projects\kicode ·                     ↓ 12 tools · 304.8K (29%)   ⚙
 ```
 
 The bar across the top is your sessions for this directory, newest first. It is
@@ -138,7 +138,9 @@ the transcript while there is only one session and brings it back the moment
 there is something to switch to. The last three rows are the prompt, the current
 state — the model and the reasoning variant, while the mode rides in the box's
 own pill — and the footer: the
-directory, what the session has cost, and the one key worth naming.
+directory, what the session has cost, and a `⚙` glyph that opens the settings
+panel. The `[USAGE]` chip on the state row opens this session's share of the
+same numbers together with the context breakdown (`/context`).
 `↓ 12 tools · 304.8K (29%)` is tool calls so far and the estimated size of the
 transcript against the window compaction keeps it inside. When the transcript is
 taller than the view, a scrollbar marks the right edge.
@@ -179,11 +181,11 @@ rather than failing the turn. Those same counts are what the session's token
 budget is spent against.
 
 The box you type into carries two buttons: the **mode pill** on its left edge,
-and **`UPLOAD[+]`** on the right. The pill is the session's mode, and it is a
+and **`UPLOAD [+]`** on the right. The pill is the session's mode, and it is a
 button: `Shift+Tab`, `/mode`, or a click on the pill all switch between `Build`
 and `Plan`, and plan mode is drawn in the warning colour because it changes what
 the session is allowed to do rather than merely what it is called.
-`UPLOAD[+]` opens the platform's own file-selection window, so attaching is a
+`UPLOAD [+]` opens the platform's own file-selection window, so attaching is a
 click rather than a slash command to remember. The state row under the box is
 what is in play — the model and the reasoning variant — and it names the mode
 too on the few screens where there is no box to put a pill in, such as while a
@@ -220,26 +222,47 @@ runs, `Esc` closes. `Ctrl+P` opens the same list from anywhere:
 
 ```
 /btw       One-shot answer from the session's context, not added to it <question>
-/cd        Change working directory <directory>                                
-/clear     Clear session                                                       
-/compact   Compact session                                                     
-/connect   Connect an integration [service]                                     
-/copy      Copy session transcript                                              
-/debug     View debug info                                                     
-/diff      Open diff viewer                                                     
-/exit      Exit the app                                                        
-/help      Help                                                                
-/init      guided AGENTS.md setup                                                
-/mcps      MCP servers                                                         
-/mode      Switch between build and plan [build|plan]                         
-/models    Switch model                                                        
-/rename    Rename session <name>                                               
-/sessions  Switch session                                                      
-/settings  Open settings [key] [value]                                         
-/status    View status                                                         
-/undo      Undo previous message                                               
-/variants  Switch model variant                                                
-/worktrees Manage workspaces                                                  
+/budget    Show or set the session token budget [tokens]
+/cd        Change working directory <directory>
+/clear     Clear session
+/compact   Compact session
+/context   Context window breakdown
+/connect   Connect an integration [service]
+/continue  Switch session
+/copy      Copy session transcript
+/debug     View debug info
+/diff      Open diff viewer
+/editor    Open editor [file]
+/exit      Exit the app
+/export    Export session transcript
+/fork      Fork session
+/goal      Autonomous goal execution <objective>
+/help      Help
+/init      guided AGENTS.md setup
+/insert    Push message in between the conversation <message>
+/learn     Run the learning pass now, and report what it kept
+/mcps      MCP servers
+/memory    Show what the brain holds for this project [full]
+/mode      Switch between build and plan [build|plan]
+/models    Switch model [free]
+/new       New session
+/paste     Paste the clipboard: text onto the prompt, an image onto the next turn
+/pause     Pause model execution or active session
+/reload    Reload configuration
+/rename    Rename session <name>
+/review    review changes [commit|branch|pr], defaults to uncommitted [scope]
+/routes    Which endpoints answered, and which ran out
+/sessions  Switch session
+/settings  Open settings [key] [value]
+/skills    List skills, or show one [name]
+/stats     Usage statistics
+/status    View status
+/themes    Switch theme
+/timeline  Jump to message [number]
+/undo      Undo previous message
+/update    How to update KiCode
+/usage     Token usage across sessions
+/variants  Switch model variant
 ```
 
 Only commands that actually run here are listed — no aliases, no dead entries.
@@ -266,6 +289,8 @@ Command | Does
 `/undo` | Drop the last request and everything it produced
 `/clear` | Empty the view without touching the session
 `/compact` | Summarise now, rather than when the window fills
+`/context` | The context window as spent: system prompt, skills, memory, messages — the same breakdown the `[USAGE]` chip shows
+`/usage` | Token usage across sessions, with per-model and daily rollups
 `/btw <question>` | One question answered from the transcript, recorded nowhere
 `/copy` `/export` | The transcript to the clipboard, or to `./kicode-<id>.md`
 `/paste` | The clipboard onto the prompt: text as if typed, an image attached to the next turn
@@ -394,6 +419,7 @@ The same settings can be written by hand — see
 | `Alt+V` | The same, for terminals that keep `Ctrl+V` for themselves |
 | `Ctrl+W` | Close the current tab |
 | `Ctrl+U` | Clear the line up to the caret |
+| `Alt+U` | Open the session usage card — the `[USAGE]` chip by keyboard |
 | `Ctrl+L` | Redraw |
 | `Ctrl+C` | Stop the turn in flight; with nothing running, quit |
 | Click | Switch tab, close tab, `+NEW`, or a panel row |
@@ -413,7 +439,9 @@ a question all respond to a click on a row. One rule covers all of them: **a
 click is a cursor move followed by `Enter`**, which means a click does exactly
 what the keyboard would do on that row — including the parts that deliberately
 refuse, like a model row that cannot be chosen or a command that cannot run
-here. There is no second implementation to drift out of step.
+here. There is no second implementation to drift out of step. The prompt box's
+`[BUILD]` pill cycles the mode, `UPLOAD [+]` opens the file picker, `[USAGE]`
+opens this session's usage card, and the footer's `⚙` opens settings.
 
 A permission prompt is the one thing that does not answer to a click, and that
 is on purpose: a click must never be able to approve a command.

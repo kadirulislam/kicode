@@ -8,6 +8,26 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Nothing yet.
 
+## [0.2.0] — 2026-10-04
+
+### Added
+
+- `/context`: the context window estimated and broken down the way it is
+  spent — system prompt plus tools, skills, project memory, conversation —
+  with a usage bar, share of budget, and what remains.
+- The `[USAGE]` chip now opens one card with the context breakdown above the
+  session's own numbers; `Alt+U` opens the same card from the keyboard.
+- A `⚙` glyph at the footer's right end opens the settings panel by mouse.
+- An empty bracketed paste reads the system clipboard, so `Ctrl+V` with a
+  screenshot attaches it even where the terminal forwards no text; the help
+  line names `Alt+V` and `/paste` for terminals that keep `Ctrl+V`.
+
+### Fixed
+
+- `UPLOAD[+]` spacing; the footer path shares the prompt and state rows'
+  gutter; the home screen yields blank decoration before MCP/config lines on
+  short screens.
+
 ## [0.1.1] — 2026-10-02
 
 ### Changed

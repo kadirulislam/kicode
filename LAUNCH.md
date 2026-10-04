@@ -1,6 +1,6 @@
 # Launch checklist
 
-Status for `@kadirulislam/kicode@0.1.1`. Everything under "Verified" was run against the built
+Status for `@kadirulislam/kicode@0.2.0`. Everything under "Verified" was run against the built
 artifact, not just the source. The outstanding steps are all **owner-only** —
 each needs an account, a secret or a repository setting this checkout does not
 have.
@@ -10,11 +10,11 @@ have.
 | Check | Result |
 | --- | --- |
 | `npm run typecheck` | clean |
-| `npm test` | **1118 tests / 52 suites** |
-| `npm run build` | `dist/cli.js`, **308.7 kB** minified, shebang intact |
+| `npm test` | **1221 tests / 55 suites** |
+| `npm run build` | `dist/cli.js`, **317.3 kB** minified, shebang intact |
 | `npm run check:secrets` | clean |
-| `node dist/cli.js --version` | `0.1.1` |
-| `npm pack --dry-run` | 5 files — `CHANGELOG.md`, `LICENSE`, `README.md`, `dist/cli.js`, `package.json`; 131.0 kB; no source, tests, `.env` or secrets |
+| `node dist/cli.js --version` | `0.2.0` |
+| `npm pack --dry-run` | 5 files — `CHANGELOG.md`, `LICENSE`, `README.md`, `dist/cli.js`, `package.json`; 137.2 kB; no source, tests, `.env` or secrets |
 | `npm publish --dry-run` | clean — no package-normalization warnings |
 | Install tarball in a clean prefix, run it | `--version` → `0.1.1`; `--help` prints usage |
 | First run with `OPENAI_API_KEY`, `OPENAI_BASE_URL` and `TOKENHARBOR_API_KEY` set in the shell | exit 1, `No provider is configured yet.` + the `/connect` remedy — none of them is used (ADR-041) |
@@ -84,8 +84,8 @@ npm publish --access public        # from the project root
 
 Attestation is not lost by this: `.github/workflows/publish.yml` passes
 `--provenance` explicitly, so the moment the repository is public and releases go
-through CI, every version published that way carries an attestation. `0.1.0`
-will not — it is the trade for shipping first.
+through CI, every version published that way carries an attestation. `0.1.1` shipped unattested, and `0.2.0` will too for as long as the repository
+stays private — that is the trade for shipping first.
 
 Precedence, verified: a command-line flag beats `publishConfig`
 (`publishConfig.tag: "beta"` plus `--tag next` publishes under `next`). So
@@ -126,11 +126,10 @@ npm view @kadirulislam/kicode dist.attestations        # { url, provenance } onc
 ```
 
 In a project that has installed `kicode`, `npm audit signatures` reports the
-verified attestations.
+verified attestations once releases go through CI.
 
-The package is unscoped, so it publishes public by default; `--access public`
-matters only for the very first publish. `"license": "UNLICENSED"` is on purpose —
-publishing puts the code in the registry, not in the public domain.
+`"license": "proprietary"` with the commercial `LICENSE` file is on purpose —
+publishing puts the bytes in the registry, not the code in the public domain.
 
 ## Testing as a new user
 
@@ -145,7 +144,7 @@ export KICODE_HOME="$(mktemp -d)"
 
 # Exactly what the README tells a stranger to type.
 npm install -g @kadirulislam/kicode
-kicode --version          # 0.1.0
+kicode --version          # 0.2.0
 kicode --help
 
 # No key yet: the setup hint and exit 1, not a stack trace.
