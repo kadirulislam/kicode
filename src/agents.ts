@@ -21,12 +21,28 @@
  * off.
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { resolveHome } from "./paths";
 
 /** What an agent is allowed to change. */
 export type AgentPermissions = "read" | "write";
+
+/**
+ * One thing an agent knows how to do, from its skill folder.
+ *
+ * A folder rather than a field because a specialisation is rarely one line: a
+ * `cody-git` that handles "GitHub" is one line, and one line does not tell the
+ * main agent whether to send it a PR review or a CI failure.
+ */
+export type AgentSkill = {
+  /** From the file's frontmatter, falling back to the filename. */
+  name: string;
+  /** One line: when to reach for this skill. */
+  description: string;
+  /** The full file, so the child can read it on demand. */
+  file: string;
+};
 
 export type AgentProfile = {
   /** How the main agent names it in `delegate({ agent: … })`. */
@@ -41,6 +57,10 @@ export type AgentProfile = {
   scope: "global" | "project";
   /** The file it came from, so an edit writes back where it was read from. */
   file: string;
+  /** Its own `SKILL.md`, when the folder has one — the child's standing brief. */
+  skillFile?: string;
+  /** Everything else in the folder, for the roster to offer by name. */
+  skills?: AgentSkill[];
 };
 
 /**
@@ -77,6 +97,112 @@ export function agentsFile(scope: "global" | "project", cwd: string, env: NodeJS
   return scope === "global"
     ? path.join(resolveHome(env), "agents.json")
     : path.join(cwd, ".kicode", "agents.json");
+}
+
+/**
+ * One agent's skill folder, beside the `agents.json` that declares it.
+ *
+ * `~/.kicode/agents/cody-git/` globally, `<cwd>/.kicode/agents/cody-git/` per
+ * project — the same two-scope arrangement as the file, and the same override
+ * rule, so an agent's skills travel with the agent and a project can ship its
+ * own without touching the user's.
+ */
+export function agentSkillsDir(
+  scope: "global" | "project",
+  name: string,
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string {
+  return path.join(path.dirname(agentsFile(scope, cwd, env)), "agents", name);
+}
+
+/** A skills file long enough to be a document rather than a note. */
+const MAX_SKILL_BYTES = 256 * 1024;
+/** Enough of a skill folder to tell a model what an agent is good at. */
+const MAX_AGENT_SKILLS = 40;
+/** The `name` and `description` lines of a skill file's frontmatter. */
+const MAX_SKILL_DESCRIPTION = 200;
+
+type Frontmatter = { name: string; description: string; body: string };
+
+/**
+ * A skill file's frontmatter and body.
+ *
+ * The same shape the brain's skills use, read the same lenient way: a file with
+ * no frontmatter is still a skill, called by its filename. Requiring frontmatter
+ * would make the folder a chore, and a chore is a folder nobody fills in.
+ */
+function parseSkill(text: string, fallbackName: string): Frontmatter {
+  if (!text.startsWith("---")) return { name: fallbackName, description: "", body: text };
+  const end = text.indexOf("\n---", 3);
+  if (end === -1) return { name: fallbackName, description: "", body: text };
+  const block = text.slice(3, end);
+  const strip = (value: string | undefined): string => {
+    const raw = (value ?? "").trim();
+    const quoted = /^"([\s\S]*)"$/.exec(raw) ?? /^'([\s\S]*)'$/.exec(raw);
+    return (quoted?.[1] ?? raw).slice(0, MAX_SKILL_DESCRIPTION).trim();
+  };
+  const name = strip(/^name:\s*(.+)$/m.exec(block)?.[1]) || fallbackName;
+  // A description can wrap onto following lines as a continuation; the first line
+  // plus its indented continuations is one sentence, and truncating at the first
+  // line would cut it in half.
+  const description = strip(
+    /^description:\s*([\s\S]*?)(?=\n[a-zA-Z_-]+:\s|\n*$)/m.exec(block)?.[1]?.replace(/\n\s+/g, " "),
+  );
+  return { name, description, body: text.slice(end + 4).replace(/^\r?\n/, "") };
+}
+
+/**
+ * Everything in one agent's folder: its own brief, and the skills beside it.
+ *
+ * `SKILL.md` is the one file with a fixed name and it means "this agent". Every
+ * other `.md` is a skill it can be asked for. The split is what lets the child
+ * read one narrow thing instead of the whole folder, and what lets the parent
+ * see a list of capabilities instead of one sentence.
+ */
+export async function readAgentSkills(
+  dir: string,
+): Promise<{ skillFile?: string; instructions: string; skills: AgentSkill[]; warnings: string[] }> {
+  const warnings: string[] = [];
+  let entries: string[];
+  try {
+    entries = (await readdir(dir)).filter((name) => name.toLowerCase().endsWith(".md")).sort();
+  } catch {
+    return { instructions: "", skills: [], warnings }; // no folder is normal
+  }
+
+  let skillFile: string | undefined;
+  let instructions = "";
+  const skills: AgentSkill[] = [];
+
+  for (const entry of entries) {
+    const file = path.join(dir, entry);
+    let text: string;
+    try {
+      text = (await readFile(file, "utf8")).slice(0, MAX_SKILL_BYTES);
+    } catch (error) {
+      warnings.push(`Could not read ${file}: ${(error as Error).message}`);
+      continue;
+    }
+    const stem = entry.replace(/\.md$/i, "");
+    const parsed = parseSkill(text, stem);
+    if (entry.toUpperCase() === "SKILL.MD") {
+      skillFile = file;
+      // The body is the agent's standing brief — what it is for, how it works,
+      // what it must never do. Prepended to the child's prompt.
+      instructions = parsed.body.trim().slice(0, MAX_INSTRUCTIONS);
+      continue;
+    }
+    if (skills.length >= MAX_AGENT_SKILLS) continue;
+    skills.push({ name: parsed.name, description: parsed.description, file });
+  }
+
+  return {
+    ...(skillFile ? { skillFile } : {}),
+    instructions,
+    skills,
+    warnings,
+  };
 }
 
 /** What a bad profile says about itself, or null when it is usable. */
@@ -177,8 +303,44 @@ export async function readAgentProfiles(
 ): Promise<{ agents: AgentProfile[]; warnings: string[] }> {
   const global = await readAgentsFile(agentsFile("global", cwd, env), "global");
   const project = await readAgentsFile(agentsFile("project", cwd, env), "project");
+
+  // Skills are read for both scopes, and merged per file with the same rule the
+  // profiles use: the project's folder wins, so a repo can narrow what an agent
+  // will do as well as who it is. The agent's own `SKILL.md` is kept when only
+  // one scope has one, rather than being dropped because the other scope did not.
+  const decorate = async (
+    agents: readonly AgentProfile[],
+    scope: "global" | "project",
+    warnings: string[],
+  ): Promise<void> => {
+    for (const agent of agents) {
+      const folder = await readAgentSkills(agentSkillsDir(scope, agent.name, cwd, env));
+      warnings.push(...folder.warnings);
+      agent.skillFile = folder.skillFile;
+      agent.skills = folder.skills;
+      // The folder's brief is prepended, not substituted: the `agents.json` line
+      // is what the modal edits, and a folder that quietly replaced it would make
+      // the editor lie about what the child is told.
+      agent.instructions = [folder.instructions, agent.instructions].filter(Boolean).join("\n\n").slice(0, MAX_INSTRUCTIONS);
+    }
+  };
+  await decorate(global.agents, "global", global.warnings);
+  await decorate(project.agents, "project", project.warnings);
+
   const byName = new Map<string, AgentProfile>();
-  for (const agent of [...global.agents, ...project.agents]) byName.set(agent.name, agent);
+  for (const agent of [...global.agents, ...project.agents]) {
+    const existing = byName.get(agent.name);
+    // "Has no folder of its own" means neither file: a folder holding only skills
+    // is still a folder, and treating a missing `SKILL.md` as a missing folder
+    // would let the global folder overwrite skills the project did define.
+    if (existing && agent.skillFile === undefined && (agent.skills?.length ?? 0) === 0) {
+      // A project profile that declares no folder of its own keeps the global
+      // agent's skills: overriding the *agent* is not a request to unskill it.
+      agent.skillFile = existing.skillFile;
+      agent.skills = existing.skills;
+    }
+    byName.set(agent.name, agent);
+  }
   return { agents: [...byName.values()], warnings: [...global.warnings, ...project.warnings] };
 }
 

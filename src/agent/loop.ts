@@ -233,6 +233,55 @@ function pendingWork(tools: ToolRegistry): string | null {
   return null;
 }
 
+/**
+ * How much this session is trusted with, as a ladder.
+ *
+ * The rung between the two ends is the point. `write` and `edit` show a diff and
+ * can be read before they land; `bash` runs arbitrary code with no preview at
+ * all. Answering "always" to one bash command and never to an edit is a
+ * perfectly reasonable position, and a single on/off switch cannot express it —
+ * so the switch is three rungs, and the middle one is "let it edit".
+ *
+ * `ask` is the default on every run. Trust is something a session is given, not
+ * something it starts with.
+ */
+export type PermissionMode = "ask" | "edits" | "all";
+
+/** The ladder, safest first. A chip cycles in this order. */
+export const PERMISSION_MODES: readonly PermissionMode[] = ["ask", "edits", "all"];
+
+/** What each rung is called on screen, and what it means. */
+export const PERMISSION_LABELS: Record<PermissionMode, { label: string; description: string }> = {
+  ask: {
+    label: "ASK",
+    description: "ask before anything that changes files or runs a command",
+  },
+  edits: {
+    label: "EDITS",
+    description: "write and edit without asking; still ask before running a command",
+  },
+  all: {
+    label: "ALL",
+    description: "run anything without asking — no diff, no prompt, no undo",
+  },
+};
+
+/** The tools that change files without running code. */
+const EDITING_TOOLS = new Set(["write", "edit"]);
+
+/**
+ * Whether this rung waives the approval prompt for a tool.
+ *
+ * Asked with the tool's name only, because the question is "does this rung trust
+ * this *kind* of tool" — not whether this particular command looks safe. A rung
+ * that read the arguments would be a policy the user cannot reason about.
+ */
+export function permissionAllows(mode: PermissionMode, name: string): boolean {
+  if (mode === "all") return true;
+  if (mode === "edits") return EDITING_TOOLS.has(name);
+  return false;
+}
+
 export class Agent {
   private readonly messages: ChatMessage[] = [];
   private readonly provider: Provider;

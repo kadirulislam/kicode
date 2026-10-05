@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **A folder per subagent, for its skills.** `~/.kicode/agents/<name>/SKILL.md` is
+  the agent's standing brief; every other `.md` in the folder is a skill it can be
+  asked for, frontmatter optional. The skills go into the system-prompt roster by
+  name and description — which is what the routing decision is actually made
+  against, since "GitHub work" gives a model one sentence to judge with — and the
+  child is handed the paths and told to read the one covering its task. Only the
+  paths, never the bodies. Same two scopes as `agents.json`, project overriding.
+- **The `[AGENTS n/m]` chip** on the state row, beside `[TODO]` and `[USAGE]`:
+  running against total, so a batch in flight is legible at a glance. Clicking it
+  opens the same roster `/agents running` does.
+- **The roster leads with the agent's name**, not the goal — `cody-git: review PR 12`
+  — because "which agent is working on what" is the question the panel exists to
+  answer, and a goal with the agent hidden at the end of a line of timings cannot.
+- **A stopped batch is resumable.** Children a cancelled turn left unfinished are
+  named to the next turn — by agent and goal — once, so it finishes the gap instead
+  of re-planning from the reports that did arrive and doing the work twice. A child
+  that failed on its own is left alone: it was already reported.
+- **The permission ladder**, as a chip below the chat you can click: `[ASK]`
+  (default, every run), `[EDITS]` (write and edit without asking, still ask before
+  running a command), `[ALL]` (no diff, no prompt, no undo — drawn in the error
+  colour). One click steps a rung; `/permission ask|edits|all` sets one outright.
+  The middle rung is the point: an edit shows a diff, a command does not, and one
+  on/off switch cannot express a session that trusts one and not the other.
 - The named subagents are now listed in the **system prompt**, with when to use
   each one. They were only in the `delegate` tool's description, so a session
   told a GitHub question did the work itself and then went looking for

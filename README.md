@@ -128,7 +128,7 @@ In a terminal, `kicode` opens a full-screen UI:
     [BUILD] Ask anything…  "find the TODO in the parser"        UPLOAD [+]
 
 
-    deepseek-v4-flash:free · default                                   [USAGE]
+    deepseek-v4-flash:free · default           [ASK]                    [USAGE]
     C:\dev\projects\kicode ·                     ↓ 12 tools · 304.8K (29%)   ⚙
 ```
 
@@ -136,11 +136,12 @@ The bar across the top is your sessions for this directory, newest first. It is
 the **sidebar**, and it is a setting: `auto` — the default — keeps the row for
 the transcript while there is only one session and brings it back the moment
 there is something to switch to. The last three rows are the prompt, the current
-state — the model and the reasoning variant, while the mode rides in the box's
-own pill — and the footer: the
+state — the model, the reasoning variant, and the permission level, while the mode
+rides in the box's own pill — and the footer: the
 directory, what the session has cost, and a `⚙` glyph that opens the settings
 panel. The `[USAGE]` chip on the state row opens this session's share of the
-same numbers together with the context breakdown (`/context`).
+same numbers together with the context breakdown (`/context`). `[AGENTS n/m]`
+joins it whenever a child has run.
 `↓ 12 tools · 304.8K (29%)` is tool calls so far and the estimated size of the
 transcript against the window compaction keeps it inside. When the transcript is
 taller than the view, a scrollbar marks the right edge.
@@ -311,7 +312,8 @@ Command | Does
 `/connect` | Add an endpoint KiCode can reach from a list of known services, and move the session onto it
 `/status` `/stats` `/debug` `/mcps` | What is in play, and what it has cost
 `/agents` | Named subagents: add one, edit one, or change what it may do
-`/agents running` | The child agents this session spawned: goal, model, elapsed, and each report in full
+`/agents running` | The child agents this session spawned: which agent, which task, model, elapsed, and each report in full
+`/permission [ask\|edits\|all]` | How much this session may do without asking. No argument steps it one rung
 `/reload` | Re-read `kicode.json` without restarting
 
 ### Themes
@@ -934,7 +936,89 @@ Four things worth knowing:
   asked for and would not know about.
 
 `/agents running` is the live roster — the children working right now, with each
-report in full.
+report in full. Each row leads with **which agent took the task**, because that is
+the question the panel exists to answer:
+
+```
+  ◐ cody-git: audit the retry paths · gemini-3.8-flash · 7 tools · 12s
+    ✓ general: where is X handled · gemini-3.8-flash · 3 tools · 5s
+```
+
+`/agents` opens the whole roster; choosing a row prints that child's report in
+full. The transcript keeps one row per delegation — it opens as `delegating…`,
+counts `delegating 1 of 2` while the batch runs, and settles to what reported and
+what did not, in place.
+
+#### A folder per agent, for its skills
+
+A one-line description says what an agent *is*. It does not say whether to send it
+a pull request or a red build — and that judgement is the whole reason you made
+the agent. So each agent can have a folder beside its file:
+
+```
+  ~/.kicode/agents/cody-git/
+      SKILL.md            the agent itself: what it is for, how it works
+      pr-review.md        one skill
+      ci-triage.md        another
+      repo-audit.md
+```
+
+`SKILL.md` is the one fixed name: its body becomes the agent's standing brief, in
+front of every task it is given. **Every other `.md` is a skill** the agent can be
+asked for — frontmatter optional, and the filename is the name when it is absent.
+
+Those skills change how the agent is *chosen*, which is the part that matters:
+
+- The **roster in the system prompt** lists each agent's skills by name and
+  description. A model reading `cody-git — GitHub work` has one sentence to judge
+  against; one reading `skills: pr-review (review a diff), ci-triage (find the
+  first real error), repo-audit (every repo's sync state)` has something to match.
+- The **child is told the paths**, and told to read the one that covers the task
+  rather than work from memory of what its folder said. A child told a skill exists
+  but not where would spend turns grepping for it — the very turns delegation exists
+  to save.
+- Only the paths go in the prompt, never the bodies. A folder of procedures is a lot
+  of text to spend on every task, and which one the task needs is not knowable
+  before the task is read.
+
+```markdown
+---
+name: pr-review
+description: Review a pull request diff for correctness, security and missed cases
+---
+
+# Reviewing a pull request
+
+Read the diff first, then read enough of the surrounding files to judge it…
+```
+
+The folder follows the same two scopes as the file: `<project>/.kicode/agents/`
+overrides `~/.kicode/agents/`, so a repo can take an agent away from something it
+should not do here. Overriding the *agent* — or narrowing its permissions — is not
+a request to strip the skills it already had.
+
+#### When a turn is stopped mid-batch
+
+A stop is the ordinary end of a delegation: ctrl+c, a dropped connection, a closed
+window. Some reports came back; the rest never will, and from the next turn's side
+the parent sees only what arrived and re-plans from there — so the work already
+done gets done again.
+
+So the next turn is told what is still open, once, by agent and goal:
+
+```
+  [delegation] The previous turn was stopped with this work still running:
+  - cody-git: audit the deploy pipeline
+  Those produced no report. Do not redo work you already have a report for —
+  check what came back first, then re-delegate only what is genuinely missing.
+```
+
+Offered exactly once — a list that stayed would have the model re-delegate work it
+has already finished, which is the failure this exists to prevent. A child that
+*failed* on its own is left alone: it was already reported in the tool result, so
+re-offering it asks for a retry that has already been offered once.
+
+#### Watching it without leaving the chat
 
 While children run, a dock above the prompt says who is working on what:
 
@@ -944,10 +1028,9 @@ While children run, a dock above the prompt says who is working on what:
     +2 more · /agents for the roster
 ```
 
-`/agents` opens the whole roster; choosing a row prints that child's report in
-full. The transcript keeps one row per delegation — it opens as `delegating…`,
-counts `delegating 1 of 2` while the batch runs, and settles to what reported and
-what did not, in place.
+And on the state row below the chat, an `[AGENTS n/m]` chip — running against
+total, so a batch in flight is legible at a glance. Click it and you are in the
+same roster `/agents running` opens; one definition, so the two cannot disagree.
 
 Three things worth knowing:
 
@@ -1016,6 +1099,33 @@ conversation — so upgrading KiCode cannot resurrect a stale prompt.
 The diff is computed locally (`src/agent/tools/diff.ts`, an LCS line diff) and
 is shown *before* anything touches disk — `preview()` and `run()` share the same
 plan, so what you approve is what gets written.
+
+### The permission ladder
+
+Answering `always` to one `bash` command and never to an `edit` is a perfectly
+reasonable position, and a single on/off switch cannot express it. So the chip on
+the state row below the chat is three rungs, and it is always in view:
+
+| Chip | Means |
+| --- | --- |
+| `[ASK]` | ask before anything that changes files or runs a command — **the default on every run** |
+| `[EDITS]` | `write` and `edit` without asking; still ask before running a command |
+| `[ALL]` | run anything without asking — no diff, no prompt, no undo |
+
+The middle rung is the point. An edit shows a diff and can be read before it lands;
+a command runs arbitrary code with no preview at all. `[ALL]` is drawn in the error
+colour on purpose — at that rung there is no prompt and nothing to read.
+
+**Click it to step one rung** (ask → edits → all → ask), or set one outright with
+`/permission ask|edits|all`. Either way it says where it landed, because the next
+rung stops asking and a control that silently changed what was allowed would be the
+one action in this UI you could not take back. The mode lives in the session, not in
+a file: trust is something a session is given, not something it inherits.
+
+The ladder decides on the *tool*, never on its arguments. "Does this rung trust this
+kind of tool" is a question you can answer from the chip; "does this command look
+safe" is not. A caller that wants per-call judgement has `allow` rules in
+`kicode.json` for that, and they are OR-ed with the rung rather than replaced by it.
 
 ## Stopping a turn
 
@@ -1428,7 +1538,8 @@ src/routes/probe.ts     asking a gateway what is left (OpenRouter /key), cached
 src/routes/health.ts    what each route did last time, kept in ~/.kicode/routes.json
 src/agent/loop.ts       the loop: stream -> tools -> feed back -> repeat
 src/agent/subagent.ts   the delegate tool, the child runner, and the live roster
-src/agents.ts           named subagents: the profiles, their permissions, the files
+src/agents.ts           named subagents: the profiles, their permissions, the files,
+                       and each agent's skill folder beside them
 src/agent/tools/        tool contract, registry, the six tools, diff, walker, glob matcher
 src/agent/compaction.ts summarise older turns when the context window fills
 src/agent/environment.ts which shell `bash` gets, and the prompt that names it
@@ -1503,6 +1614,9 @@ around a failure — a rejected key, a cancellation, and an answer already begun
    [`ROADMAP.md`](ROADMAP.md) rather than left half-built in an afternoon.
 6. **Per-request cost, not just tokens** — the usage footer counts tokens; a
    price would need a provider-reported rate, which the free routes do not have.
+7. **Resume a child mid-flight, not just re-issue it.** ADR-059 stops the *double
+   work* and the *lost report* when a batch is cancelled; the work still restarts,
+   because nothing carries a child's intermediate state across a stop.
 
 Adding a tool is a single file plus one line in `createDefaultTools()`. Set
 `requiresApproval: true` and the gate, prompt, and refusal handling all apply.

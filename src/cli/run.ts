@@ -595,6 +595,14 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
        * live child registry, and this factory has never heard of the caller.
        */
       extraTools?: Tool[];
+      /**
+       * What this session currently trusts, as a predicate.
+       *
+       * A function and not a value: the mode changes under a live agent, and a
+       * value would mean rebuilding it to take effect — which would throw away
+       * the approvals the user has already given this session.
+       */
+      sessionAllow?: (name: string, args: Record<string, unknown>) => boolean;
     } = {},
   ): Agent => {
     const cwd = settings.cwd ?? io.cwd;
@@ -682,7 +690,11 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       ...(settings.signal ? { signal: settings.signal } : {}),
       // The `allow` rules from kicode.json. Read-only calls bypass the prompt on
       // their own (`loop.ts`); these are the ones the user named explicitly.
-      allow: allowPredicate(config.allow),
+      // The config's own `allow` rules, OR the session's current permission rung. The
+      // rung arrives as a closure over the app's live mode, so a click on the
+      // chip takes effect at once — a value here would mean rebuilding the agent,
+      // and rebuilding clears the approvals the user has already given.
+      allow: (name, args) => allowPredicate(config.allow)(name, args) || settings.sessionAllow?.(name, args) === true,
       ...(instructions ? { systemPrompt: instructions } : {}),
       // A child's own prompt wins over the directory's: the AGENTS.md block
       // describes how the user's project is worked on, and a delegated task is

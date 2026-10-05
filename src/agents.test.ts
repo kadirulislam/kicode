@@ -45,6 +45,148 @@ const profile = (over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
+describe("an agent's skill folder", () => {
+  /** Writes `<scope>/agents/<name>/<file>` for the profile under test. */
+  async function folder(
+    which: "global" | "project",
+    name: string,
+    file: string,
+    body: string,
+  ): Promise<void> {
+    const dir = path.join(
+      path.dirname(agentsFile(which, project, env())),
+      "agents",
+      name,
+    );
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, file), body, "utf8");
+  }
+
+  it("is not required — an agent with no folder still works", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+
+    const { agents, warnings } = await readAgentProfiles(project, env());
+
+    expect(warnings).toEqual([]);
+    expect(agents).toHaveLength(1);
+    // Nothing to show is not a problem to report; a user with one agent and no
+    // folder should never be told their setup is broken.
+    expect(agents[0]!.skills).toEqual([]);
+    expect(agents[0]!.skillFile).toBeUndefined();
+  });
+
+  it("reads the agent's own SKILL.md as its standing brief", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await folder(
+      "global",
+      "cody-git",
+      "SKILL.md",
+      "---\nname: cody-git\n---\nAlways check the remote before pushing.\n",
+    );
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    expect(agents[0]!.instructions).toContain("Always check the remote before pushing.");
+    expect(agents[0]!.skillFile).toContain(path.join("agents", "cody-git", "SKILL.md"));
+  });
+
+  it("lists every other file as a skill, with its own description", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await folder(
+      "global",
+      "cody-git",
+      "pr-review.md",
+      '---\nname: pr-review\ndescription: Review a pull request diff for correctness\n---\nLook for...\n',
+    );
+    await folder("global", "cody-git", "branch-audit.md", "No frontmatter at all.\n");
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    // The one without frontmatter is still a skill, called by its filename —
+    // requiring the header would make filling the folder a chore, and a chore is
+    // a folder nobody fills in.
+    expect(agents[0]!.skills?.map((skill) => skill.name)).toEqual(["branch-audit", "pr-review"]);
+    const review = agents[0]!.skills?.find((skill) => skill.name === "pr-review");
+    expect(review?.description).toBe("Review a pull request diff for correctness");
+    expect(review?.file).toContain("pr-review.md");
+    // A skill is not the brief: only SKILL.md becomes the prompt.
+    expect(agents[0]!.instructions).not.toContain("Look for...");
+  });
+
+  it("keeps the file's own line and the folder's brief together", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await folder("global", "cody-git", "SKILL.md", "From the folder.\n");
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    // Both, not either: the modal edits the `agents.json` line, and a folder that
+    // replaced it would make the editor lie about what the child is told.
+    expect(agents[0]!.instructions).toContain("From the folder.");
+    expect(agents[0]!.instructions).toContain("Focus on branches, commits and PRs.");
+  });
+
+  it("lets a project's folder narrow the global one", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await write("project", { agents: { "cody-git": profile({ permissions: "read" }) } });
+    await folder("global", "cody-git", "push.md", "---\ndescription: Push a branch\n---\n");
+    await folder("project", "cody-git", "review.md", "---\ndescription: Review a PR\n---\n");
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    // The project's agent replaces the global one, skills included — so a repo
+    // can take an agent away from something it should not do here.
+    expect(agents[0]!.skills?.map((skill) => skill.name)).toEqual(["review"]);
+  });
+
+  it("keeps the global skills when the project only overrides the agent", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await write("project", { agents: { "cody-git": profile({ permissions: "read" }) } });
+    await folder("global", "cody-git", "push.md", "---\ndescription: Push a branch\n---\n");
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    // Overriding who an agent is, or narrowing its permissions, is not a request
+    // to strip the skills it already had.
+    expect(agents[0]!.skills?.map((skill) => skill.name)).toEqual(["push"]);
+  });
+
+  it("reports an unreadable skill file rather than losing the agent", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    const dir = path.join(path.dirname(agentsFile("global", project, env())), "agents", "cody-git");
+    await mkdir(dir, { recursive: true });
+    // A directory where a file should be: the folder is browsable, so this is
+    // what a mistyped path looks like from the reader's side.
+    await mkdir(path.join(dir, "broken.md"), { recursive: true });
+
+    const { agents, warnings } = await readAgentProfiles(project, env());
+
+    expect(agents).toHaveLength(1);
+    expect(warnings.join("\n")).toContain("broken.md");
+  });
+
+  it("ignores a folder that belongs to no agent", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await folder("global", "someone-else", "thing.md", "---\ndescription: Nobody's\n---\n");
+
+    const { agents, warnings } = await readAgentProfiles(project, env());
+
+    // A skill file is not an agent. Adding one must not create the agent.
+    expect(agents.map((agent) => agent.name)).toEqual(["cody-git"]);
+    expect(warnings).toEqual([]);
+  });
+
+  it("keeps only markdown, so a notes file or a script is not a skill", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+    await folder("global", "cody-git", "notes.txt", "not a skill");
+    await folder("global", "cody-git", "helper.sh", "#!/bin/sh");
+    await folder("global", "cody-git", "real.md", "---\ndescription: Yes\n---\n");
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    expect(agents[0]!.skills?.map((skill) => skill.name)).toEqual(["real"]);
+  });
+});
+
 describe("agent names", () => {
   it("takes letters, digits, dashes and underscores", () => {
     for (const name of ["cody-git", "cody_frontend", "Cody2", "a"]) {

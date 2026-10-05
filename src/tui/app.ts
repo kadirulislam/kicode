@@ -3,6 +3,12 @@ import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Agent, ApprovalDecision, ApprovalRequest, ApproveFn } from "../agent/loop";
+import {
+  PERMISSION_LABELS,
+  PERMISSION_MODES,
+  permissionAllows,
+  type PermissionMode,
+} from "../agent/loop";
 import type { AskAnswer, AskFn, AskOption, AskQuestion } from "../agent/ask";
 import type { ChatMessage } from "../types";
 import {
@@ -351,6 +357,15 @@ export type AgentSettings = {
   mode: SessionMode;
   /** The id this session's transcript is saved under, for per-conversation routing. */
   sessionId: string;
+  /**
+   * What this session trusts, right now.
+   *
+   * A function rather than a value because the mode changes under a live agent:
+   * a value would have to rebuild the agent to take effect, and a rebuild clears
+   * the approvals the user has already given. This closure reads the app's own
+   * mode, so a click is instant and costs nothing.
+   */
+  sessionAllow?: (name: string, args: Record<string, unknown>) => boolean;
   /**
    * Tools this session adds on top of the defaults — the `delegate` tool, when
    * delegation is on.
@@ -1031,6 +1046,15 @@ class TuiApp {
   private cleanup: () => void = () => {};
   /** The `delegate` tool for this session, when delegation is on. */
   private delegateTool: Tool | null = null;
+  /**
+   * How much this session is trusted, and the only thing standing between the
+   * model and a command nobody read.
+   *
+   * Starts at `ask` on every run: trust is something a session is given, not
+   * something it inherits from the last one or from a file. Mutable on purpose —
+   * the gate reads it through a closure, so a click applies at once.
+   */
+  private permission: PermissionMode = "ask";
   /** `/agents`: the list of defined subagents, with a New row. */
   private agentsMenu: { selected: number } | null = null;
   /** The subagent editor, while it is open. */
@@ -2891,6 +2915,11 @@ class TuiApp {
     // counter would have the third turn of a long session refused for children
     // the first two spawned, which is not what `maxPerTurn` says.
     this.subagentsSpawned = 0;
+    // Children a previous turn left unfinished, offered to the model once so it
+    // can finish rather than restart. Without this a cancelled batch is invisible
+    // from the next turn: the parent sees the reports it did receive and re-plans
+    // from there, so the work already done gets done again.
+    const unfinished = this.unfinishedDelegations();
     // What the spinner's live rate is estimated from: characters streamed so
     // far, and when the first of them arrived. A turn's tool calls reset
     // neither — the speed is the turn's, not the current answer chunk's.
@@ -2904,7 +2933,11 @@ class TuiApp {
     };
 
     try {
-      for await (const event of this.agentFor(sessionId).send(prompt, images)) {
+      // The unfinished work rides along with the user's prompt rather than
+      // replacing it: the user's own words stay the request, and this is a note
+      // about what is already in flight.
+      const carried = unfinished.length > 0 ? `${prompt}\n\n${unfinishedNote(unfinished)}` : prompt;
+      for await (const event of this.agentFor(sessionId).send(carried, images)) {
         const current = this.isCurrent(sessionId);
         // Where this event belongs: on screen, or in the parked session that
         // started the turn and is still working behind the user's back.
@@ -3463,6 +3496,25 @@ class TuiApp {
       case "paste":
         await this.pasteFromClipboard();
         break;
+      case "permission": {
+        // No argument cycles, which is what a keyboard user wants from a control
+        // with three states; a named one sets it outright, which is what a habit
+        // or a script wants.
+        const wanted = argument.trim().toLowerCase();
+        if (!wanted) {
+          this.cyclePermission();
+          break;
+        }
+        const mode = PERMISSION_MODES.find((entry) => entry === wanted);
+        if (!mode) {
+          this.note(`usage: /permission [${PERMISSION_MODES.join("|")}]`, "warn");
+          break;
+        }
+        this.permission = mode;
+        const label = PERMISSION_LABELS[mode];
+        this.note(`Permissions: [${label.label}] ${label.description}.`, mode === "all" ? "warn" : "dim");
+        break;
+      }
       case "themes":
         await this.chooseTheme(argument);
         break;
@@ -6345,6 +6397,40 @@ class TuiApp {
       return true;
     }
 
+    // The permission chip cycles the session's trust: ask → edits → all → ask.
+    // One click rather than a menu, because the three states are ordered and a
+    // user reaching for this wants the next one, not to choose between three.
+    const permissionChip = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "permission_button" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (permissionChip) {
+      this.cyclePermission();
+      this.draw();
+      return true;
+    }
+
+    // The `[AGENTS n/m]` chip opens the same roster `/agents running` does, so the
+    // two doors cannot show different children — which is what would make both
+    // untrustworthy.
+    const agentsChip = this.panelRows.find(
+      (candidate) =>
+        candidate.kind === "agents_button" &&
+        candidate.row === event.y &&
+        (candidate.colStart === undefined ||
+          candidate.colEnd === undefined ||
+          (event.x >= candidate.colStart - 1 && event.x <= candidate.colEnd + 1)),
+    );
+    if (agentsChip) {
+      this.openSubagentRoster();
+      this.draw();
+      return true;
+    }
+
     // A chip is an answer, not a selection: it names the key that does the work
     // and the loop above runs it, so it never goes through `clickRow`. A row can
     // carry several of them, so the column decides which one was pressed.
@@ -7050,6 +7136,10 @@ class TuiApp {
       // `x-opencode-session`) get the id this transcript is saved under, so
       // every rebuild of the same session keeps the same identity.
       sessionId: this.sessionId,
+      // Read through a closure so the chip below the chat changes the gate
+      // immediately, rather than needing the agent rebuilt — a rebuild would
+      // throw away the approvals already given for this session.
+      sessionAllow: (name) => permissionAllows(this.permission, name),
       ...(this.delegateTool ? { extraTools: [this.delegateTool] } : {}),
     };
   }
@@ -7247,6 +7337,23 @@ class TuiApp {
    * The values live on the app rather than in the panel because they are being
    * edited: the panel is what is drawn from them, never where they are kept.
    */
+  /**
+   * Steps the session's trust one rung, and says where it landed.
+   *
+   * A note rather than silence: the next rung is `all`, where nothing will stop
+   * and ask. A control that changed what is allowed and said nothing would be
+   * the one place in this UI where an action could not be taken back.
+   */
+  private cyclePermission(): void {
+    const at = PERMISSION_MODES.indexOf(this.permission);
+    this.permission = PERMISSION_MODES[(at + 1) % PERMISSION_MODES.length] ?? "ask";
+    const label = PERMISSION_LABELS[this.permission];
+    this.note(
+      `Permissions: [${label.label}] ${label.description}.`,
+      this.permission === "all" ? "warn" : "dim",
+    );
+  }
+
   private agentForm(): FormPanel | null {
     const form = this.agentEditor;
     if (!form) return null;
@@ -7367,6 +7474,7 @@ class TuiApp {
       queue: this.queuedPrompts.map((entry) => entry.prompt),
       plan: this.plan,
       todoPanel: this.todoPanel,
+      permission: { label: PERMISSION_LABELS[this.permission].label, level: this.permission },
       subagents: this.subagents.snapshot(),
       settings: this.view,
       scroll: this.scroll,
@@ -7616,6 +7724,20 @@ private stepAgentField(delta: number): void {
     this.delegateTool = this.buildDelegateTool();
   }
 
+  /**
+   * Children a stopped turn left unfinished, dropped once they are offered.
+   *
+   * Cleared as it is read: the point is to hand the list over exactly once, and
+   * a reminder that repeats on every turn would have the model re-delegate work
+   * it already finished — which is the failure this exists to prevent.
+   */
+  private unfinishedDelegations(): SubagentView[] {
+    const open = this.subagents.unfinished();
+    if (open.length === 0) return [];
+    this.subagents.forget(open.map((child) => child.id));
+    return open;
+  }
+
   private openSubagentRoster(): void {
     const children = this.subagents.snapshot();
     if (children.length === 0) {
@@ -7642,6 +7764,22 @@ private stepAgentField(delta: number): void {
 
 
 /**
+ * What the next turn is told about work a cancelled batch left open.
+ *
+ * Names the agent and the goal rather than an id, because the model has to be
+ * able to re-issue the task — an id it cannot act on would just be noise, and
+ * the point is that the work can be picked up again.
+ */
+function unfinishedNote(children: readonly SubagentView[]): string {
+  return [
+    "[delegation] The previous turn was stopped with this work still running:",
+    ...children.map((child) => `- ${child.agent ?? "a general subagent"}: ${child.goal}`),
+    "Those produced no report. Do not redo work you already have a report for —",
+    "check what came back first, then re-delegate only what is genuinely missing.",
+  ].join("\n");
+}
+
+/**
  * The subagent roster: one card row per child, model and elapsed included.
  *
  * Drawn from the same registry the dock is, so a count in the panel and a row
@@ -7650,7 +7788,12 @@ private stepAgentField(delta: number): void {
  */
 function subagentRows(children: readonly SubagentView[]): PickItem[] {
   return children.map((child) => ({
-    label: `${child.status === "running" ? "◐" : child.status === "completed" ? "✓" : "✕"} ${child.goal}`,
+    // The agent's name leads, not the goal: the question this panel answers is
+    // "which agent is working on what", and a list of tasks with the agent hidden
+    // at the end of a line of timings cannot answer it at a glance.
+    label: `${child.status === "running" ? "◐" : child.status === "completed" ? "✓" : "✕"} ${
+      child.agent ?? "general"
+    }: ${child.goal}`,
     description:
       child.error ??
       `${child.model} · ${child.toolCalls} tool${child.toolCalls === 1 ? "" : "s"} · ${

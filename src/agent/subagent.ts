@@ -48,12 +48,26 @@ export type SubagentState = SubagentView;
 export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string | null {
   if (profiles.length === 0) return null;
   const list = profiles
-    .map(
-      (profile) =>
+    .map((profile) => {
+      const skills = profile.skills ?? [];
+      // The skills are listed under the agent because the routing decision is
+      // made against them. An agent described as "git things" and equipped with
+      // "pr-review, branch-audit, ci-triage" is a different offer from the first
+      // one alone, and the second is what tells the model this task is not its own.
+      const lines = [
         `- ${profile.name} — ${profile.description || "no description"} (${
           profile.permissions === "write" ? "may edit files" : "read only"
         })`,
-    )
+      ];
+      if (skills.length > 0) {
+        lines.push(
+          `    skills: ${skills
+            .map((skill) => `${skill.name}${skill.description ? ` (${skill.description})` : ""}`)
+            .join("; ")}`,
+        );
+      }
+      return lines.join("\n");
+    })
     .join("\n");
   return [
     "Subagents:",
@@ -65,6 +79,9 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
     "- When the user names one of these, delegate to it by name. Do that without checking whether it",
     "  exists and without asking whether to: they are already available to you, and looking for them",
     "  on disk is a wasted turn that answers a question you should already know the answer to.",
+    "- Read each agent's skills before deciding. When the work matches one of them, that agent is the",
+    "  one to use — and using it is not optional politeness, it is cheaper for both sides: its report",
+    "  comes back to you instead of the forty files behind it.",
     "- When a task is broad, exploratory, or spans many files, and one of these fits it, delegate to",
     "  that one rather than reading everything yourself. That is what they are for, and their report",
     "  comes back to you.",
@@ -72,6 +89,27 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
     "  not delegating.",
     "- A subagent has no memory of this conversation. Put everything it needs in `context`: paths,",
     "  error text, and the constraint that matters.",
+  ].join("\n");
+}
+
+/**
+ * What the child is told about its own skill files.
+ *
+ * The roster names the skills so the *parent* can route; this names the paths so
+ * the *child* can open one. A child that was told a skill exists but not where
+ * it is would have to guess a path and then grep for it — burning the very turns
+ * delegation exists to save.
+ *
+ * List-only, not inlined: a folder of procedures is a lot of text to spend on
+ * every task, and the one the task needs is not knowable before the task is read.
+ */
+function skillReminder(profile: AgentProfile | null): string {
+  const skills = profile?.skills ?? [];
+  const files = [...(profile?.skillFile ? [profile.skillFile] : []), ...skills.map((skill) => skill.file)];
+  if (files.length === 0) return "";
+  return [
+    "Your skills are on disk. Read the one that covers this task before you start — do not work from memory of what they say.",
+    ...files.map((file) => `- ${file}`),
   ].join("\n");
 }
 
@@ -439,6 +477,35 @@ export class SubagentRegistry {
     this.live.set(id, { ...current, ...patch });
     this.evict();
   }
+
+  /**
+   * The children a cancelled turn left unfinished.
+   *
+   * A stop is the normal end of a delegation — the user pressed ctrl+c, the
+   * provider dropped, the process was closed — and at that moment the parent has
+   * a batch where some reports came back and the rest never will. Without this
+   * the next turn sees only the reports it received, and re-plans from scratch:
+   * work already done gets done again, and the child's report is lost with it.
+   *
+   * `interrupted` and `stalled` only. A `failed` child was reported to the model
+   * in the tool result, so re-offering it would ask for a retry that has already
+   * been offered once.
+   */
+  unfinished(): SubagentState[] {
+    return this.snapshot().filter(
+      (child) => child.status === "interrupted" || child.status === "stalled",
+    );
+  }
+
+  /**
+   * Drops children the caller has taken responsibility for.
+   *
+   * The handoff, so the reminder is offered once: a list that stayed in the
+   * registry would have the model re-delegate work it has already finished.
+   */
+  forget(ids: readonly string[]): void {
+    for (const id of ids) this.live.delete(id);
+  }
 }
 
 /**
@@ -527,7 +594,9 @@ export function delegateTool(options: DelegateToolOptions): Tool {
         signal,
         model,
         tools: toolsFor(agent?.permissions ?? "read"),
-        instructions: childPrompt(agent?.instructions ?? ""),
+        instructions: childPrompt(
+          [agent?.instructions ?? "", skillReminder(agent)].filter(Boolean).join("\n\n"),
+        ),
         ...(agent ? { agent } : {}),
       });
       const summary = clampSummary(result.summary);
@@ -569,6 +638,14 @@ export function delegateTool(options: DelegateToolOptions): Tool {
                 (profile) =>
                   `${profile.name} (${profile.description || "no description"}, ${
                     profile.permissions === "write" ? "may edit files" : "read only"
+                  }${
+                    // Its skills inline: "git work" is not enough for a model to
+                    // judge fit against, and the list is short by construction.
+                    (profile.skills?.length ?? 0) > 0
+                      ? `; skills: ${(profile.skills ?? [])
+                          .map((skill) => (skill.description ? `${skill.name} (${skill.description})` : skill.name))
+                          .join(", ")}`
+                      : ""
                   })`,
               )
               .join("; ")}.`,

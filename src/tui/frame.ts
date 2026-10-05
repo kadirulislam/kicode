@@ -269,6 +269,15 @@ export type TuiState = {
   /** The plan tools' state, for the progress button and its panel. */
   plan?: PlanSnapshot | null;
   /**
+   * How much this session is trusted, as the chip's label.
+   *
+   * The label and not a number because the chip's whole job is to be read at a
+   * glance: `[ASK]` says the session will stop and ask, `[ALL]` says it will not,
+   * and the colour is the third of the message. A permission control that needs
+   * reading carefully is not a permission control.
+   */
+  permission?: { label: string; level: "ask" | "edits" | "all" };
+  /**
    * Child agents running right now, drawn as a dock above the prompt.
    *
    * As data rather than a sentence for the same reason the plan snapshot is: a
@@ -427,6 +436,10 @@ export type PanelKind =
   | "queued_add"
   /** The `TODO [n/m]` chip on the state row, which opens the plan panel. */
   | "todo_button"
+  /** The `[ASK]` / `[EDITS]` / `[ALL]` chip: the session's trust level. */
+  | "permission_button"
+  /** The `[AGENTS n/m]` chip: who is working on what, and opens the roster. */
+  | "agents_button"
   /** The `[USAGE]` chip on the state row, which opens this session's usage. */
   | "usage_button"
   /** The `[⚙]` button on the footer's left end, which opens the settings panel. */
@@ -2605,6 +2618,40 @@ function renderBottom(
   if (boxShown && state.plan) {
     const plan = planChip(state.plan, styles);
     if (plan) chips.push({ kind: "todo_button", spans: plan });
+  }
+  // The permission chip leads the row's chips, because it is the one that says
+  // whether anything on this screen will stop and ask. `[ALL]` is drawn in the
+  // error colour on purpose: at that rung there is no prompt, no diff and no
+  // undo, and the row should not look as calm as `[ASK]`.
+  if (boxShown && state.permission) {
+    const tone =
+      state.permission.level === "all"
+        ? styles.error
+        : state.permission.level === "edits"
+          ? styles.accent
+          : styles.hintKey;
+    chips.push({
+      kind: "permission_button",
+      spans: [span("[", styles.pillBorder), span(state.permission.label, tone), span("]", styles.pillBorder)],
+    });
+  }
+  // The agents chip sits beside usage because it answers the same kind of
+  // question — what is this session doing right now — and because a delegated
+  // task is invisible from the transcript until it reports. The counts are
+  // running/total so a batch is legible at a glance: `2/5` says two are on and
+  // three are queued or done, which a list of names alone would not.
+  if (boxShown && (state.subagents?.length ?? 0) > 0) {
+    const live = state.subagents!;
+    const running = live.filter((child) => child.status === "running").length;
+    chips.push({
+      kind: "agents_button",
+      spans: [
+        span("[", styles.pillBorder),
+        span("AGENTS", running > 0 ? styles.accent : styles.hintKey),
+        span(` ${running}/${live.length}`, styles.hint),
+        span("]", styles.pillBorder),
+      ],
+    });
   }
   if (boxShown) {
     chips.push({

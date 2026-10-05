@@ -1703,55 +1703,56 @@ describe("the plan panel", () => {
   });
 });
 
-describe("delegation", () => {
-  /**
-   * A child agent that reports a fixed thing, and records what it was asked.
-   *
-   * Shaped as an `Agent` because that is what the app holds: the parent's
-   * events are what the dock is drawn from, so a child that never emits one
-   * would leave the panel untested rather than tested-and-empty.
-   */
-  function child(sent: string[], body: () => AsyncGenerator<AgentEvent>): Agent {
-    return {
-      async *send(prompt: string): AsyncGenerator<AgentEvent> {
-        sent.push(prompt);
-        yield* body();
-      },
-    } as unknown as Agent;
-  }
+function child(sent: string[], body: () => AsyncGenerator<AgentEvent>): Agent {
+  return {
+    async *send(prompt: string): AsyncGenerator<AgentEvent> {
+      sent.push(prompt);
+      yield* body();
+    },
+  } as unknown as Agent;
+}
 
-  const answering = (report: string, tools = 1): (() => AsyncGenerator<AgentEvent>) =>
-    async function* answering(): AsyncGenerator<AgentEvent> {
-      for (let at = 0; at < tools; at += 1) {
-        yield { type: "tool-start", id: `t${at}`, name: "read", args: {} };
-        yield { type: "tool-result", id: `t${at}`, name: "read", content: "x", isError: false };
-      }
-      yield { type: "text", delta: report };
-      yield { type: "done", reason: "complete" };
+const answering = (report: string, tools = 1): (() => AsyncGenerator<AgentEvent>) =>
+  async function* answering(): AsyncGenerator<AgentEvent> {
+    for (let at = 0; at < tools; at += 1) {
+      yield { type: "tool-start", id: `t${at}`, name: "read", args: {} };
+      yield { type: "tool-result", id: `t${at}`, name: "read", content: "x", isError: false };
     }
-
-  const delegation = (over: Partial<NonNullable<TuiOptions["delegation"]>> = {}): NonNullable<
-    TuiOptions["delegation"]
-  > => ({
-    enabled: true,
-    model: "child-flash",
-    maxConcurrent: 2,
-    maxPerTurn: 4,
-    maxIterations: 20,
-    staleMs: 60_000,
-    staleToolMs: 120_000,
-    ...over,
-  });
-
-  /** The `delegate` tool the app actually registered, as the loop would find it. */
-  function tool(app: Harness): Tool {
-    // Built in the constructor and handed to every agent, so the first settings
-    // the harness collected is where it is.
-    const registered = app.settings[0]?.extraTools?.[0];
-    if (!registered) throw new Error("no delegate tool was registered");
-    return registered;
+    yield { type: "text", delta: report };
+    yield { type: "done", reason: "complete" };
   }
 
+const delegation = (over: Partial<NonNullable<TuiOptions["delegation"]>> = {}): NonNullable<
+  TuiOptions["delegation"]
+> => ({
+  enabled: true,
+  model: "child-flash",
+  maxConcurrent: 2,
+  maxPerTurn: 4,
+  maxIterations: 20,
+  staleMs: 60_000,
+  staleToolMs: 120_000,
+  ...over,
+});
+
+/** The `delegate` tool the app actually registered, as the loop would find it. */
+function tool(app: Harness): Tool {
+  // Built in the constructor and handed to every agent, so the first settings
+  // the harness collected is where it is.
+  const registered = app.settings[0]?.extraTools?.[0];
+  if (!registered) throw new Error("no delegate tool was registered");
+  return registered;
+}
+
+describe("delegation", () => {
+
+/**
+ * A child agent that reports a fixed thing, and records what it was asked.
+ *
+ * Shaped as an `Agent` because that is what the app holds: the parent's
+ * events are what the dock is drawn from, so a child that never emits one
+ * would leave the panel untested rather than tested-and-empty.
+ */
   describe("registration", () => {
     it("registers the delegate tool when delegation is on", async () => {
       const { app, done } = await drive([], {
@@ -2073,6 +2074,341 @@ describe("delegation", () => {
       app.input.write("\u0015/exit\r");
       await done;
     });
+  });
+});
+
+  describe("the agents chip", () => {
+    /**
+     * A delegation whose children all behave the same way, so a test can leave one
+     * running or settle it a particular way without reaching into the app.
+     */
+    function withChild(
+      behaviour: (goal: string) => AsyncGenerator<AgentEvent>,
+      over: Partial<NonNullable<TuiOptions["delegation"]>> = {},
+      profiles: AgentProfile[] = [],
+    ) {
+      return {
+        delegation: {
+          enabled: true,
+          model: "child-flash",
+          maxConcurrent: 4,
+          maxPerTurn: 8,
+          maxIterations: 20,
+          staleMs: 60_000,
+          staleToolMs: 120_000,
+          ...over,
+          ...(profiles.length > 0 ? { profiles } : {}),
+        },
+        createSubagent: ({ goal }: { goal: string }) => child([], () => behaviour(goal)),
+      } as Partial<TuiOptions>;
+    }
+
+    /**
+     * Reports back immediately. Takes the report or a builder, because "the child
+     * answers with this string" and "the child answers with its own goal" are the
+     * same behaviour and neither deserves its own helper.
+     */
+    const reporting =
+      (report: string | ((goal: string) => string)) =>
+      (goal: string): AsyncGenerator<AgentEvent> =>
+        answering(typeof report === "function" ? report(goal) : report)();
+
+    it("is absent when no child has run, because a count of nothing is noise", async () => {
+      const { app, done } = await drive([]);
+
+      expect(app.lastFrame()).not.toContain("AGENTS");
+      await finish(app, done);
+    });
+
+    it("opens the same roster `/agents running` does", async () => {
+      const { app, done } = await drive([], withChild(reporting("found it")));
+      await (await tool(app)).run({ goal: "what is the port" }, { cwd: "C:\\dev" });
+      await tick(40);
+
+      const frame = app.lastFrame();
+      const row = frame.split(/\r?\n/).findIndex((line) => line.includes("[AGENTS"));
+      expect(row).toBeGreaterThan(-1);
+      const col = frame.split(/\r?\n/)[row]!.indexOf("[AGENTS");
+      app.input.write(clickAt(row + 1, col + 1));
+      await tick(40);
+
+      // The whole point of the chip: which agent is working on what, one click away
+      // from where it is being watched, and the same roster the command opens.
+      expect(app.lastFrame()).toContain("Subagents");
+      expect(app.lastFrame()).toContain("what is the port");
+      await finish(app, done);
+    });
+
+    it("names the agent that took the task, not just the task", async () => {
+      const { app, done } = await drive(
+        [],
+        withChild(reporting("ok"), {}, [
+          { name: "cody-git", description: "git", instructions: "", model: "", permissions: "read", scope: "global", file: "" },
+        ]),
+      );
+
+      await (await tool(app)).run({ goal: "review PR 12", agent: "cody-git" }, { cwd: "C:\\dev" });
+      await tick(30);
+      app.input.write("/agents running\r");
+      await tick(30);
+
+      // The question this panel answers is "which agent is working on what". A list
+      // of goals with the agent hidden at the end of a line of timings cannot.
+      expect(app.lastFrame()).toContain("cody-git: review PR 12");
+      await finish(app, done);
+    });
+
+    it("says general when no named agent took the task", async () => {
+      const { app, done } = await drive([], withChild(reporting("ok")));
+
+      await (await tool(app)).run({ goal: "look around" }, { cwd: "C:\\dev" });
+      await tick(30);
+      app.input.write("/agents running\r");
+      await tick(30);
+
+      // Silence here would read as a bug in the panel rather than a fact about the
+      // call: the model chose the general child, and the row should say so.
+      expect(app.lastFrame()).toContain("general: look around");
+      await finish(app, done);
+    });
+
+    it("counts running against total, so a batch is legible at a glance", async () => {
+      const { app, done } = await drive([], withChild(reporting("ok"), { maxConcurrent: 1 }));
+      // Two done, one still on: `1/3` says a batch is in flight, which a plain
+      // "AGENTS" would not.
+      await (await tool(app)).run(
+        {
+          tasks: [
+            { goal: "one" },
+            { goal: "two" },
+            { goal: "three" },
+          ],
+        },
+        { cwd: "C:\\dev" },
+      );
+      await tick(40);
+
+      expect(app.lastFrame()).toMatch(/\[AGENTS \d+\/\d+\]/);
+      await finish(app, done);
+    });
+  });
+
+  describe("work a stopped turn left open", () => {
+    /**
+     * A child that only ends when the turn is cancelled.
+     *
+     * It waits on the abort signal rather than on nothing: a fake that ignored the
+     * signal would leave the runner waiting on a turn that can never be cancelled,
+     * which tests the harness rather than the thing under test.
+     */
+    function stalling(signal: AbortSignal): AsyncGenerator<AgentEvent> {
+      return (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: "tool-start", id: "t0", name: "read", args: {} };
+        yield { type: "tool-result", id: "t0", name: "read", content: "x", isError: false };
+        await new Promise<void>((resolve) => {
+          if (signal.aborted) resolve();
+          else signal.addEventListener("abort", () => resolve(), { once: true });
+        });
+        yield { type: "text", delta: "cancelled" };
+        yield { type: "done", reason: "cancelled" as never };
+      })();
+    }
+
+    const over = {
+      delegation: {
+        enabled: true,
+        model: "child-flash",
+        maxConcurrent: 1,
+        maxPerTurn: 8,
+        maxIterations: 20,
+        staleMs: 60_000,
+        staleToolMs: 120_000,
+      },
+      createSubagent: ({ goal, signal }: { goal: string; signal: AbortSignal }) =>
+        child([], () => stalling(signal)),
+    } as Partial<TuiOptions>;
+
+    it("is offered to the next turn, by name and goal", async () => {
+      const { app, done } = await drive([], over);
+      const signal = new AbortController();
+      const running = (await tool(app)).run(
+        { goal: "audit the deploy pipeline" },
+        { cwd: "C:\\dev", signal: signal.signal },
+      );
+      await tick(40);
+      // The turn is cancelled with the child still on — the ordinary end of a
+      // delegation, and the case this exists for.
+      signal.abort();
+      await running.catch(() => undefined);
+      await tick(40);
+
+      app.input.write("keep going\r");
+      await tick(60);
+
+      // Without this the parent sees only the reports it did receive and re-plans
+      // from there — so the work already done gets done again.
+      const sent = app.sentPrompts.join("\n");
+      expect(sent).toContain("audit the deploy pipeline");
+      expect(sent).toContain("produced no report");
+      await finish(app, done);
+    });
+
+    it("leaves a child that reported its own failure alone", async () => {
+      const { app, done } = await drive([], {
+        delegation: over.delegation,
+        createSubagent: ({ goal }: { goal: string }) => child([], answering(goal)),
+      });
+
+      await (await tool(app)).run({ goal: "audit the pipeline" }, { cwd: "C:\\dev" });
+      await tick(40);
+      app.input.write("keep going\r");
+      await tick(40);
+
+      // A failed child was already reported in the tool result, so the model has
+      // been told; re-offering it asks for a retry that was already offered once.
+      expect(app.sentPrompts.join("\n")).not.toContain("produced no report");
+      await finish(app, done);
+    });
+
+    it("says nothing when the previous turn finished cleanly", async () => {
+      const { app, done } = await drive([], {
+        delegation: over.delegation,
+        createSubagent: ({ goal }: { goal: string }) => child([], answering(goal)),
+      });
+
+      await (await tool(app)).run({ goal: "audit the pipeline" }, { cwd: "C:\\dev" });
+      await tick(40);
+      app.input.write("keep going\r");
+      await tick(40);
+
+      expect(app.sentPrompts.join("\n")).not.toContain("produced no report");
+      await finish(app, done);
+    });
+  });
+
+describe("the permission chip", () => {
+  /**
+   * The row the chips live on.
+   *
+   * Matched on `[USAGE]` rather than on the chip itself, because a note in the
+   * transcript also says `[EDITS]` — a test that reads the first line containing
+   * the label is reading its own announcement back at itself.
+   */
+  const chipRow = (app: Harness): string =>
+    app.lastFrame().split(/\r?\n/).find((line) => line.includes("[USAGE]")) ?? "";
+
+  it("is on the row below the chat, so the trust level is always in view", async () => {
+    const { app, done } = await drive([]);
+
+    // A permission control you have to go looking for is not one.
+    expect(chipRow(app)).toContain("[ASK]");
+    await finish(app, done);
+  });
+
+  it("steps through ask, edits and all, and wraps", async () => {
+    const { app, done } = await drive([]);
+
+    app.input.write("/permission\r");
+    await tick(30);
+    expect(chipRow(app)).toContain("[EDITS]");
+
+    app.input.write("/permission\r");
+    await tick(30);
+    expect(chipRow(app)).toContain("[ALL]");
+
+    app.input.write("/permission\r");
+    await tick(30);
+    expect(chipRow(app)).toContain("[ASK]");
+
+    await finish(app, done);
+  });
+
+  it("says where it landed, because the next rung stops asking", async () => {
+    const { app, done } = await drive(["/permission"]);
+    await finish(app, done);
+
+    // Silence would be the one place in this UI where an action could not be
+    // taken back. Asserted on a short fragment: a transcript note wraps, so a long
+    // phrase can be split across two rows and the test would be testing the wrap.
+    expect(app.screen()).toContain("write and edit without asking");
+  });
+
+  it("takes a named rung outright", async () => {
+    const { app, done } = await drive(["/permission all"]);
+    await finish(app, done);
+
+    expect(app.screen()).toContain("[ALL]");
+    expect(app.screen()).toContain("run anything without asking");
+  });
+
+  it("refuses a rung it does not have, and names the ones it does", async () => {
+    const { app, done } = await drive(["/permission banana"]);
+    await finish(app, done);
+
+    expect(app.screen()).toContain("usage: /permission [ask|edits|all]");
+  });
+
+  it("is clickable, and a click steps it", async () => {
+    const { app, done } = await drive([]);
+
+    const row = app.lastFrame().split(/\r?\n/).findIndex((line) => line.includes("[ASK]"));
+    const col = app.lastFrame().split(/\r?\n/)[row]?.indexOf("[ASK]") ?? 0;
+    app.input.write(clickAt(row + 1, col + 1));
+    await tick(40);
+
+    expect(chipRow(app)).toContain("[EDITS]");
+
+    await finish(app, done);
+  });
+
+  it("hands the agent a gate that follows the chip", async () => {
+    // The harness's agent is a fake with no gate of its own, so what this can
+    // honestly check is the seam: the predicate the app hands down, which is
+    // exactly what the real `Agent` consults. The gate itself is pinned in
+    // loop.test.ts, against a real Agent.
+    const { app, done } = await drive(["/permission"]);
+    const allow = (): ((name: string, args: Record<string, unknown>) => boolean) | undefined =>
+      app.settings[app.settings.length - 1]?.sessionAllow;
+
+    expect(allow()?.("write", {})).toBe(true);
+    expect(allow()?.("bash", {})).toBe(false);
+
+    await app.input.write("/permission\r");
+    await tick(30);
+    expect(allow()?.("bash", {})).toBe(true);
+
+    await app.input.write("/permission\r");
+    await tick(30);
+    expect(allow()?.("bash", {})).toBe(false);
+    expect(allow()?.("write", {})).toBe(false);
+
+    await finish(app, done);
+  });
+
+  it("still asks about commands at the middle rung", async () => {
+    // The middle rung trusts edits, not commands. Testing that separately is the
+    // point of having a middle.
+    const { app, done } = await drive(["/permission"]);
+    const allow = app.settings[app.settings.length - 1]?.sessionAllow;
+
+    expect(allow?.("write", {})).toBe(true);
+    expect(allow?.("edit", {})).toBe(true);
+    expect(allow?.("bash", {})).toBe(false);
+
+    await finish(app, done);
+  });
+
+  it("does not change the mode on a click anywhere else on the row", async () => {
+    const { app, done } = await drive([]);
+
+    const row = app.lastFrame().split(/\r?\n/).findIndex((line) => line.includes("[ASK]"));
+    // Far left of the chip, on the model's own label.
+    app.input.write(clickAt(row + 1, 4));
+    await tick(30);
+
+    expect(chipRow(app)).toContain("[ASK]");
+
+    await finish(app, done);
   });
 });
 

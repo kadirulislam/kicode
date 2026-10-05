@@ -59,6 +59,7 @@ export const COMMANDS: readonly Command[] = [
   { name: "open", description: "Open session or project", alias: "sessions" },
   { name: "pair", description: "Pair device", unavailable: "There is no device to pair: KiCode is a single terminal process." },
   { name: "paste", description: "Paste the clipboard: text onto the prompt, an image onto the next turn" },
+  { name: "permission", description: "How much this session may do without asking", usage: "[ask|edits|all]" },
   { name: "pause", description: "Pause model execution or active session" },
   {
     name: "plugins",

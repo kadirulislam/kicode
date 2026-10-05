@@ -14,6 +14,7 @@ import { SUBAGENT_TOOLS, createDefaultTools } from "./tools";
 import { ToolRegistry } from "./tools/types";
 import type { AgentProfile } from "../agents";
 import type { Agent, AgentEvent } from "./loop";
+import { PERMISSION_LABELS, PERMISSION_MODES, permissionAllows } from "./loop";
 
 const settings = (over: Partial<DelegateSettings> = {}): DelegateSettings => ({
   model: "child-model",
@@ -581,6 +582,46 @@ describe("named agents", () => {
     expect(described).toContain("GitHub and git work");
   });
 
+  it("names each agent's skills in the tool description too", () => {
+    // Both places the model can look, because a model that reads one and not the
+    // other must still find the capability. The skill list is what makes the
+    // choice — this is where a session decides `cody-git` fits.
+    const described = tool([
+      profile({
+        skills: [
+          { name: "pr-review", description: "Review a pull request diff", file: "/a/pr-review.md" },
+        ],
+      }),
+    ]).description;
+
+    expect(described).toContain("pr-review");
+    expect(described).toContain("Review a pull request diff");
+  });
+
+  it("points the child at its own skill files, by path", async () => {
+    const seen: SubagentRequest[] = [];
+    const runner = tool([profile({ skills: [{ name: "pr-review", description: "", file: "/s/pr-review.md" }] })], seen);
+
+    await runner.run({ goal: "review PR 12", agent: "cody-git" }, { signal: new AbortController().signal } as never);
+
+    // The roster names the skills so the parent can route; this names the paths
+    // so the child can open one. A child told a skill exists but not where would
+    // have to guess a path and grep — burning the turns delegation exists to save.
+    expect(seen[0]?.instructions).toContain("/s/pr-review.md");
+    expect(seen[0]?.instructions).toContain("before you start");
+  });
+
+  it("says nothing about skills for an agent that has none", async () => {
+    const seen: SubagentRequest[] = [];
+    const runner = tool([profile()], seen);
+
+    await runner.run({ goal: "look around", agent: "cody-git" }, { signal: new AbortController().signal } as never);
+
+    // A line about skills on an agent with none reads as a folder that failed to
+    // load, and invites the child to go looking for files that are not there.
+    expect(seen[0]?.instructions).not.toContain("skills are on disk");
+  });
+
   it("says to prefer a named agent over doing the work itself", () => {
     // A list of names with no steering is a menu the model may never order from.
     expect(tool([profile()]).description).toContain("prefer one over doing the work yourself");
@@ -783,6 +824,83 @@ describe("the roster in the system prompt", () => {
     // direction: telling the parent to expect a bash-capable child would have it
     // ask for work the child cannot do.
     expect(namedSubagentPrompt([profile()])).not.toMatch(/you can run commands/i);
+  });
+
+  it("lists an agent's skills, because the routing decision is made against them", async () => {
+    // The observed failure: a session asked about GitHub work audited thirteen
+    // repositories itself when `cody-git` was right there. The roster named the
+    // agent, and the model still judged the fit from one sentence.
+    const prompt = namedSubagentPrompt([
+      profile({
+        name: "cody-git",
+        description: "GitHub work",
+        skills: [
+          { name: "pr-review", description: "Review a pull request diff", file: "/a/pr-review.md" },
+          { name: "ci-triage", description: "Find why a build is red", file: "/a/ci-triage.md" },
+        ],
+      }),
+    ]);
+
+    expect(prompt).toContain("pr-review (Review a pull request diff)");
+    expect(prompt).toContain("ci-triage (Find why a build is red)");
+  });
+
+  it("says the skills decide, not that delegating is always right", async () => {
+    const prompt = namedSubagentPrompt([
+      profile({ skills: [{ name: "pr-review", description: "", file: "/a.md" }] }),
+    ]);
+
+    // Both halves, or the roster overcorrects into "always delegate" — its own
+    // failure, since the wrong subagent costs more than none.
+    expect(prompt).toContain("Read each agent's skills before deciding");
+    expect(prompt).toContain("do the work yourself");
+  });
+
+  it("leaves the skills line out for an agent that has none", async () => {
+    // An empty "skills:" line reads as a folder that failed to load rather than
+    // an agent that has none.
+    expect(namedSubagentPrompt([profile()])).not.toContain("skills:");
+    expect(namedSubagentPrompt([profile({ skills: [] })])).not.toContain("skills:");
+  });
+});
+
+describe("the permission ladder", () => {
+  it("starts at ask, and ask waives nothing", () => {
+    expect(PERMISSION_MODES[0]).toBe("ask");
+    for (const name of ["write", "edit", "bash"]) {
+      expect(permissionAllows("ask", name)).toBe(false);
+    }
+  });
+
+  it("lets edits through without asking, but not commands", () => {
+    // The middle rung is the point: an edit shows a diff and can be read before it
+    // lands; a command runs arbitrary code with no preview at all. Answering
+    // "always" to one and never to the other is a reasonable position, and a
+    // single on/off switch cannot express it.
+    expect(permissionAllows("edits", "write")).toBe(true);
+    expect(permissionAllows("edits", "edit")).toBe(true);
+    expect(permissionAllows("edits", "bash")).toBe(false);
+  });
+
+  it("lets everything through at the top rung", () => {
+    for (const name of ["write", "edit", "bash"]) {
+      expect(permissionAllows("all", name)).toBe(true);
+    }
+  });
+
+  it("names every rung, in an order that goes from safest to least", () => {
+    expect(PERMISSION_MODES).toEqual(["ask", "edits", "all"]);
+    for (const mode of PERMISSION_MODES) {
+      expect(PERMISSION_LABELS[mode].label.length).toBeGreaterThan(0);
+      expect(PERMISSION_LABELS[mode].description.length).toBeGreaterThan(10);
+    }
+  });
+
+  it("does not decide on the arguments, only on the tool", () => {
+    // A rung that read the arguments would be a policy the user cannot reason
+    // about from the label on the chip.
+    expect(permissionAllows("edits", "write")).toBe(permissionAllows("edits", "write"));
+    expect(permissionAllows("edits", "bash")).toBe(false);
   });
 });
 

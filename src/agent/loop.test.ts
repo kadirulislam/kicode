@@ -949,6 +949,88 @@ describe("plan mode", () => {
   });
 });
 
+describe("the caller's own allow rules", () => {
+  /**
+   * The approval gate has two ways out: the config's `allow` rules and the
+   * session's permission rung, and the app wires both through this one predicate.
+   * So this is where "the chip changes the gate" is actually pinned — the TUI test
+   * can only check that the app hands a predicate down, because the agent it uses
+   * there is a fake with no gate of its own.
+   */
+  // Counted on the reply, not on an event: asking is a call into the channel, so
+  // the channel being called *is* the fact that the user was asked.
+  const asksAbout = async (allow: ((name: string, args: Record<string, unknown>) => boolean) | undefined) => {
+    const asked: string[] = [];
+    const provider = new FakeProvider([toolCallTurn("call_1", "write", '{"path":"a.txt"}'), answerTurn("ok")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([gatedTool]),
+      model: "m",
+      cwd: process.cwd(),
+      allow,
+      approve: async (request) => {
+        asked.push(request.name);
+        // "allow" deliberately: "always" would put the tool into the session's
+        // approval set and hide a second prompt behind the first one's answer.
+        return "allow";
+      },
+    });
+    await collect(agent, "write it");
+    return asked;
+  };
+
+  it("asks anyway when nothing says otherwise", async () => {
+    expect(await asksAbout(undefined)).toEqual(["write"]);
+  });
+
+  it("does not ask when the caller allows the tool", async () => {
+    expect(await asksAbout(() => true)).toEqual([]);
+  });
+
+  it("asks when the caller refuses the one call it was asked about", async () => {
+    // The predicate sees the arguments, so a caller can allow a whole class of
+    // edits and still stop the one that rewrites a lockfile. The call under test
+    // is that one — a predicate that allowed it would prove nothing.
+    const asked: string[] = [];
+    const provider = new FakeProvider([toolCallTurn("call_1", "write", '{"path":"yarn.lock"}'), answerTurn("ok")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([gatedTool]),
+      model: "m",
+      cwd: process.cwd(),
+      allow: (_name, args) => args.path !== "yarn.lock",
+      approve: async (request) => {
+        asked.push(request.name);
+        return "allow";
+      },
+    });
+
+    await collect(agent, "write it");
+
+    expect(asked).toEqual(["write"]);
+  });
+
+  it("runs the call it was allowed, rather than only skipping the prompt", async () => {
+    const provider = new FakeProvider([toolCallTurn("call_1", "write", '{"path":"a.txt"}'), answerTurn("ok")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([gatedTool]),
+      model: "m",
+      cwd: process.cwd(),
+      allow: () => true,
+      approve: async () => "allow",
+    });
+
+    const events = await collect(agent, "write it");
+    const result = events.find((event) => event.type === "tool-result");
+
+    // Skipping the prompt and not running the tool would be a worse bug than
+    // either, and it is the one a test that only counted approvals would miss.
+    expect(result).toMatchObject({ type: "tool-result", isError: false });
+    if (result?.type === "tool-result") expect(result.content).toContain("wrote");
+  });
+});
+
 describe("the environment the model is told about", () => {
   it("names the platform and the shell the bash tool will use", async () => {
     const provider = new FakeProvider([answerTurn("ok")]);
