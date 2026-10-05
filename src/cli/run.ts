@@ -779,6 +779,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         model: config.delegation.model || config.model,
         maxConcurrent: Math.max(1, config.delegation.maxConcurrent),
         maxPerTurn: Math.max(1, config.delegation.maxPerTurn),
+        retryUnfinished: config.delegation.retryUnfinished,
       },
       profiles: agentProfiles,
       spawnCount: () => spawned,

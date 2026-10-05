@@ -1732,6 +1732,7 @@ const delegation = (over: Partial<NonNullable<TuiOptions["delegation"]>> = {}): 
   maxIterations: 20,
   staleMs: 60_000,
   staleToolMs: 120_000,
+  retryUnfinished: 1,
   ...over,
 });
 
@@ -2096,6 +2097,7 @@ describe("delegation", () => {
           maxIterations: 20,
           staleMs: 60_000,
           staleToolMs: 120_000,
+          retryUnfinished: 1,
           ...over,
           ...(profiles.length > 0 ? { profiles } : {}),
         },
@@ -2265,6 +2267,7 @@ describe("delegation", () => {
         maxIterations: 20,
         staleMs: 60_000,
         staleToolMs: 120_000,
+        retryUnfinished: 1,
       },
       createSubagent: ({ goal, signal }: { goal: string; signal: AbortSignal }) =>
         child([], () => stalling(signal)),

@@ -8,6 +8,29 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **An unfinished delegated task is retried once, carrying what the first attempt
+  managed to say.** A child that stalled, ran out of turns, or came back with
+  nothing used to end the task there — the parent got a sentence about it and a
+  hole where an answer should have been. The retry resumes rather than restarting,
+  so the work already done is not done twice. A crash is *not* retried: a bad
+  argument will not fix itself. A retry is the same task, so it does not spend
+  `maxPerTurn` again. `delegation.retryUnfinished` (default 1, `0` disables)
+  because it costs tokens and some users would rather have the honest failure.
+- **A completion contract in every child's prompt**: say what you did, say what you
+  could not do, and do not claim more than you did. The parent reads it — the
+  runner deliberately does *not* parse it for a boolean, since parsing a model for
+  "did you finish?" breaks on wording and fails silently.
+- **The report says what it means**: `TASK 2/2: … (tried 2x)` and, when a task
+  still did not finish, an explicit `— UNFINISHED, stalled: …` rather than a short
+  result presented as an answer.
+
+### Fixed
+
+- A retried task was given its own roster row, so the `[AGENTS n/m]` chip counted
+  one unfinished task as two (`[0/2]`) — a count of work that was never
+  delegated. A retry is the same task, so it now reuses the row and records
+  `tried 2x` on it.
+
 - **A `github` tool that reads the GitHub API through `gh` — with no shell at
   all.** A child cannot run `bash` (ADR-053), which left `cody-git` unable to do
   the one thing it exists for. `gh` is executed directly with an argument vector,

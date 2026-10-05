@@ -1025,6 +1025,43 @@ full. The transcript keeps one row per delegation — it opens as `delegating…
 counts `delegating 1 of 2` while the batch runs, and settles to what reported and
 what did not, in place.
 
+#### A task is not finished until the child says so
+
+Two things make "the subagent's job is to complete the task" more than a hope.
+
+**The child states whether it finished.** Every child's prompt ends with a
+contract: say what you did, say what you could not do, and do not claim more than
+you did. A partial result honestly labelled is useful; one dressed up as finished
+sends the reader off on the wrong track. The runner does **not** try to parse that
+for a boolean — parsing a model for "did you finish?" breaks on wording and fails
+silently, which is worse than not checking at all. The parent reads it, because the
+parent is the only party that knows the goal.
+
+**An unfinished task is tried again, once.** A child that stalls, runs out of
+turns, or comes back with nothing is retried carrying what the first attempt
+managed to say — so the second attempt *resumes* rather than restarting and doing
+the work twice. A crash is not retried: a bad argument will not fix itself, and
+trying again spends the delay to learn nothing.
+
+What the parent gets back is explicit either way:
+
+```
+TASK 1/2 [cody-git]: audit every repo (tried 2x)
+Found it: 3 repos have unpushed branches; 1 has a stash.
+(4 requests, 812 tokens)
+
+TASK 2/2: find why CI is red (tried 2x)
+— UNFINISHED, stalled: it ran out of turns
+```
+
+A retry is the **same task**, so it does not spend `maxPerTurn` again — the budget
+counts tasks, and re-running one is not a new one. It does cost tokens, which is
+why it is a setting: `"delegation": { "retryUnfinished": 0 }` turns it off.
+
+It is also one roster row, not two. A retry marked its own row, and the
+`[AGENTS n/m]` chip read `[0/2]` for a single unfinished task — a count of work
+that was never delegated. The row now records `tried 2x` instead.
+
 #### A folder per agent, for its skills
 
 A one-line description says what an agent *is*. It does not say whether to send it

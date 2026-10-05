@@ -144,12 +144,27 @@ export type DelegationSettings = {
    */
   staleMs: number;
   staleToolMs: number;
+  /**
+   * Extra attempts a task gets when it comes back unfinished.
+   *
+   * One by default. A task that stalled, ran out of turns or reported nothing is
+   * tried again with what the first attempt managed to say — which is the
+   * difference between a task that gets finished and one that does not. It costs
+   * tokens, and it is bounded: `0` is off, and it is never more than a couple, or
+   * a task that cannot be done would be attempted until the turn's budget is gone.
+   *
+   * A retry is the *same* task, so it does not spend `maxPerTurn` again — the
+   * budget counts tasks, and re-running one is not a new one.
+   */
+  retryUnfinished: number;
 };
 
 export const DEFAULT_MAX_CONCURRENT_SUBAGENTS = 4;
 export const DEFAULT_MAX_SUBAGENTS_PER_TURN = 8;
 export const DEFAULT_SUBAGENT_ITERATIONS = 60;
 export const DEFAULT_SUBAGENT_STALE_MS = 450_000;
+/** One retry: enough to finish a task that stalled, not enough to hide a hopeless one. */
+export const DEFAULT_RETRY_UNFINISHED = 1;
 export const DEFAULT_SUBAGENT_STALE_TOOL_MS = 1_200_000;
 
 export type Config = {
@@ -331,6 +346,12 @@ function readDelegation(env: NodeJS.ProcessEnv, file: FileSettings): DelegationS
     ),
     staleMs: intFrom(String(declared.staleMs ?? ""), DEFAULT_SUBAGENT_STALE_MS),
     staleToolMs: intFrom(String(declared.staleToolMs ?? ""), DEFAULT_SUBAGENT_STALE_TOOL_MS),
+    // Capped at two: past that, a task that cannot be done is being retried for
+    // the sake of trying, and it spends the turn's budget to learn nothing.
+    retryUnfinished: Math.min(
+      2,
+      Math.max(0, intFrom(String(declared.retryUnfinished ?? ""), DEFAULT_RETRY_UNFINISHED)),
+    ),
   };
 }
 

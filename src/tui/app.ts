@@ -507,6 +507,8 @@ export type TuiOptions = {
     staleMs: number;
     /** The same, while the child is inside a tool — where silence is legitimate. */
     staleToolMs: number;
+    /** Extra attempts an unfinished task gets. 0 turns the retry off. */
+    retryUnfinished?: number;
   };
   /**
    * Builds the agent a delegated task runs in.
@@ -1136,6 +1138,10 @@ class TuiApp {
         model: pin || this.model,
         maxConcurrent: Math.max(1, delegation.maxConcurrent),
         maxPerTurn: Math.max(1, delegation.maxPerTurn),
+        // A task that stalls or reports nothing is tried again, carrying what the
+        // first attempt managed to say. Costs tokens, and `retryUnfinished: 0` in
+        // the config turns it off.
+        retryUnfinished: delegation.retryUnfinished ?? 0,
       },
       spawnCount: () => this.subagentsSpawned,
       // After a child is recorded as settled, not while it is still running. The
@@ -7821,7 +7827,7 @@ function subagentRows(children: readonly SubagentView[]): PickItem[] {
     // at the end of a line of timings cannot answer it at a glance.
     label: `${child.status === "running" ? "◐" : child.status === "completed" ? "✓" : "✕"} ${
       child.agent ?? "general"
-    }: ${child.goal}`,
+    }: ${child.goal}${(child.attempts ?? 1) > 1 ? ` (tried ${child.attempts}x)` : ""}`,
     description:
       child.error ??
       `${child.model} · ${child.toolCalls} tool${child.toolCalls === 1 ? "" : "s"} · ${

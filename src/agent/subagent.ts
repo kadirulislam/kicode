@@ -43,9 +43,15 @@ export type SubagentState = SubagentView;
  * it cannot run — it reported nothing, and the parent had neither a result nor a
  * reason.
  */
-const EMPTY_REPORT =
+const EMPTY_REPORT_TEXT =
   "It completed without writing a report. If the task needed a command, note that no " +
   "child can run one — run it yourself and re-delegate with the output.";
+
+/**
+ * Exported so the retry and the report share one definition of "said nothing",
+ * and so a test can produce it rather than guessing at the wording.
+ */
+export const EMPTY_REPORT = EMPTY_REPORT_TEXT;
 
 /**
  * The parent session's instructions about its named subagents.
@@ -119,6 +125,13 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
     "- When the user names one of these, delegate to it by name. Do that without checking whether it",
     "  exists and without asking whether to: they are already available to you, and looking for them",
     "  on disk is a wasted turn that answers a question you should already know the answer to.",
+    "- Split work into separate tasks and give each one its own task in a `tasks` batch, rather than",
+    "  handing one child a list. A batch runs them at once and each gets a fresh context, so four",
+    "  narrow tasks cost about what one broad one does — and a child asked to do four things",
+    "  reports on the one it got furthest with.",
+    "- Each child reports whether it finished. Read that line before you rely on a result: a task",
+    "  marked UNFINISHED has been retried once already and still did not complete, so it needs",
+    "  something from you — usually a command you can run and it cannot — not another delegation.",
     "- Read each agent's skills before deciding. When the work matches one of them, that agent is the",
     "  one to use — and using it is not optional politeness, it is cheaper for both sides: its report",
     "  comes back to you instead of the forty files behind it.",
@@ -163,6 +176,13 @@ export type SubagentResult = {
   summary: string;
   /** How many requests it spent, so a batch can be judged for its cost. */
   requests: number;
+  /**
+   * How many times this task was attempted, 1 unless a retry was needed.
+   *
+   * On the result because it changes what the report means: a task that says
+   * "unfinished" and `attempts: 2` is a different fact from one that says it once.
+   */
+  attempts?: number;
   /**
    * Tokens the child was billed, when the provider reported them.
    *
@@ -562,7 +582,16 @@ export class SubagentRegistry {
  * is wedged means stopping it, and that is the runner's job. Listing them here
  * would only invite the tool to look like it enforces something it does not.
  */
-export type DelegateSettings = Pick<DelegationSettings, "model" | "maxConcurrent" | "maxPerTurn">;
+export type DelegateSettings = Pick<DelegationSettings, "model" | "maxConcurrent" | "maxPerTurn"> & {
+  /**
+   * Extra attempts an unfinished task gets. Absent means none.
+   *
+   * Separate from the three picked above because it is a *policy* about finishing
+   * rather than a shape of the tool, and because the TUI and the one-shot path
+   * should be able to disagree about it.
+   */
+  retryUnfinished?: number;
+};
 
 export type DelegateToolOptions = {
   spawn: SubagentSpawner;
@@ -602,6 +631,9 @@ export function delegateTool(options: DelegateToolOptions): Tool {
   const { spawn, registry, settings, spawnCount } = options;
   const profiles = options.profiles ?? [];
   const byName = new Map(profiles.map((profile) => [profile.name, profile]));
+  // Clamped here as well as in config: the TUI builds this object by hand, and a
+  // negative or absurd number here would mean an unbounded retry loop.
+  const retryBudget = Math.max(0, Math.min(2, Math.trunc(settings.retryUnfinished ?? 0)));
 
   // The children of the call in flight, in the order the model asked for them.
   // The loop reads this after the call returns, so the transcript can count one
@@ -629,61 +661,137 @@ export function delegateTool(options: DelegateToolOptions): Tool {
       : `There is no agent named "${wanted}", and no agents are defined — omit \`agent\` for a general-purpose one.`;
   };
 
+  /**
+   * One task, to completion or to an honest admission that it is not done.
+   *
+   * The retry is the point of this function. A child that stalls, runs out of
+   * turns, or comes back with nothing used to end the task there -- the parent got
+   * a sentence saying so and a hole where an answer should have been. Such a task
+   * is now tried again carrying what the first attempt managed to say, so the
+   * second attempt resumes rather than restarts.
+   *
+   * A crash is deliberately **not** retried: a bad argument or a dead provider will
+   * not fix itself, and trying again spends the delay to learn nothing. Neither is
+   * a cancellation -- the turn was stopped, so there is nothing to retry into.
+   */
   const runOne = async (
     task: SubagentTask,
     signal: AbortSignal,
     into: string[],
     agent: AgentProfile | null,
   ): Promise<SubagentResult> => {
+    // The profile's own pin wins; otherwise the session's pin; and empty there
+    // means the parent's model, which the caller resolves.
+    const model = agent?.model || settings.model;
+    const tools = toolsFor(agent?.permissions ?? "read", agent?.github === true);
+    const instructions = childPrompt(
+      [agent?.instructions ?? "", skillReminder(agent)].filter(Boolean).join("\n\n"),
+      agent?.github === true,
+    );
+
+    let previous: SubagentResult | null = null;
+
+    // One id for the whole task, reused across attempts. A retry is the *same*
+    // task, and giving it a second row made one unfinished task read as two
+    // unfinished tasks — the `[AGENTS 0/2]` chip counting a retry as new work.
     const id = nextId();
     into.push(id);
-    // The profile's own pin wins; otherwise the session's delegation pin; and
-    // empty there means the parent's model, which the caller resolves.
-    const model = agent?.model || settings.model;
     registry.start(id, task.goal, model, agent?.name);
-    const startedAt = Date.now();
-    try {
-      const result = await spawn({
-        id,
-        goal: task.goal,
-        ...(task.context ? { context: task.context } : {}),
-        signal,
-        model,
-        tools: toolsFor(agent?.permissions ?? "read", agent?.github === true),
-        instructions: childPrompt(
-          [agent?.instructions ?? "", skillReminder(agent)].filter(Boolean).join("\n\n"),
-          agent?.github === true,
-        ),
-        ...(agent ? { agent } : {}),
-      });
-      const summary = clampSummary(result.summary);
-      registry.finish(id, {
-        status: result.status,
-        summary,
-        ms: Date.now() - startedAt,
-        ...(result.error ? { error: result.error } : {}),
-      });
-      // After the record is written, so the repaint shows the settled child rather
-      // than the one still running.
-      options.onSettled?.();
-      return { ...result, id, summary, ...(agent ? { agent: agent.name } : {}) };
-    } catch (error) {
-      const message = (error as Error).message;
-      registry.finish(id, { status: "failed", error: message, ms: Date.now() - startedAt });
-      options.onSettled?.();
-      // A child that dies is never silent: the parent is told what failed and
-      // why, and the rest of the batch still reports. The summary carries the
-      // reason too — an empty one here left the parent with a failure and nothing
-      // to act on.
-      return {
-        id,
-        goal: task.goal,
-        status: "failed",
-        summary: `It could not run: ${message}`,
-        requests: 0,
-        error: message,
-      };
+
+    for (let attempt = 1; attempt <= retryBudget + 1; attempt += 1) {
+      const startedAt = Date.now();
+
+      let result: SubagentResult;
+      try {
+        const spawned = await spawn({
+          id,
+          goal: task.goal,
+          // The first attempt gets the task as written. A retry gets the same task
+          // *plus* what the last attempt managed to say -- otherwise it is not a
+          // retry, it is the first attempt again with tokens spent.
+          ...(task.context || previous ? { context: retryContext(task, previous) } : {}),
+          signal,
+          model,
+          tools,
+          instructions,
+          ...(agent ? { agent } : {}),
+        });
+        const summary = clampSummary(spawned.summary);
+        registry.finish(id, {
+          status: spawned.status,
+          summary,
+          ms: Date.now() - startedAt,
+          ...(attempt > 1 ? { attempts: attempt } : {}),
+          ...(spawned.error ? { error: spawned.error } : {}),
+        });
+        // After the record is written, so the repaint shows the settled child
+        // rather than the one still running.
+        options.onSettled?.();
+        result = { ...spawned, id, summary, attempts: attempt, ...(agent ? { agent: agent.name } : {}) };
+      } catch (error) {
+        const message = (error as Error).message;
+        registry.finish(id, { status: "failed", error: message, ms: Date.now() - startedAt });
+        options.onSettled?.();
+        // A child that dies is never silent: the parent is told what failed and
+        // why, and the rest of the batch still reports. The summary carries the
+        // reason too -- an empty one here left the parent with a failure and
+        // nothing to act on.
+        result = {
+          id,
+          goal: task.goal,
+          status: "failed",
+          summary: `It could not run: ${message}`,
+          requests: 0,
+          attempts: attempt,
+          error: message,
+          ...(agent ? { agent: agent.name } : {}),
+        };
+      }
+
+      if (attempt > retryBudget || !unfinished(result) || signal.aborted) return result;
+      previous = result;
     }
+
+    // Unreachable -- the loop returns on its last attempt either way. Written as a
+    // total function rather than an assertion because a missing return here would
+    // put an undefined into the report, which is the kind of bug that only shows up
+    // in somebody else's session.
+    return previous as SubagentResult;
+  };
+
+  /**
+   * Whether a task came back without being finished.
+   *
+   * Mechanical only -- the status the runner recorded, never a judgement parsed out
+   * of the child's prose. Parsing a model for 'did you finish?' is the fragile kind
+   * of automation: it breaks on wording and fails silently, which is worse than not
+   * trying at all. What the child *says* about its own progress goes into the report
+   * for the parent to read; this only catches what the runner knows for certain.
+   */
+  const unfinished = (result: SubagentResult): boolean =>
+    result.status === "stalled" || result.summary === EMPTY_REPORT;
+
+  /**
+   * The task as a retry sees it: the same goal, the same context, and what the
+   * last attempt got through before it stopped.
+   */
+  const retryContext = (task: SubagentTask, previous: SubagentResult | null): string => {
+    if (!previous) return task.context ?? "";
+    return [
+      task.context ?? "",
+      "",
+      "[This is a second attempt. The first did not finish.]",
+      previous.error
+        ? `It stopped because: ${previous.error}`
+        : "It stopped without finishing, and without saying why.",
+      previous.summary && previous.summary !== EMPTY_REPORT
+        ? `What it got through:\n${previous.summary}`
+        : "It produced nothing usable.",
+      "Continue from there rather than starting over. If the task cannot be done with",
+      "the tools you have, say exactly what is missing and what you did determine.",
+    ]
+      .filter((line) => line !== "")
+      .join("\n");
   };
 
   return {
@@ -839,8 +947,19 @@ function renderReport(results: readonly SubagentResult[]): string {
       // attributable without the parent having to remember which was which.
       const who = result.agent ? ` [${result.agent}]` : "";
       const label = `TASK ${index + 1}/${results.length}${who}: ${result.goal}`;
+      // Said on every line that had a second attempt, because a task that took two
+      // tries is a different fact from one that took one — and if it *still* did not
+      // finish, the parent is being handed unfinished work and must be able to see
+      // that at a glance rather than infer it from a short report.
+      const tried = (result.attempts ?? 1) > 1 ? ` (tried ${result.attempts}x)` : "";
       if (result.status === "failed" || result.status === "interrupted" || result.status === "stalled") {
-        return `${label}\n— ${result.status}: ${result.error ?? "no reason given"}`;
+        return `${label}${tried}\n— UNFINISHED, ${result.status}: ${result.error ?? "no reason given"}`;
+      }
+      if (result.summary === EMPTY_REPORT) {
+        return (
+          `${label}${tried}\n— UNFINISHED: it completed without a report. If the task needed a command, ` +
+          "no child can run one — run it yourself and re-delegate with the output."
+        );
       }
       const cost = [
         result.requests > 0 ? `${result.requests} request${result.requests === 1 ? "" : "s"}` : "",
@@ -848,7 +967,7 @@ function renderReport(results: readonly SubagentResult[]): string {
       ]
         .filter(Boolean)
         .join(", ");
-      return `${label}\n${result.summary || "(the child returned nothing)"}${cost ? `\n(${cost})` : ""}`;
+      return `${label}${tried}\n${result.summary || "(the child returned nothing)"}${cost ? `\n(${cost})` : ""}`;
     })
     .join("\n\n");
 }

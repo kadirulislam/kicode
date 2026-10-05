@@ -4,6 +4,7 @@ import {
   SubagentRegistry,
   childRunner,
   delegateTool,
+  EMPTY_REPORT,
   namedSubagentPrompt,
   type ChildRunnerOptions,
   type DelegateSettings,
@@ -978,6 +979,306 @@ describe("a child that reports nothing", () => {
   });
 });
 
+describe("a task that does not finish", () => {
+  /** A child that reports the same thing every time it is called. */
+  const fixed = (
+    replies: readonly SubagentResult[],
+  ): ((request: SubagentRequest) => Promise<SubagentResult>) => {
+    let at = 0;
+    return async (request) => {
+      const next = replies[Math.min(at, replies.length - 1)]!;
+      at += 1;
+      return { ...next, id: request.id, goal: request.goal, requests: 1 };
+    };
+  };
+
+  const settings = (retryUnfinished?: number) => ({
+    model: "",
+    maxConcurrent: 2,
+    maxPerTurn: 8,
+    ...(retryUnfinished === undefined ? {} : { retryUnfinished }),
+  });
+
+  const stalled: SubagentResult = {
+    id: "x",
+    goal: "g",
+    status: "stalled",
+    summary: "I got through part of it.",
+    requests: 60,
+    error: "it ran out of turns",
+  };
+
+  const done: SubagentResult = {
+    id: "x",
+    goal: "g",
+    status: "completed",
+    summary: "Finished: three repos have unpushed branches.",
+    requests: 4,
+  };
+
+  const run = async (replies: readonly SubagentResult[], retryUnfinished?: number) => {
+    const tool = delegateTool({
+      spawn: fixed(replies),
+      registry: new SubagentRegistry(),
+      settings: settings(retryUnfinished),
+      spawnCount: () => 0,
+    });
+    return tool.run({ goal: "audit the repos" }, { signal: new AbortController().signal } as never);
+  };
+
+  it("tries a stalled task again, and reports the finished one", async () => {
+    const result = await run([stalled, done], 1);
+
+    // The whole feature. Before this a stalled task ended there, and the parent
+    // got a sentence about it and a hole where the answer should have been.
+    expect(result.isError).toBeFalsy();
+    expect(result.content).toContain("Finished: three repos have unpushed branches.");
+    expect(result.content).not.toContain("UNFINISHED");
+  });
+
+  it("says a task was tried twice, because that is a different fact", async () => {
+    const result = await run([stalled, done], 1);
+
+    expect(result.content).toContain("tried 2x");
+  });
+
+  it("marks a task UNFINISHED when the retry does not finish it either", async () => {
+    const result = await run([stalled], 1);
+
+    // Honesty is the whole contract. A second attempt that also failed must not be
+    // presented as a result — the parent has to be able to see at a glance that it
+    // is being handed incomplete work.
+    expect(result.content).toContain("UNFINISHED, stalled");
+    expect(result.content).toContain("tried 2x");
+  });
+
+  it("does not try a completed task again", async () => {
+    const seen: string[] = [];
+    const tool = delegateTool({
+      spawn: async (request) => {
+        seen.push(request.id);
+        return { ...done, id: request.id, goal: request.goal, requests: 2 };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    // Retrying work that succeeded would double the cost of every delegation.
+    expect(seen).toHaveLength(1);
+  });
+
+  it("does not try a task that crashed, because a crash does not fix itself", async () => {
+    const seen: string[] = [];
+    const tool = delegateTool({
+      spawn: async (request) => {
+        seen.push(request.id);
+        return {
+          id: request.id,
+          goal: request.goal,
+          requests: 0,
+          status: "failed",
+          summary: "It could not run: no key",
+          error: "no key",
+        };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    const result = await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    expect(seen).toHaveLength(1);
+    expect(result.content).toContain("UNFINISHED, failed");
+  });
+
+  it("does not retry when the setting is off, and says nothing about trying", async () => {
+    const result = await run([stalled], 0);
+
+    // It costs tokens, so a user who would rather have the honest failure can say so.
+    expect(result.content).toContain("UNFINISHED, stalled");
+    expect(result.content).not.toContain("tried");
+  });
+
+  it("is off unless it was asked for", async () => {
+    const result = await run([stalled, done]);
+
+    // Absent is not one. Delegation that silently doubles its own cost is worse
+    // than delegation that admits when it could not finish.
+    expect(result.content).toContain("UNFINISHED, stalled");
+  });
+
+  it("hands the retry what the first attempt managed to say", async () => {
+    const contexts: string[] = [];
+    const tool = delegateTool({
+      spawn: async (request) => {
+        if (request.context) contexts.push(request.context);
+        return { ...stalled, id: request.id, goal: request.goal, requests: 1 };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    await tool.run(
+      { goal: "audit", context: "the workspace is C:/work" },
+      { signal: new AbortController().signal } as never,
+    );
+
+    // Without this it is not a retry, it is the first attempt again with tokens
+    // spent — and the work already done would be done twice.
+    const retry = contexts[1] ?? "";
+    expect(retry).toContain("the workspace is C:/work");
+    expect(retry).toContain("second attempt");
+    expect(retry).toContain("ran out of turns");
+    expect(retry).toContain("I got through part of it.");
+  });
+
+  it("retries a task that came back with nothing at all", async () => {
+    let calls = 0;
+    const tool = delegateTool({
+      spawn: async (request) => {
+        calls += 1;
+        // The ADR-061 case: a child handed a task needing a command it cannot run
+        // comes back with the empty report. This is the one the retry is most for.
+        return calls === 1
+          ? {
+              id: request.id,
+              goal: request.goal,
+              requests: 2,
+              status: "completed",
+              summary: EMPTY_REPORT,
+            }
+          : { ...done, id: request.id, goal: request.goal, requests: 1 };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    const result = await tool.run({ goal: "audit github" }, { signal: new AbortController().signal } as never);
+
+    expect(calls).toBe(2);
+    expect(result.content).toContain("Finished: three repos");
+    expect(result.content).toContain("tried 2x");
+  });
+
+  it("marks an empty report UNFINISHED when the retry is empty too", async () => {
+    const tool = delegateTool({
+      spawn: async (request) => ({
+        id: request.id,
+        goal: request.goal,
+        requests: 1,
+        status: "completed",
+        summary: EMPTY_REPORT,
+      }),
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    const result = await tool.run({ goal: "audit github" }, { signal: new AbortController().signal } as never);
+
+    // Honesty again: two empty reports is a task that could not be done, and the
+    // parent is being told to run the command itself.
+    expect(result.content).toContain("UNFINISHED");
+    expect(result.content).toContain("no child can run one");
+  });
+
+  it("gives up rather than retrying forever", async () => {
+    const seen: string[] = [];
+    const tool = delegateTool({
+      spawn: async (request) => {
+        seen.push(request.id);
+        return { ...stalled, id: request.id, goal: request.goal, requests: 1 };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(99),
+      spawnCount: () => 0,
+    });
+
+    await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    // Clamped, because a task that cannot be done would otherwise spend the turn's
+    // whole budget learning that a second time.
+    expect(seen.length).toBeLessThanOrEqual(3);
+  });
+
+  it("keeps one roster row for a task that is tried twice", async () => {
+    // Found by the chip: a retry given its own row made one unfinished task read as
+    // two, so the counter said `[AGENTS 0/2]` for a single delegated task. A retry
+    // is the same task — it has to be one row that records the attempt.
+    const ids: string[] = [];
+    const tool = delegateTool({
+      spawn: async (request) => {
+        ids.push(request.id);
+        return { ...stalled, id: request.id, goal: request.goal, requests: 1 };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    expect(new Set(ids).size).toBe(1);
+  });
+
+  it("records the attempt on the row, since there is only one row", async () => {
+    const registry = new SubagentRegistry();
+    const tool = delegateTool({
+      spawn: async (request) => ({ ...stalled, id: request.id, goal: request.goal, requests: 1 }),
+      registry,
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    const rows = registry.snapshot();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.attempts).toBe(2);
+  });
+
+  it("does not record an attempt on a task that only ran once", async () => {
+    const registry = new SubagentRegistry();
+    const tool = delegateTool({
+      spawn: async (request) => ({ ...done, id: request.id, goal: request.goal, requests: 1 }),
+      registry,
+      settings: settings(1),
+      spawnCount: () => 0,
+    });
+
+    await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    // Absent rather than 1: most tasks are never retried, and a field that says
+    // "1" on every row is a field nobody reads.
+    expect(registry.snapshot()[0]?.attempts).toBeUndefined();
+  });
+
+  it("does not spend the turn's budget again on a retry", async () => {
+    let charged = 0;
+    const tool = delegateTool({
+      spawn: async (request) => {
+        charged += 1;
+        return { ...stalled, id: request.id, goal: request.goal, requests: 1 };
+      },
+      registry: new SubagentRegistry(),
+      settings: settings(1),
+      // The parent charges once per task it hands out, and a retry is the same
+      // task -- otherwise a batch of four that all stalled would quietly spawn
+      // eight and break the promise the model was given.
+      spawnCount: () => 0,
+    });
+
+    await tool.run({ goal: "audit" }, { signal: new AbortController().signal } as never);
+
+    expect(charged).toBe(2);
+  });
+});
 describe("the permission ladder", () => {
   it("starts at ask, and ask waives nothing", () => {
     expect(PERMISSION_MODES[0]).toBe("ask");

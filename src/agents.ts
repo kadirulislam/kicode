@@ -469,6 +469,14 @@ const SUBAGENT_SHARED = [
   "- Answer with a report, not a conversation: what you found, where (file paths and line numbers), and anything you could not determine.",
   "- Answer in prose, always. A report that is a file listing or a diff with no explanation does not",
   "  tell the reader what you concluded, and they are the one who has to act on it.",
+  // The completion contract. Not a marker for the runner to parse — parsing a model
+  // for "did you finish?" breaks on wording and fails silently, which is worse than
+  // not checking. It is here so the *parent* can tell a finished task from a
+  // partial one, which is the only party qualified to judge the goal.
+  "- **End by saying whether you finished the task.** Two short lines: what you did, and",
+  "  what you could not do. If you only got part of it, say which part and why. Do not",
+  "  claim more than you did — a partial result honestly labelled is useful, and a",
+  "  partial result dressed up as a finished one sends the reader off on the wrong track.",
   "- If the task is ambiguous or you hit something only the user can decide, say so in a line under open questions rather than guessing.",
   "- Be brief. Your report is read by another agent with a full task of its own; detail you do not need is cost paid twice.",
 ];

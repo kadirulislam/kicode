@@ -77,6 +77,13 @@ export type FileDelegationSettings = {
   maxIterations?: number;
   staleMs?: number;
   staleToolMs?: number;
+  /**
+   * Extra attempts a task gets when it comes back unfinished. 0 turns it off.
+   *
+   * Read as an optional number because it costs tokens: a user who would rather
+   * have the honest failure than the second attempt can say so.
+   */
+  retryUnfinished?: number;
 };
 
 export type FileSettings = {

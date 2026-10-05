@@ -21,6 +21,14 @@ export type SubagentView = {
   ms: number;
   /** Requests spent, which is the only number that says it is moving. */
   toolCalls: number;
+  /**
+   * How many times this task has been attempted, once it has needed a second.
+   *
+   * On the view because the retry does not get its own row — it is the same task,
+   * and a second row made one unfinished task look like two. So this is the only
+   * way the panel can say a child had to be tried again.
+   */
+  attempts?: number;
   summary?: string;
   error?: string;
 };
