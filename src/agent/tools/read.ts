@@ -9,6 +9,8 @@ const MAX_BYTES = 512 * 1024;
 
 export const readTool: Tool = {
   name: "read",
+  // Reads change nothing, so they may overlap each other within one turn.
+  concurrencySafe: true,
   description:
     "Read a text file from disk. Returns the contents with 1-based line numbers so you can reference exact lines. Use offset/limit to page through large files.",
   parameters: {

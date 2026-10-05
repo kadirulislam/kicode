@@ -6,7 +6,28 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **Independent tool calls in one turn now overlap.** A model exploring a codebase
+  emits a dozen reads at once, and they ran strictly one after another — measured
+  at **853ms for an 18-call turn where 44ms of tool work was all that was needed**.
+  Reads (`read`, `glob`, `grep`, `recall`) now run concurrently; measured 18×40ms
+  reads: **853ms → 44ms**, with the transcript in call order in both.
+
+  Two rules keep it honest. **Approvals still happen one at a time and before
+  anything runs**, because an approval is a conversation with the user. And a tool
+  that could change something still finishes before the next one begins — only
+  tools marked `concurrencySafe` overlap, so two writes can never interleave. The
+  marker is on the tool, defaults to off, and is deliberately *not* inferred from
+  `requiresApproval`: an MCP tool on an auto-approved server has no gate and can
+  still write.
+
 ### Fixed
+
+- A test flake in the `@` mention suite, unrelated to the above: the submit was
+  waited on with a fixed 80ms, which a loaded machine missed about one run in
+  five — so the test asserted on a prompt that had not been submitted yet. Now
+  polled for the condition, like the polling already used three lines above it.
 
 - **`[AGENTS 0/1]` on a finished task.** The chip counted *running*, so it went
   back to zero the moment the work landed — which reads as though the work had

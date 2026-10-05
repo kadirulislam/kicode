@@ -1031,6 +1031,244 @@ describe("the caller's own allow rules", () => {
   });
 });
 
+describe("several tool calls in one turn", () => {
+  /** A turn carrying more than one call, which is the only shape this is about. */
+  function batchTurn(calls: Array<[string, string]>): StreamEvent[] {
+    const built = calls.map(([id, name]) => ({
+      id,
+      type: "function" as const,
+      function: { name, arguments: "{}" },
+    }));
+    return [
+      ...built.map((call) => ({ type: "tool-call" as const, call })),
+      {
+        type: "finish" as const,
+        message: { role: "assistant" as const, content: null, tool_calls: built },
+        finishReason: "tool_calls" as const,
+      },
+    ];
+  }
+
+  const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+  /**
+   * A tool that takes `ms`, recording the window it was in flight for.
+   *
+   * The timings are the whole test. Whether two calls overlapped is not visible
+   * in the transcript at all — only in when they were running at the same time.
+   */
+  function slowTool(
+    name: string,
+    ms: number,
+    log: Array<{ name: string; start: number; end: number }>,
+    over: Partial<Tool> = {},
+  ): Tool {
+    const origin = Date.now();
+    return {
+      name,
+      description: `takes ${ms}ms`,
+      parameters: { type: "object", properties: {}, required: [] },
+      async run() {
+        const start = Date.now() - origin;
+        await wait(ms);
+        log.push({ name, start, end: Date.now() - origin });
+        return { content: `${name} done` };
+      },
+      ...over,
+    };
+  }
+
+  /** How long two calls were in flight at once. Zero means they did not overlap. */
+  const overlapMs = (
+    log: Array<{ name: string; start: number; end: number }>,
+    a: string,
+    b: string,
+  ): number => {
+    const one = log.find((entry) => entry.name === a);
+    const two = log.find((entry) => entry.name === b);
+    if (!one || !two) return -1;
+    return Math.min(one.end, two.end) - Math.max(one.start, two.start);
+  };
+
+  const idsOf = (agent: Agent): string[] =>
+    agent.turns
+      .filter((message) => message.role === "tool")
+      .map((message) => (message as { tool_call_id?: string }).tool_call_id ?? "");
+
+  it("overlaps the calls that cannot change anything", async () => {
+    const log: Array<{ name: string; start: number; end: number }> = [];
+    const provider = new FakeProvider([batchTurn([["c1", "read"], ["c2", "read"], ["c3", "read"]]), answerTurn("done")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([slowTool("read", 60, log, { concurrencySafe: true })]),
+      model: "m",
+      cwd: process.cwd(),
+    });
+
+    await collect(agent, "look at everything");
+
+    // The wait this change exists to remove. Run in sequence, three 60ms calls
+    // are 180ms apart and no two of them share a moment.
+    const windows = log.map((entry) => entry.end - entry.start);
+    expect(windows).toHaveLength(3);
+    const total = log.at(-1)!.end - log[0]!.start;
+    expect(total).toBeLessThan(180);
+    expect(overlapMs(log, "read", "read")).toBeGreaterThan(0);
+  });
+
+  it("does not overlap a call that could change something", async () => {
+    const log: Array<{ name: string; start: number; end: number }> = [];
+    const provider = new FakeProvider([batchTurn([["c1", "write"], ["c2", "write"]]), answerTurn("done")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([slowTool("write", 60, log)]),
+      model: "m",
+      cwd: process.cwd(),
+      allow: () => true,
+    });
+
+    await collect(agent, "write both");
+
+    // Two writes issued in one turn must not interleave. The model could not have
+    // ordered them on a result it had not seen, but it can name the same file
+    // twice, and the second is then a race against the first.
+    expect(log).toHaveLength(2);
+    expect(log[1]!.start).toBeGreaterThanOrEqual(log[0]!.end);
+  });
+
+  it("lets reads overlap around a write that waits its turn", async () => {
+    const log: Array<{ name: string; start: number; end: number }> = [];
+    const provider = new FakeProvider([
+      batchTurn([["c1", "read"], ["c2", "write"], ["c3", "read"]]),
+      answerTurn("done"),
+    ]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([
+        slowTool("read", 50, log, { concurrencySafe: true }),
+        slowTool("write", 20, log),
+      ]),
+      model: "m",
+      cwd: process.cwd(),
+      allow: () => true,
+    });
+
+    await collect(agent, "read, write, read");
+
+    // The rule is per tool, not per turn: one write in the batch must not
+    // serialise the reads around it, or the saving evaporates in the common case
+    // where a turn is mostly reads.
+    expect(overlapMs(log, "read", "read")).toBeGreaterThan(0);
+    // And the write still ran alone.
+    expect(log.filter((entry) => entry.name === "write")).toHaveLength(1);
+  });
+
+  it("hands the model its answers in the order it asked, not the order they finished", async () => {
+    const provider = new FakeProvider([
+      batchTurn([["c1", "slow"], ["c2", "quick"]]),
+      answerTurn("done"),
+    ]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([
+        {
+          name: "slow",
+          description: "takes 80ms",
+          parameters: { type: "object", properties: {}, required: [] },
+          concurrencySafe: true,
+          async run() {
+            await wait(80);
+            return { content: "slow done" };
+          },
+        },
+        {
+          name: "quick",
+          description: "returns at once",
+          parameters: { type: "object", properties: {}, required: [] },
+          concurrencySafe: true,
+          async run() {
+            await wait(5);
+            return { content: "quick done" };
+          },
+        },
+      ]),
+      model: "m",
+      cwd: process.cwd(),
+    });
+
+    const events = await collect(agent, "do both");
+
+    // `quick` finishes long before `slow`, and the transcript still reads c1 then
+    // c2. Recording by completion would be faster and would leave the messages
+    // not matching the calls they answer.
+    expect(events.filter((event) => event.type === "tool-result").map((event) => (event.type === "tool-result" ? event.id : ""))).toEqual(["c1", "c2"]);
+    expect(idsOf(agent)).toEqual(["c1", "c2"]);
+  });
+
+  it("puts a refusal in its place between the answers around it", async () => {
+    const log: Array<{ name: string; start: number; end: number }> = [];
+    const provider = new FakeProvider([
+      batchTurn([["c1", "read"], ["c2", "missing"], ["c3", "read"]]),
+      answerTurn("done"),
+    ]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([slowTool("read", 20, log, { concurrencySafe: true })]),
+      model: "m",
+      cwd: process.cwd(),
+    });
+
+    await collect(agent, "read, fail, read");
+
+    // A refusal is *decided* in the first pass and *reported* in the third.
+    // Emitting it on the spot would push c2's answer into the transcript before
+    // c1 had answered one, and the pairing would be wrong.
+    expect(idsOf(agent)).toEqual(["c1", "c2", "c3"]);
+    expect(agent.turns.filter((message) => message.role === "tool")[1]?.content).toContain("unknown tool");
+  });
+
+  it("turns a tool that throws into an answer rather than an unhandled rejection", async () => {
+    const log: Array<{ name: string; start: number; end: number }> = [];
+    const provider = new FakeProvider([batchTurn([["c1", "boom"], ["c2", "read"]]), answerTurn("done")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([
+        {
+          name: "boom",
+          description: "always throws",
+          parameters: { type: "object", properties: {}, required: [] },
+          // Throws *asynchronously*, after a tick — the shape that would become an
+          // unhandled rejection if the launch pass left the promise bare.
+          async run() {
+            await wait(5);
+            throw new Error("deliberate");
+          },
+        },
+        slowTool("read", 5, log, { concurrencySafe: true }),
+      ]),
+      model: "m",
+      cwd: process.cwd(),
+    });
+
+    const events = await collect(agent, "go");
+
+    const boom = events.find((event) => event.type === "tool-result" && event.id === "c1");
+    expect(boom).toMatchObject({ isError: true });
+    if (boom?.type === "tool-result") expect(boom.content).toContain("deliberate");
+    // Every call still owes the model an answer, or the next request is malformed.
+    expect(idsOf(agent)).toEqual(["c1", "c2"]);
+  });
+
+  it("marks only the tools that change nothing", () => {
+    // The marker is what makes the overlap safe, so it is pinned per tool: a tool
+    // that can write and claims otherwise would overlap with another write.
+    const expected = new Set(["read", "glob", "grep", "recall"]);
+    for (const tool of createDefaultTools().list()) {
+      expect(tool.concurrencySafe === true, tool.name).toBe(expected.has(tool.name));
+    }
+  });
+});
+
 describe("the environment the model is told about", () => {
   it("names the platform and the shell the bash tool will use", async () => {
     const provider = new FakeProvider([answerTurn("ok")]);

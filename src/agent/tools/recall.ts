@@ -15,6 +15,8 @@ import type { Tool } from "./types";
  */
 export const recallTool: Tool = {
   name: "recall",
+  // Reads change nothing, so they may overlap each other within one turn.
+  concurrencySafe: true,
   description: [
     "Load what earlier sessions saved in the brain: a skill's full procedure, or a project memory.",
     "Use it before starting work that a saved skill or memory might already cover — a project's build/test/deploy convention, a gotcha with its fix, a procedure you have run before. The system prompt lists what exists; this reads one.",

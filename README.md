@@ -821,6 +821,27 @@ child really was handed a read-only toolset:
 patterns against paths with forward slashes, so patterns behave the same on
 Windows.
 
+### Calls in one turn overlap; the transcript does not
+
+When a model asks for several tools at once, the ones that cannot change anything
+run **at the same time**. Measured on a turn of 18 reads that each took 40ms:
+**853ms before, 44ms after** — and in both cases the transcript reads them back in
+the order the model asked.
+
+That last part is the point. The waits are removed; the order is not, because
+every tool result has to land in the transcript beside the call it answers or the
+next request is malformed and a saved session will not replay.
+
+Two rules keep the overlap honest:
+
+- **Approvals still happen one at a time, before anything runs.** You are asked
+  about every gated call in the batch, then they run — so a batch of writes shows
+  you every diff before anything lands.
+- **A tool that could change something finishes before the next one begins.** Only
+  `read`, `glob`, `grep` and `recall` are marked as safe to overlap; everything
+  else runs on its own. Two writes to the same file in one turn are a race
+  otherwise, and the model cannot have ordered them on a result it had not seen.
+
 Which shell `bash` runs through is a decision, not an accident. On Windows it is
 the Git Bash from Git for Windows when there is one, because the commands a
 model reaches for first are POSIX ones; without one it is `cmd.exe`. Either way
@@ -1623,11 +1644,12 @@ around a failure — a rejected key, a cancellation, and an answer already begun
    own report but not on the parent's ledger, so `/context` and `/usage`
    under-report a session that delegated. The fix is an `Agent.absorb(other)` the
    loop calls for each settled child on the `subagents` event.
-2. **Parallel read-only tools in the main loop.** Tool calls run strictly in
-   sequence, so a model that emits four independent reads waits four round trips.
-   Resolving arguments and approvals in order, launching concurrently, and
-   pushing results back in call order would keep the transcript and the approval
-   card honest while taking the wait out.
+2. **A structured `github` tool, so `cody-git` can do GitHub work.** It cannot
+   run commands (ADR-053), so `gh` is out of reach and the agent has to have the
+   command run for it. The safe shape is a purpose-built tool with typed arguments
+   — `github(op: "api", path: "/user/repos")` — not a gated shell: a shell string
+   parsed by a denylist is a weaker guarantee for a child with nobody watching
+   than it is for a parent with a human and a diff.
 3. **MCP resources and prompts** — the client speaks the `tools/*` surface only;
    `resources/*` and `prompts/*` are the next slice of the protocol.
 4. **Write-capable children.** Read-only is a deliberate v1 limit: a child that

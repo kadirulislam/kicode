@@ -12,6 +12,8 @@ const MAX_LINE_CHARS = 300;
 
 export const grepTool: Tool = {
   name: "grep",
+  // Reads change nothing, so they may overlap each other within one turn.
+  concurrencySafe: true,
   description:
     "Search file contents with a regular expression. Returns `path:line: text` matches. Use the glob argument to limit which files are searched. Skips node_modules, .git, and build output.",
   parameters: {

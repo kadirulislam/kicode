@@ -3,6 +3,7 @@ import { environmentPrompt } from "./environment";
 import { imageUrl, type PastedImage } from "../clipboard";
 import type { AssistantMessage, ChatMessage, ContentPart, FinishReason, Provider, Usage } from "../types";
 import type { QuotaReading } from "../routes/quota";
+import type { Tool } from "./tools/types";
 import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions } from "./compaction";
 import { learnFromSession, type LearnResult } from "./learn";
 import type { PlanSnapshot, SubagentView, ToolContext, ToolRegistry } from "./tools/types";
@@ -281,6 +282,37 @@ export function permissionAllows(mode: PermissionMode, name: string): boolean {
   if (mode === "edits") return EDITING_TOOLS.has(name);
   return false;
 }
+
+/**
+ * One tool call, resolved but not yet reported.
+ *
+ * The loop answers a turn's calls in three passes — decide, launch, report — and
+ * this is what carries a call between them. It exists because a rejection cannot
+ * be reported when it is decided: `rejectToolCall` pushes the model's answer into
+ * the transcript, and doing that for call 2 before call 1 had answered would leave
+ * the message list in an order no provider accepts.
+ */
+type ToolSlot =
+  | {
+      kind: "reject";
+      id: string;
+      name: string;
+      /** The refusal as the model will read it. Reported in the third pass. */
+      content: string;
+    }
+  | {
+      kind: "run";
+      id: string;
+      name: string;
+      tool: Tool;
+      args: Record<string, unknown>;
+      /**
+       * Filled in by the launch pass. Typed as possibly-`undefined` because it
+       * genuinely is between the two, and a cast at the read would hide a slot
+       * that never launched.
+       */
+      settled: Promise<{ content: string; isError: boolean }> | undefined;
+    };
 
 export class Agent {
   private readonly messages: ChatMessage[] = [];
@@ -746,12 +778,32 @@ export class Agent {
 
       this.messages.push(assistant);
 
+      // One turn's tool calls, resolved in three passes.
+      //
+      // `decide` walks the calls in the order the model asked for them and asks
+      // the user about anything gated — an approval is a conversation, so it
+      // cannot overlap with itself, and every decision has to be made before
+      // anything runs. `launch` starts the ones that may overlap without waiting
+      // for them, and waits for each one that may not. `report` goes back over
+      // the same list and hands the model its answers **in the order it asked**.
+      //
+      // That last part is the constraint the whole shape exists to satisfy: every
+      // tool result lands in the transcript next to the call it answers, so the
+      // message list stays valid and a saved session replays. Running the reads
+      // concurrently but recording them out of order would be faster and wrong.
+      //
+      // What it buys is the wait, not the order. A model exploring a codebase
+      // emits a dozen independent reads in one turn, and in sequence that is a
+      // dozen round trips back to back — measured at 141s for an 18-call turn,
+      // which is arithmetic rather than a slow model.
+      const slots: ToolSlot[] = [];
+
       for (const call of calls) {
         const name = call.function.name;
 
         const tool = this.tools.get(name);
         if (!tool) {
-          yield* this.rejectToolCall(call.id, name, `Error: unknown tool "${name}".`);
+          slots.push({ kind: "reject", id: call.id, name, content: `Error: unknown tool "${name}".` });
           continue;
         }
 
@@ -765,7 +817,12 @@ export class Agent {
         } catch (error) {
           // Never let a truncated or malformed argument string kill the run —
           // tell the model what happened so it can retry with valid JSON.
-          yield* this.rejectToolCall(call.id, name, `Error: invalid JSON arguments for "${name}" — ${(error as Error).message}`);
+          slots.push({
+            kind: "reject",
+            id: call.id,
+            name,
+            content: `Error: invalid JSON arguments for "${name}" — ${(error as Error).message}`,
+          });
           continue;
         }
 
@@ -777,7 +834,7 @@ export class Agent {
         //
         // Deliberately not conditioned on plan mode any more: reading a file is
         // as harmless in build mode as it is in plan mode, and asking about it
-        // every time is what made the approval prompt something people learn to
+        // every time was what made the approval prompt something people learn to
         // dismiss without reading.
         const readsOnly = tool.readsOnly?.(args) === true;
         // The caller's own policy (config `allow` rules). Asked here rather than
@@ -798,12 +855,14 @@ export class Agent {
           } catch {
             // Keep the general sentence.
           }
-          yield* this.rejectToolCall(
-            call.id,
+          slots.push({
+            kind: "reject",
+            id: call.id,
             name,
-            `Error: "${name}" was refused because plan mode is on — ${because}. ` +
+            content:
+              `Error: "${name}" was refused because plan mode is on — ${because}. ` +
               "Describe what you would do instead, and stop so the user can switch to build mode (shift+tab).",
-          );
+          });
           continue;
         }
 
@@ -811,11 +870,13 @@ export class Agent {
         // always no — silence must never mean "go ahead and overwrite files".
         if (!readsOnly && !allowed && tool.requiresApproval === true && !this.sessionApprovals.has(name)) {
           if (!this.approve) {
-            yield* this.rejectToolCall(
-              call.id,
+            slots.push({
+              kind: "reject",
+              id: call.id,
               name,
-              `Error: "${name}" needs the user's approval, but this session has no approval channel. Re-run with --yes to allow it.`,
-            );
+              content:
+                `Error: "${name}" needs the user's approval, but this session has no approval channel. Re-run with --yes to allow it.`,
+            });
             continue;
           }
 
@@ -831,7 +892,12 @@ export class Agent {
 
           const decision = await this.approve({ id: call.id, name, args, preview });
           if (decision === "deny") {
-            yield* this.rejectToolCall(call.id, name, `Error: the user denied permission to run "${name}".`);
+            slots.push({
+              kind: "reject",
+              id: call.id,
+              name,
+              content: `Error: the user denied permission to run "${name}".`,
+            });
             continue;
           }
           if (decision === "always") this.sessionApprovals.add(name);
@@ -841,30 +907,46 @@ export class Agent {
         // Past approval and refusal: this call runs, so it counts — toward
         // the turn's own ledger, not just the session total.
         toolCalls += 1;
+        slots.push({ kind: "run", id: call.id, name, tool, args, settled: undefined });
+      }
 
-        let content: string;
-        let isError = false;
-        try {
-          const result = await tool.run(args, this.toolContext(signal));
-          content = result.content;
-          isError = result.isError === true;
-        } catch (error) {
-          content = `Error: ${(error as Error).message}`;
-          isError = true;
+      // Second pass: start what can overlap, and wait for what may not. A call
+      // that could change something is finished before the next one begins, so
+      // two writes can never interleave — while the reads around them overlap.
+      for (const slot of slots) {
+        if (slot.kind !== "run") continue;
+        // Wrapped so it can never reject: a tool that throws has to become a
+        // result the model reads, and a promise left un-awaited after the turn is
+        // abandoned would take the process down with an unhandled rejection.
+        slot.settled = slot.tool
+          .run(slot.args, this.toolContext(signal))
+          .then(
+            (result) => ({ content: result.content, isError: result.isError === true }),
+            (error: unknown) => ({ content: `Error: ${(error as Error).message}`, isError: true }),
+          );
+        if (slot.tool.concurrencySafe !== true) await slot.settled;
+      }
+
+      // Third pass: the answers, in the order the calls were made.
+      for (const slot of slots) {
+        if (slot.kind === "reject") {
+          yield* this.rejectToolCall(slot.id, slot.name, slot.content);
+          continue;
         }
 
-        this.messages.push({ role: "tool", tool_call_id: call.id, content });
-        yield { type: "tool-result", id: call.id, name, content, isError };
+        const settled = await slot.settled!;
+        this.messages.push({ role: "tool", tool_call_id: slot.id, content: settled.content });
+        yield { type: "tool-result", id: slot.id, name: slot.name, content: settled.content, isError: settled.isError };
 
         // A tool with state of its own (the plan tools) hands it over as data
         // too, so the screen can show progress without reading the text.
-        const snapshot = tool.snapshot?.();
+        const snapshot = slot.tool.snapshot?.();
         if (snapshot) yield { type: "plan", snapshot };
 
         // The same, for the child agents a tool is running: the panel needs to
         // know who is working on what while it is happening, not only once the
         // tool has returned a summary of all of it.
-        const children = tool.subagents?.();
+        const children = slot.tool.subagents?.();
         if (children && children.length > 0) yield { type: "subagents", state: children };
 
         // The tool may have been stopped by the cancellation it was just

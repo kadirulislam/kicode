@@ -10,6 +10,8 @@ const DEFAULT_MAX_RESULTS = 200;
 
 export const globTool: Tool = {
   name: "glob",
+  // Reads change nothing, so they may overlap each other within one turn.
+  concurrencySafe: true,
   description:
     "Find files by glob pattern, e.g. `**/*.ts` or `src/**/*.test.ts`. Returns paths relative to the working directory, sorted. Skips node_modules, .git, and build output.",
   parameters: {

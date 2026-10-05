@@ -4162,7 +4162,15 @@ describe("the slash commands", () => {
       expect(app.lastFrame()).toContain("@src/tui/frame.test.ts");
 
       app.input.write(" read this\r");
-      await tick(80);
+      // Polled for the same reason as above: the submit reads the file off disk
+      // before it sends, and a fixed 80ms was not enough roughly one run in five
+      // on a loaded machine. The test then asserted on a prompt that had not been
+      // submitted yet — a failure in the harness, not in the feature.
+      let sent = false;
+      for (let i = 0; i < 30 && !sent; i++) {
+        await tick(40);
+        sent = app.screen().includes("Context from @src/tui/frame.test.ts");
+      }
       // The model receives the file's contents after the words…
       expect(app.screen()).toContain("Context from @src/tui/frame.test.ts");
       // …while the transcript keeps exactly what was typed.

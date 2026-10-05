@@ -85,6 +85,21 @@ export type Tool = {
   /** When true, the loop must ask before running this tool. */
   requiresApproval?: boolean;
   /**
+   * True when this tool may run **at the same time as** the others in one turn.
+   *
+   * Absent means no — the safe default, because a tool nobody has thought about
+   * overlapping should not start overlapping the moment it is registered. Only
+   * the tools that provably change nothing carry it (`read`, `glob`, `grep`,
+   * `recall`), and those are exactly the ones a model emits a dozen of at once
+   * when it is exploring: run in sequence, eighteen reads cost eighteen round
+   * trips, and that is the whole of the wait.
+   *
+   * Deliberately *not* inferred from `requiresApproval`. An MCP tool on an
+   * auto-approved server has no gate and can still write, so "ungated" is not
+   * the same question as "cannot change anything".
+   */
+  concurrencySafe?: boolean;
+  /**
    * True when this particular call only reads, and so may run in plan mode.
    *
    * A tool that is gated but sometimes harmless says which invocations are:
