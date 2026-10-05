@@ -45,6 +45,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The subagent editor ignored typing. The row was drawn from the saved value
+  while the keys went into the editor, so the text was there and the screen was
+  not — which reads as a dead keyboard. It now shows what you are typing, with
+  the caret where the cursor is, and the prompt box no longer draws the same
+  text a second time underneath it.
+
+### Fixed
+
 - A wedged child is cut loose on its own account after
   `delegation.staleMs` of silence (1 200s while inside a tool), instead of
   holding its parent's turn open until the session's own request budget.

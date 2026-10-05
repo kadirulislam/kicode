@@ -2328,6 +2328,103 @@ describe("the subagent editor", () => {
     await rm(own, { recursive: true, force: true });
   });
 
+it("shows what you type while you are typing it", async () => {
+    // The bug this pins: the row drew the *committed* value, so the editor held
+    // the text and the screen did not. It looked like a dead keyboard, and
+    // nothing in the panel said otherwise.
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r"); // open the editor on Name
+    await tick(25);
+    app.input.write("cody-git");
+    await tick(30);
+
+    const screen = app.lastFrame();
+    expect(screen).toContain("cody-git");
+    // And the caret, after what has been typed rather than at the row's end.
+    expect(screen).toContain("cody-git▌");
+    await leave(app, done);
+  });
+
+  it("puts the caret where the edit is, not at the end of the row", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("cody-git");
+    await tick(25);
+    app.input.write("\u001b[D"); // left, to sit before the last character
+    await tick(25);
+
+    expect(app.lastFrame()).toContain("cody-gi▌t");
+    await leave(app, done);
+  });
+
+  it("keeps the placeholder off the row being typed into", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r"); // open the form, cursor on Name
+    await tick(25);
+    app.input.write("\r"); // and start editing it
+    await tick(25);
+
+    // The other empty fields keep saying "(empty)" — that is right. The one under
+    // the cursor must not, because `(empty)` beside a live caret reads as a
+    // value rather than as a hint.
+    expect(app.lastFrame()).toContain("▌");
+    expect(app.lastFrame()).not.toContain("(empty)▌");
+    await leave(app, done);
+  });
+
+  it("shows only the line the caret is on, so a long field cannot break the card", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("down\nup\u001b[B");
+    await tick(30);
+
+    // Three lines typed; the row shows the one the caret is on.
+    expect(app.lastFrame()).toContain("up▌");
+    expect(app.lastFrame()).not.toContain("down");
+    for (const line of app.lastFrame().split(/\r?\n/)) expect(line.length).toBeLessThanOrEqual(80);
+    await leave(app, done);
+  });
+
+  it("does not ask the panel what field it is on", async () => {
+    // The bug this pins: `agentFieldKey()` read the field key out of the rendered
+    // panel, and the panel's footer called `agentFieldKey()`. That loop blew the
+    // stack, `draw()` threw, and the screen kept showing the last good frame —
+    // which looks exactly like a form that ignores the keyboard. Nothing about
+    // the failure names the cycle, so it needs a test that keeps rendering while
+    // a field is being edited.
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("\r"); // editing: the footer now asks for the field key
+    await tick(25);
+    app.input.write("cody-git");
+    await tick(30);
+    app.input.write("\u001b");
+    await tick(90);
+
+    // Still alive, still the same form, and the name survived the round trip.
+    expect(app.lastFrame()).toContain("New subagent");
+    expect(app.lastFrame()).toContain("cody-git");
+    await leave(app, done);
+  });
+
 it("closes without saving when escape is pressed", async () => {
     const { app, done } = await open([profile()]);
 

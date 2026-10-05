@@ -723,6 +723,25 @@ type ParkedSession = {
   variant: string;
 };
 
+/**
+ * The editor's fields, in order.
+ *
+ * The one source for the panel, the cursor and the key handler, because those
+ * three have to agree about which field is the fourth. They used to ask each
+ * other instead — the footer asked `agentFieldKey`, which asked the panel,
+ * which built the footer — and that loop blew the stack the moment a field was
+ * being edited, so the form rendered stale and typing appeared to do nothing.
+ */
+const AGENT_FIELD_KEYS = [
+  "name",
+  "description",
+  "instructions",
+  "model",
+  "permissions",
+  "scope",
+  "save",
+] as const;
+
 class TuiApp {
   private readonly options: TuiOptions;
   private readonly input: NodeJS.ReadStream;
@@ -7205,6 +7224,10 @@ class TuiApp {
   private agentForm(): FormPanel | null {
     const form = this.agentEditor;
     if (!form) return null;
+    // While a field is being edited the row shows the live buffer, not what was
+    // last committed. A field that only updates when you leave it looks frozen,
+    // which reads as though the keyboard is dead.
+    const live = form.editing ? this.editingLine() : null;
     const fields: FormField[] = [
       { key: "name", label: "Name", kind: "text", value: form.name, hint: "What the model types to pick it, e.g. cody-git" },
       {
@@ -7257,6 +7280,16 @@ class TuiApp {
     ];
     const nameProblem = agentNameProblem(form.name);
     if (form.name && nameProblem) fields[0]!.problem = nameProblem;
+    // The field under the cursor, while it is being typed into, shows what has
+    // been typed. Everything else keeps showing what is stored.
+    if (live) {
+      const target = fields[form.selected];
+      if (target?.kind === "text") {
+        target.value = live.text;
+        target.caret = live.caret;
+        target.hint = undefined;
+      }
+    }
     return {
       title: form.original ? `Subagent · ${form.original.name}` : "New subagent",
       subtitle: form.original ? `Created in ${form.original.scope === "project" ? "this project" : "your user directory"}` : undefined,
@@ -7264,8 +7297,13 @@ class TuiApp {
       selected: Math.min(Math.max(form.selected, 0), Math.max(fields.length - 1, 0)),
       editing: form.editing,
       error: form.error,
+      // Named per field, because they differ: `How it works` takes paragraphs and
+      // Enter is a new line there, while every other field is one line and
+      // promising Enter would do something is offering a key that lies.
       footer: form.editing
-        ? "enter next line · shift+enter line break · esc done"
+        ? this.agentFieldKey() === "instructions"
+          ? "enter new line · esc done"
+          : "esc done"
         : "enter edit · ‹/› change · ↑↓ move · esc cancel",
     };
   }
@@ -7403,11 +7441,30 @@ class TuiApp {
     };
   }
 
+
   /** The field the cursor is on, by its key rather than by its position. */
   private agentFieldKey(): string {
     const form = this.agentEditor;
     if (!form) return "";
-    return this.agentForm()?.fields[form.selected]?.key ?? "";
+    // Read from the list, never from the panel: the panel asks for this.
+    const keys = form.original ? [...AGENT_FIELD_KEYS, "delete"] : AGENT_FIELD_KEYS;
+    return keys[Math.min(Math.max(form.selected, 0), keys.length - 1)] ?? "";
+  }
+
+  /**
+   * The editor's buffer, as the one row a field can show.
+   *
+   * The buffer can hold several lines — Enter is a newline in this editor,
+   * because it is the prompt's editor — but a field is drawn on one row, so only
+   * the line the caret is on is shown, with the caret's offset inside it. Drawing
+   * the whole buffer would put a paragraph into one row and break the card.
+   */
+  private editingLine(): { text: string; caret: number } {
+    const text = this.editor.text;
+    const caret = Math.min(Math.max(this.editor.cursor, 0), text.length);
+    const start = text.lastIndexOf("\n", caret - 1) + 1;
+    const end = text.indexOf("\n", caret);
+    return { text: text.slice(start, end === -1 ? text.length : end), caret: caret - start };
   }
 
   /** Writes the editor's shared buffer into the field it is on. */

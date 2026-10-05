@@ -1619,12 +1619,20 @@ function renderFormPanel(
       field.kind === "toggle" && (field.options?.length ?? 0) > 0
         ? (field.options ?? []).map((option) => (option === field.value ? `[${option}]` : option)).join(" / ")
         : field.value === ""
-          ? field.options?.length && field.kind === "choice"
-            ? (field.options[0] ?? "")
-            : "(empty)"
+          ? field.caret !== undefined
+            ? ""
+            : field.options?.length && field.kind === "choice"
+              ? (field.options[0] ?? "")
+              : "(empty)"
           : field.value;
 
-    const body = isSelected && form.editing && field.kind === "text" ? `${shown}▌` : shown;
+    // The caret sits where the cursor is, not at the end of the row: a caret
+    // pinned to the end of a value being edited in the middle would put it in the
+    // wrong place for every character after the edit point.
+    const body =
+      field.caret === undefined
+        ? shown
+        : `${shown.slice(0, field.caret)}▌${shown.slice(field.caret)}`;
     const labelSpans: Span[] = [span("  ", fill || undefined), span(`${field.label}`, labelStyle)];
     const gap = Math.max(width - spansWidth(labelSpans) - textWidth(body) - 2, 1);
     rows.push(
@@ -2304,7 +2312,7 @@ function renderBottom(
   // and a menu's own search field already says where typing goes. The box
   // being on screen is also what decides whether the mode row under it has to
   // name the mode: the box's own pill says it whenever the box is there.
-  const boxShown = !state.modal && !state.picker && !state.menu && !(state.ask && !state.askTyping);
+  const boxShown = !state.modal && !state.picker && !state.menu && !state.form && !(state.ask && !state.askTyping);
 
   // Messages queued while a turn was running wait here, above the box, so what
   // will run next is visible without reaching for `/queue`. Each queued message
@@ -2852,7 +2860,7 @@ function footerSpans(state: TuiState, styles: Styles, usable: number, gutter: st
   // button, not text. Not while a card is up: the panel it opens is hidden
   // then, and a button that visibly does nothing is worse than one that is
   // not there.
-  const boxShown = !state.modal && !state.picker && !state.menu && !(state.ask && !state.askTyping);
+  const boxShown = !state.modal && !state.picker && !state.menu && !state.form && !(state.ask && !state.askTyping);
   const tail: Span[] = boxShown ? [span("   "), span(SETTINGS_GEAR, styles.accentBold)] : [];
   // The path starts under the rows above it, in the same gutter the prompt box
   // and the state row keep — a status bar flush to the terminal's left edge

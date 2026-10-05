@@ -900,6 +900,9 @@ you have defined and opens a form to add one:
 steps out of a field and then closes. Every row is clickable, and a click takes
 the same road as the key — so the mouse and the keyboard cannot disagree.
 
+You can also just start typing: the field under the cursor takes what you write
+and the row shows it as you go, caret and all.
+
 Four things worth knowing:
 
 - **The name and the one-line description are what the model reads.** They go
@@ -1345,7 +1348,8 @@ through named values.
 | `delegation.maxIterations` | `KICODE_DELEGATION_ITERATIONS` |
 | `mcp` | — (see [MCP servers](#mcp-servers)) |
 
-See [Subagents](#subagents) for what the delegation block does.
+See [Subagents](#subagents) for what the delegation block does, and
+[Named subagents](#named-subagents) for the ones with a name and a job.
 
 The order is **flags > `kicode.json` > environment > defaults**, and the file
 beats the environment on purpose: an ambient `OPENAI_BASE_URL` usually belongs to

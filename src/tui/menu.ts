@@ -101,6 +101,16 @@ export type FormField = {
   kind: FormFieldKind;
   /** What it holds now. Empty is a real value; an action holds nothing. */
   value: string;
+  /**
+   * Where the caret sits, in code units into `value`, while this field is being
+   * edited.
+   *
+   * The panel draws from the live editor buffer rather than the saved value, so
+   * what you see while typing is what you have typed — a field that only updates
+   * when you leave it looks frozen, and reads as though the keyboard is dead.
+   * Absent when the field is not being edited.
+   */
+  caret?: number;
   /** The choices, for `toggle` and `choice`. The first is the default. */
   options?: readonly string[];
   /** One line under the field, saying what it is for. */
