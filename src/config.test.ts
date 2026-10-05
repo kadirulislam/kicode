@@ -270,6 +270,22 @@ describe("delegation settings", () => {
     expect(config.delegation.maxPerTurn).toBe(4);
   });
 
+  it("leaves the parent's github tool off unless it is asked for", () => {
+    // Off by default because with it on the parent does GitHub work itself, and
+    // that work is what a named agent was given. Found by watching a session stop
+    // delegating the moment it had the tool.
+    expect(loadConfig({}, {}).github.enabled).toBe(false);
+    expect(loadConfig({}, { github: { enabled: true } }).github.enabled).toBe(true);
+  });
+
+  it("takes the github tool from the environment, and lets a file outrank it", () => {
+    // A one-line change should not require editing a config file — but the file
+    // still wins when both are set, which is the precedence everything else uses.
+    expect(loadConfig({ KICODE_GITHUB_TOOL: "true" }, {}).github.enabled).toBe(true);
+    expect(loadConfig({ KICODE_GITHUB_TOOL: "off" }, { github: { enabled: true } }).github.enabled).toBe(true);
+    expect(loadConfig({ KICODE_GITHUB_TOOL: "yes" }, { github: { enabled: false } }).github.enabled).toBe(false);
+  });
+
   it("turns it off from the file", () => {
     expect(loadConfig({}, { delegation: { enabled: false } }).delegation.enabled).toBe(false);
   });

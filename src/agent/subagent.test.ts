@@ -14,6 +14,7 @@ import {
 } from "./subagent";
 import { SUBAGENT_TOOLS, createDefaultTools } from "./tools";
 import { DEFAULT_SYSTEM_PROMPT } from "./loop";
+import { toolsFor } from "../agents";
 import { ToolRegistry } from "./tools/types";
 import type { AgentProfile } from "../agents";
 import type { Agent, AgentEvent } from "./loop";
@@ -1051,6 +1052,36 @@ describe("the delegate tool's own description", () => {
     // The per-task goal is where "narrow enough to finish on its own" has to be,
     // or the model writes one-word tasks and gets one-word reports.
     expect(schema?.items?.properties?.goal?.description ?? "").toContain("Narrow enough");
+  });
+});
+
+describe("who gets the github tool", () => {
+  // Found by a screenshot: the parent had `github`, so it stopped delegating
+  // GitHub work and did every call itself. Rational, and the opposite of what a
+  // subagent is for — the capability `cody-git` exists to provide had arrived in
+  // the parent's context instead.
+  const names = (options: { github?: boolean } = {}) =>
+    createDefaultTools([], options).list().map((tool) => tool.name);
+
+  it("is not on the parent unless it is asked for", () => {
+    expect(names()).not.toContain("github");
+  });
+
+  it("is on the parent when it is asked for", () => {
+    // Turned on for the one small question that is cheaper to answer than to
+    // delegate. Off is the default because the default should be the one where
+    // the work reaches the agent that was given it.
+    expect(names({ github: true })).toContain("github");
+  });
+
+  it("is still reachable for a named agent that was granted it", () => {
+    // The point of the change is *where* the capability sits, not removing it.
+    expect(toolsFor("read", true)).toContain("github");
+    expect(names()).not.toContain("github");
+  });
+
+  it("is a read, so it may overlap, either way it is granted", () => {
+    expect(createDefaultTools([], { github: true }).get("github")?.concurrencySafe).toBe(true);
   });
 });
 

@@ -134,6 +134,8 @@ export type FileSettings = {
   brain?: string;
   compaction?: FileCompactionSettings;
   delegation?: FileDelegationSettings;
+  /** The `github` tool for the main session. Off by default; see ADR-067. */
+  github?: { enabled?: boolean };
 };
 
 export type FileSettingsResult = {
@@ -206,6 +208,17 @@ export function fileSettingsFromEntries(entries: readonly ConfigFileEntry[]): Fi
     if (json.delegation !== undefined) {
       const parsed = readDelegation(json.delegation, entry.file, warnings);
       if (parsed) settings.delegation = { ...settings.delegation, ...parsed };
+    }
+
+    if (json.github !== undefined) {
+      const block = json.github as { enabled?: unknown };
+      if (json.github === null || typeof block !== "object") {
+        warnings.push(`Ignoring "github" in ${entry.file}: expected an object.`);
+      } else if (block.enabled !== undefined && typeof block.enabled !== "boolean") {
+        warnings.push(`Ignoring "github.enabled" in ${entry.file}: expected true or false.`);
+      } else {
+        settings.github = { enabled: block.enabled === true };
+      }
     }
 
     if (json.providers !== undefined) {

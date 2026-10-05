@@ -64,6 +64,7 @@ function config(overrides: Partial<Config> = {}): Config {
       staleToolMs: DEFAULT_SUBAGENT_STALE_TOOL_MS,
       retryUnfinished: DEFAULT_RETRY_UNFINISHED,
     },
+    github: { enabled: false },
     ...overrides,
   };
 }

@@ -6,6 +6,24 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **The main session stopped delegating GitHub work, and this was the cause.**
+  `github` had been added to the parent's default toolset, so the parent had the
+  capability and used it — the whole audit, one call at a time, into its own
+  context. That is the tool's presence removing the forcing function delegation
+  depends on, and no amount of prompt work would have out-argued it. It is now
+  **opt-in for the parent** (`"github": { "enabled": true }`, or
+  `KICODE_GITHUB_TOOL=true`); a named agent granted the tool keeps it either way,
+  so the default is the configuration where the work reaches the agent that was
+  given it.
+
+  Found by a screenshot, not a test: no test asserted *where* the capability
+  should live, because that had never been written down as a question. The
+  transferable rule is that a capability added for a subagent must not be added
+  to the parent in the same change — and the symptom points at the subagent, not
+  at the parent.
+
 ### Changed
 
 - **The `delegate` tool now leads with the batch form**, with a worked example

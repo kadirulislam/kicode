@@ -212,6 +212,19 @@ export type Config = {
   learning: "off" | "auto";
   compaction: CompactionSettings;
   delegation: DelegationSettings;
+  /**
+   * The `github` tool, for the **main session**.
+   *
+   * Off by default, and the reason is behavioural rather than safety. When the
+   * parent has it, the parent does GitHub work itself — which is exactly the work
+   * a named agent was given, and the results all land in the parent's context
+   * instead of coming back as a report. A named agent granted the tool keeps it
+   * either way; this is only about the main session.
+   *
+   * Turn it on when you would rather answer one small GitHub question than spawn a
+   * child for it.
+   */
+  github: { enabled: boolean };
 };
 
 /** What the bundled mock provider serves, for the `mock` shorthand. */
@@ -308,6 +321,13 @@ export function loadConfig(
       compactAt: compaction.compactAt ?? intFrom(env.KICODE_COMPACT_AT, DEFAULT_COMPACT_AT_TOKENS),
     },
     delegation: readDelegation(env, file),
+    github: {
+      // Off by default — see the field. The env escape hatch is here because a
+      // one-line change should not require editing a config file.
+      enabled: /^(1|true|yes|on)$/i.test(
+        String(file.github?.enabled ?? env.KICODE_GITHUB_TOOL ?? "").trim(),
+      ),
+    },
   };
 }
 

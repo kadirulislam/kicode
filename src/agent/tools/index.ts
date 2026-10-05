@@ -37,7 +37,10 @@ export type { Tool, ToolContext, ToolResult } from "./types";
  * question channel that cannot answer would cost the model a wasted turn and
  * teach it to guess instead.
  */
-export function createDefaultTools(extra: Tool[] = [], options: { ask?: boolean } = {}): ToolRegistry {
+export function createDefaultTools(
+  extra: Tool[] = [],
+  options: { ask?: boolean; github?: boolean } = {},
+): ToolRegistry {
   const tools: Tool[] = [
     readTool,
     globTool,
@@ -47,10 +50,17 @@ export function createDefaultTools(extra: Tool[] = [], options: { ask?: boolean 
     bashTool,
     rememberTool,
     recallTool,
-    githubTool,
     ...createPlanTools(),
   ];
   if (options.ask) tools.push(askTool);
+  // `github` is **opt-in for the parent**, and that is a correction rather than a
+  // preference. It was in this list unconditionally, and the effect was that the
+  // main session stopped delegating GitHub work: it had the tool, so it used it.
+  // That is rational — and it meant the capability `cody-git` exists to provide
+  // arrived in the parent's context instead, which is the opposite of what a
+  // subagent is for. A named agent granted it keeps it; the parent asks for it
+  // with `"github": { "enabled": true }`.
+  if (options.github) tools.push(githubTool);
   return new ToolRegistry([...tools, ...extra]);
 }
 

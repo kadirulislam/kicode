@@ -1317,7 +1317,7 @@ describe("several tool calls in one turn", () => {
     // list is enumerated rather than derived, because "which tools are safe" is
     // the claim being made and a computed one would agree with itself.
     const expected = new Set(["read", "glob", "grep", "recall", "github"]);
-    for (const tool of createDefaultTools().list()) {
+    for (const tool of createDefaultTools([], { github: true }).list()) {
       expect(tool.concurrencySafe === true, tool.name).toBe(expected.has(tool.name));
     }
   });

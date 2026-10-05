@@ -4,6 +4,16 @@ import { githubTool } from "./github";
 const ctx = { cwd: process.cwd() } as never;
 const run = (args: Record<string, unknown>) => githubTool.run(args, ctx);
 
+/**
+ * For the few tests here that actually start `gh`.
+ *
+ * The refusal tests answer before anything is spawned and are instant; the three
+ * that reach the CLI make a real process call, and Vitest's 5s default turned a
+ * loaded machine into a failure that was a lie about the code. 30s is the same
+ * budget the live suite uses, for the same reason.
+ */
+const SPAWNS_CLI = 30_000;
+
 describe("the github tool", () => {
   describe("what it refuses before running anything", () => {
     // Each of these is refused *before* gh is started, so none of them can
@@ -48,7 +58,7 @@ describe("the github tool", () => {
       const result = await run({ path: "/user", jq: ".[].full_name" });
       // Not refused — it got as far as running gh, which is the whole assertion.
       expect(result.content).not.toMatch(/not allowed in/);
-    });
+    }, SPAWNS_CLI);
   });
 
   describe("the shape it hands gh", () => {
@@ -59,7 +69,7 @@ describe("the github tool", () => {
       // canonical form is required rather than worked around.
       const result = await run({ path: "/user" });
       expect(result.content).not.toMatch(/No such file|file.*not found|cannot find/i);
-    });
+    }, SPAWNS_CLI);
   });
 
   describe("when gh is not usable", () => {
@@ -73,6 +83,6 @@ describe("the github tool", () => {
       if (result.isError) {
         expect(result.content).toMatch(/gh|install|failed/i);
       }
-    });
+    }, SPAWNS_CLI);
   });
 });

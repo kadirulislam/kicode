@@ -512,6 +512,9 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
   // Questions need somebody to answer them; a piped run has nobody, so the ask
   // tool is not registered at all rather than failing when it is called.
   const canAsk = tui || io.interactive;
+  // The parent's own `github` tool, off unless configured — see ADR-067 for why
+  // the capability a subagent exists to provide should not sit on the parent.
+  const githubTool = config.github.enabled;
 
   // Every endpoint this run can talk to, with the key that goes with it.
   //
@@ -675,7 +678,12 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       provider,
       tools: settings.tools
         ? createDefaultTools(mcp?.tools ?? []).subset(settings.tools)
-        : createDefaultTools([...(mcp?.tools ?? []), ...(settings.extraTools ?? [])], { ask: canAsk }),
+        : createDefaultTools([...(mcp?.tools ?? []), ...(settings.extraTools ?? [])], {
+            ask: canAsk,
+            // Opt-in: with it on, the parent answers GitHub questions itself and a
+            // named agent never gets the work. Off unless asked for — see ADR-067.
+            github: githubTool,
+          }),
       // The roster names the subagents this agent may reach, so it knows when to
       // reach for one. A child is built with `tools`, and gets no roster: the tree
       // stays flat, and a child must never be told it can delegate further.

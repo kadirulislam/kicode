@@ -815,7 +815,7 @@ child really was handed a read-only toolset:
 | `edit` | **yes** | Replace an exact string; refuses an ambiguous match |
 | `bash` | **yes** | Run a shell command in the working directory |
 | `ask` | — | Put a choice to you as labelled options; only offered when somebody can answer |
-| `github` | — | Read the GitHub REST API through the authenticated `gh` CLI; reads only |
+| `github` | — | Read the GitHub REST API through the authenticated `gh` CLI; reads only. **Opt-in on the main session** — see below |
 | `delegate` | — | Hand a task, or a batch of them, to child agents; off with `delegation.enabled: false` |
 
 `glob` and `grep` are pure Node — no `ripgrep` binary to install. Both match
@@ -896,6 +896,27 @@ Consequences worth knowing:
 
 It reads only. There is no way to write, comment or merge through it, at either
 permission level.
+
+#### Why the main session does not have it by default
+
+The **main session has to ask for it**:
+
+```json
+{ "github": { "enabled": true } }
+```
+
+or `KICODE_GITHUB_TOOL=true`.
+
+It was in the default toolset at first, and the effect was the opposite of what
+this tool is for: the main session stopped delegating GitHub work and did the
+whole audit itself, one call at a time, into its own context. That is the tool's
+presence **removing the forcing function** delegation depends on — the model had a
+tool that obviously worked, and no amount of prompt instruction out-argues that.
+
+So the capability lives where you put it. A named agent granted `github` has it
+either way; the main session has it only if you say so. Turn it on for the one
+small question that is cheaper to answer than to delegate — *"how many public
+repos do I have"* — where spawning a child would be overhead for no gain.
 
 ## Subagents
 
