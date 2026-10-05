@@ -1011,6 +1011,35 @@ Four things worth knowing:
   Falling back to a general-purpose child would be a substitution the model never
   asked for and would not know about.
 
+#### Splitting the work, and why it cannot be made reliable
+
+The mechanism is there — a `tasks` batch runs its children in parallel — but a
+model has to *decide* to split. Nothing in the loop can decide that "audit the
+workspace" is four tasks rather than one, because that judgement needs the
+conversation. So this part is **prompt work**, and it is worth being straight
+about that: it has a hit rate, not a guarantee.
+
+What it does:
+
+- **`delegate` leads with the batch form**, with a worked example — *"audit every
+  repo… then review the open PRs"* is **two tasks in one call**, not two calls and
+  not one task listing both. Each task in the array is described too, because an
+  undescribed item gets a one-word goal and a one-word report.
+- **A `Delegation:` section in the system prompt**, present only when the
+  `delegate` tool is registered — a session without subagents is not charged for a
+  paragraph about them on every request.
+- **It chains onto a rule the model already follows.** The base prompt says
+  *"track the steps of multi-step work with the todo tool"*, and the observed
+  failure was a session tracking four steps and then doing all four itself. So the
+  new line picks up exactly there: *"when your tracked steps are independent of
+  each other, hand each one to a subagent."*
+- **It gives a reason rather than an order.** Handing over the reading is cheaper —
+  a report comes back, the forty files behind it do not, and they would otherwise
+  sit in your context for the rest of the session.
+- **It says what not to delegate**: not a decision, not a single lookup, not
+  anything depending on what the user said earlier. The failure mode of "delegate
+  more" is delegating a lookup, which costs a child and saves nothing.
+
 `/agents running` is the live roster — the children working right now, with each
 report in full. Each row leads with **which agent took the task**, because that is
 the question the panel exists to answer:
@@ -1675,10 +1704,11 @@ src/routes/quota.ts     what a gateway says about its limits, from its headers
 src/routes/probe.ts     asking a gateway what is left (OpenRouter /key), cached
 src/routes/health.ts    what each route did last time, kept in ~/.kicode/routes.json
 src/agent/loop.ts       the loop: stream -> tools -> feed back -> repeat
-src/agent/subagent.ts   the delegate tool, the child runner, and the live roster
+src/agent/subagent.ts   the delegate tool, the child runner, the roster, and the
+                       decomposition prompt the parent reads
 src/agents.ts           named subagents: the profiles, their permissions, the files,
                        and each agent's skill folder beside them
-src/agent/tools/        tool contract, registry, the six tools, diff, walker, glob matcher
+src/agent/tools/        tool contract, registry, the seven tools, diff, walker, glob matcher
 src/agent/compaction.ts summarise older turns when the context window fills
 src/agent/environment.ts which shell `bash` gets, and the prompt that names it
 src/clipboard.ts        the system clipboard: text out, or an image as a data URL
@@ -1732,14 +1762,20 @@ around a failure — a rejected key, a cancellation, and an answer already begun
 
 ## What's next
 
-1. **Charge children's tokens to the session.** A child's spending rides on its
+1. **An eval harness.** Every claim this README makes about how a *model* behaves
+   — that it delegates by name, that it batches, that it stops on a limit — has
+   been reasoned rather than measured. A suite of task fixtures scored pass/fail on
+   observable things (did it call `delegate`? was it one batch? did it respect the
+   gate?) would turn all of it into numbers that can go down, and would make
+   prompt changes reviewable instead of hopeful.
+2. **Charge children's tokens to the session.** A child's spending rides on its
    own report but not on the parent's ledger, so `/context` and `/usage`
    under-report a session that delegated. The fix is an `Agent.absorb(other)` the
    loop calls for each settled child on the `subagents` event.
-2. **A structured `github` tool, so `cody-git` can do GitHub work.** *(Built —
+3. **A structured `github` tool, so `cody-git` can do GitHub work.** *(Built —
    see above. ADR-064. What it deliberately cannot do: GraphQL, and therefore
    mutations, because "read-only" was worth more than query flexibility.)*
-3. **MCP resources and prompts** — the client speaks the `tools/*` surface only;
+4. **MCP resources and prompts** — the client speaks the `tools/*` surface only;
    `resources/*` and `prompts/*` are the next slice of the protocol.
 4. **Write-capable children.** Read-only is a deliberate v1 limit: a child that
    could edit would need worktree isolation, and Git `worktrees` is not in the

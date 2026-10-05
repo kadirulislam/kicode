@@ -65,6 +65,33 @@ export const EMPTY_REPORT = EMPTY_REPORT_TEXT;
  * `null` when there are none: a session with no subagents should not be told
  * about the possibility.
  */
+/**
+ * How to use delegation, for a session that has the tool.
+ *
+ * Appended **only when `delegate` is actually registered**, so a session without
+ * subagents does not pay for a paragraph about them. Gated on the tool rather
+ * than on a setting because that is the thing that has to be true for the advice
+ * to be correct.
+ *
+ * The first line deliberately picks up the rule the model *already* follows —
+ * "track the steps of multi-step work with the todo tool". An instruction chained
+ * to an existing habit is worth more than an instruction on its own, and the
+ * observed failure was a session tracking four steps and then doing all four
+ * itself.
+ */
+export const DELEGATION_PROMPT = [
+  "Delegation:",
+  "- When your tracked steps are independent of each other, hand each one to a subagent in a single",
+  "  `delegate` call with a `tasks` batch. They run at once, so four narrow tasks cost roughly what one",
+  "  broad one does — and each gets a fresh context instead of filling yours.",
+  "- A subagent starts blind: it cannot see this conversation. Give it one narrow goal and everything it",
+  "  needs in `context` — paths, error text, the constraint that matters.",
+  "- Handing over the reading is usually cheaper than doing it. What comes back is a report; the forty",
+  "  files behind it would otherwise sit in your context for the rest of the session.",
+  "- Do not delegate a decision, a single lookup, or anything that depends on what the user said earlier",
+  "  in this conversation. A child cannot see it and cannot ask them.",
+].join("\n");
+
 export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string | null {
   if (profiles.length === 0) return null;
   const list = profiles
@@ -138,6 +165,9 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
     "- When a task is broad, exploratory, or spans many files, and one of these fits it, delegate to",
     "  that one rather than reading everything yourself. That is what they are for, and their report",
     "  comes back to you.",
+    "- Several separate pieces of work go in **one** delegate call as a `tasks` batch, not one call each.",
+    "  They run in parallel, so the wait is one piece rather than N — and a batch where each task names",
+    "  its own agent is how you send different work to different specialists in a single turn.",
     "- If none of them fit the task, do the work yourself. Delegating to the wrong one is worse than",
     "  not delegating.",
     "- A subagent has no memory of this conversation. Put everything it needs in `context`: paths,",
@@ -797,10 +827,15 @@ export function delegateTool(options: DelegateToolOptions): Tool {
   return {
     name: "delegate",
     description: [
-      "Delegate a task to a child agent: a fresh context, its own toolset, and its own model.",
+      "Delegate work to child agents: each gets a fresh context, its own toolset, and its own model,",
+      "and only its report comes back.",
+      "Give it a `tasks` batch — a list of { goal, context, agent } — whenever the work is several",
+      "independent pieces. They run in parallel, so the wait is one piece rather than N. Use a single",
+      "`goal` only when there is genuinely one thing to do.",
+      "Example: \"audit every repo in this workspace, then review the open PRs\" is two tasks in one call,",
+      "not two calls and not one task listing both.",
       "Use it when the work is broad (many files or locations), exploratory (where is X handled),",
-      "or splittable into independent parts worth doing at once — a batch of tasks runs in parallel",
-      "and only their reports come back.",
+      "or splittable into independent parts worth doing at once.",
       "A child starts with no memory of this conversation: put everything it needs in `context`,",
       "including paths, error text and the constraint that matters. Delegating \"the bug we were",
       "looking at\" delegates nothing.",
@@ -851,12 +886,19 @@ export function delegateTool(options: DelegateToolOptions): Tool {
           : {}),
         tasks: {
           type: "array",
-          description: "Independent tasks to run in parallel. Each is { goal, context, agent }.",
+          description:
+            "Independent tasks to run in parallel — the right shape whenever the work is several separate pieces. Each is { goal, context, agent }.",
           items: {
             type: "object",
             properties: {
-              goal: { type: "string" },
-              context: { type: "string" },
+              goal: {
+                type: "string",
+                description: "One narrow piece of the work. Narrow enough to finish on its own.",
+              },
+              context: {
+                type: "string",
+                description: "Everything this task needs, since the child cannot see the conversation.",
+              },
               ...(profiles.length ? { agent: { type: "string", enum: profiles.map((profile) => profile.name) } } : {}),
             },
             required: ["goal"],

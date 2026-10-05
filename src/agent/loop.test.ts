@@ -949,6 +949,58 @@ describe("plan mode", () => {
   });
 });
 
+describe("the delegation prompt in the system prompt", () => {
+  const built = (withDelegate: boolean): Agent =>
+    new Agent({
+      provider: new FakeProvider([answerTurn("ok")]),
+      tools: new ToolRegistry([
+        echoTool,
+        ...(withDelegate
+          ? [
+              {
+                name: "delegate",
+                description: "delegate",
+                parameters: { type: "object", properties: {}, required: [] },
+                async run() {
+                  return { content: "" };
+                },
+              } as Tool,
+            ]
+          : []),
+      ]),
+      model: "m",
+      cwd: process.cwd(),
+    });
+
+  const systemOf = async (agent: Agent): Promise<string> => {
+    const provider = (agent as unknown as { provider?: FakeProvider }).provider;
+    await collect(agent, "hello");
+    const first = provider?.requests[0]?.messages[0];
+    return first?.role === "system" ? String(first.content) : "";
+  };
+
+  it("is in the prompt when the tool is registered", async () => {
+    // The advice has to be true to be worth acting on, so it is gated on the
+    // tool list rather than on a setting that might disagree with it.
+    expect(await systemOf(built(true))).toContain("Delegation:");
+  });
+
+  it("is absent when there is no delegate tool", async () => {
+    // A session without subagents should not be charged a paragraph about them
+    // on every single request.
+    expect(await systemOf(built(false))).not.toContain("Delegation:");
+  });
+
+  it("tells the model to batch, rather than to call delegate repeatedly", async () => {
+    const system = await systemOf(built(true));
+
+    // The decomposition nudge is the whole feature: several independent pieces
+    // in one call, running in parallel.
+    expect(system).toContain("tasks");
+    expect(system).toMatch(/run at once/);
+  });
+});
+
 describe("the caller's own allow rules", () => {
   /**
    * The approval gate has two ways out: the config's `allow` rules and the

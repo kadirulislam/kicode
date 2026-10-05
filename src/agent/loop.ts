@@ -8,7 +8,7 @@ import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions 
 import { learnFromSession, type LearnResult } from "./learn";
 import type { PlanSnapshot, SubagentView, ToolContext, ToolRegistry } from "./tools/types";
 import type { AgentProfile } from "../agents";
-import { namedSubagentPrompt } from "./subagent";
+import { DELEGATION_PROMPT, namedSubagentPrompt } from "./subagent";
 
 /**
  * A user turn's content: the words, and any pasted images beside them.
@@ -386,6 +386,10 @@ export class Agent {
     // not told when to reach for them will do the work itself.
     const roster = options.namedSubagents ? namedSubagentPrompt(options.namedSubagents) : null;
     if (roster) system.push(roster);
+    // Asked of the tool list rather than a setting, because that is the thing
+    // which has to be true for the advice to be right — and a session with no
+    // subagents should not be charged a paragraph about them on every request.
+    if (this.tools.get("delegate")) system.push(DELEGATION_PROMPT);
     if (this.readOnly) system.push(PLAN_MODE_PROMPT);
     this.messages.push({ role: "system", content: system.join("\n\n") });
     if (options.history) this.messages.push(...options.history);

@@ -6,6 +6,22 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- **The `delegate` tool now leads with the batch form**, with a worked example
+  ("audit every repo… then review the open PRs" is *two tasks in one call*, not two
+  calls and not one task listing both), and each task in the array is described
+  rather than just the array — a model writes one-word tasks and gets one-word
+  reports otherwise.
+- A `Delegation:` section in the system prompt, **only when the `delegate` tool is
+  actually registered**, so a session without subagents is not charged for a
+  paragraph about them on every request. It is gated on the tool list rather than
+  a setting, because that is the thing which has to be true for the advice to be
+  correct. Its first line deliberately picks up the rule the model *already*
+  follows — "track the steps of multi-step work with the todo tool" — since the
+  observed failure was a session tracking four steps and then doing all four
+  itself.
+
 ### Added
 
 - **An unfinished delegated task is retried once, carrying what the first attempt

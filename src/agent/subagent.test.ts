@@ -4,6 +4,7 @@ import {
   SubagentRegistry,
   childRunner,
   delegateTool,
+  DELEGATION_PROMPT,
   EMPTY_REPORT,
   namedSubagentPrompt,
   type ChildRunnerOptions,
@@ -12,6 +13,7 @@ import {
   type SubagentResult,
 } from "./subagent";
 import { SUBAGENT_TOOLS, createDefaultTools } from "./tools";
+import { DEFAULT_SYSTEM_PROMPT } from "./loop";
 import { ToolRegistry } from "./tools/types";
 import type { AgentProfile } from "../agents";
 import type { Agent, AgentEvent } from "./loop";
@@ -976,6 +978,79 @@ describe("a child that reports nothing", () => {
     );
 
     expect(result.summary).not.toBe("");
+  });
+});
+
+describe("the delegation prompt", () => {
+
+  it("chains onto the todo rule the model already follows", () => {
+    // An instruction attached to an existing habit is worth more than a lone one.
+    // The observed failure was a session tracking four steps and then doing all
+    // four itself, so the new advice has to meet it where it already goes.
+    expect(DELEGATION_PROMPT).toContain("tracked steps");
+    expect(DEFAULT_SYSTEM_PROMPT).toContain("track the steps with the todo tool");
+  });
+
+  it("says what not to delegate, so the advice cannot cause over-delegation", () => {
+    // The wrong response to "delegate more" is delegating a single lookup, which
+    // costs a child and saves nothing.
+    expect(DELEGATION_PROMPT).toContain("Do not delegate a decision, a single lookup");
+  });
+
+  it("tells the model one batch beats several calls", () => {
+    expect(DELEGATION_PROMPT).toContain("single");
+    expect(DELEGATION_PROMPT).toContain("run at once");
+  });
+});
+
+describe("the delegate tool's own description", () => {
+  const described = (profiles: AgentProfile[] = []) =>
+    delegateTool({
+      spawn: async (request) => ({ id: request.id, goal: request.goal, requests: 1, status: "completed", summary: "x" }),
+      registry: new SubagentRegistry(),
+      settings: { model: "", maxConcurrent: 2, maxPerTurn: 4 },
+      spawnCount: () => 0,
+      profiles,
+    }).description;
+
+  it("leads with the batch form, because that is the shape being nudged toward", () => {
+    // The tool description is what a model reads when it is deciding whether to
+    // reach for the tool at all, so the order of its sentences is the order of the
+    // decision.
+    const text = described();
+    expect(text).toContain("tasks");
+    expect(text).toContain("in parallel");
+  });
+
+  it("gives a worked example, so the split is pattern-matchable", () => {
+    // An example is worth more than another adjective: it shows the shape of a
+    // good batch rather than describing it.
+    expect(described()).toMatch(/audit every repo.*two tasks in one call/s);
+  });
+
+  it("says a single goal is for one thing only", () => {
+    expect(described()).toContain("only when there is genuinely one thing to do");
+  });
+
+  it("describes each task in the batch, not just the array", () => {
+    const schema = (
+      delegateTool({
+        spawn: async (request) => ({ id: request.id, goal: request.goal, requests: 1, status: "completed", summary: "x" }),
+        registry: new SubagentRegistry(),
+        settings: { model: "", maxConcurrent: 2, maxPerTurn: 4 },
+        spawnCount: () => 0,
+      }).parameters as {
+        properties: Record<
+          string,
+          { description: string; items?: { properties?: Record<string, { description?: string }> } }
+        >;
+      }
+    ).properties.tasks;
+
+    expect(schema?.description ?? "").toMatch(/several separate pieces/);
+    // The per-task goal is where "narrow enough to finish on its own" has to be,
+    // or the model writes one-word tasks and gets one-word reports.
+    expect(schema?.items?.properties?.goal?.description ?? "").toContain("Narrow enough");
   });
 });
 
