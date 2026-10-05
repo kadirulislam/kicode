@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
@@ -8,6 +8,7 @@ import type { LearnResult } from "../agent/learn";
 import type { Agent, AgentEvent, ApprovalDecision } from "../agent/loop";
 import type { AskAnswer, AskQuestion } from "../agent/ask";
 import type { PlanSnapshot, Tool } from "../agent/tools/types";
+import type { AgentProfile } from "../agents";
 import type { PastedImage } from "../clipboard";
 import type { ChatMessage } from "../types";
 import { bg } from "./ansi";
@@ -1884,7 +1885,7 @@ describe("delegation", () => {
 
       await (await tool(app)).run({ goal: "what is the port" }, { cwd: "C:\\dev" });
       await tick(20);
-      app.input.write("/agents\r");
+      app.input.write("/agents running\r");
       await tick(30);
 
       // The roster row is a summary line, so it is cut to fit — the dock says
@@ -2037,7 +2038,7 @@ describe("delegation", () => {
 
   describe("/agents", () => {
     it("says there are none, rather than opening an empty panel", async () => {
-      const { app, done } = await drive(["/agents"], { delegation: delegation() });
+      const { app, done } = await drive(["/agents running"], { delegation: delegation() });
       await finish(app, done);
 
       expect(app.screen()).toContain("no subagents yet");
@@ -2072,6 +2073,284 @@ describe("delegation", () => {
       app.input.write("\u0015/exit\r");
       await done;
     });
+  });
+});
+
+describe("the subagent editor", () => {
+  const profile = (over: Partial<AgentProfile> = {}): AgentProfile => ({
+    name: "cody-git",
+    description: "GitHub and git work",
+    instructions: "Review branches and PRs.",
+    model: "",
+    permissions: "read",
+    scope: "global",
+    file: "",
+    ...over,
+  });
+
+  /** A session whose only definition is what `profiles` says. */
+  const session = (profiles: AgentProfile[] = [], cwd = "C:\\dev\\projects\\kicode"): Partial<TuiOptions> => ({
+    delegation: {
+      enabled: true,
+      model: "",
+      profiles,
+      maxConcurrent: 2,
+      maxPerTurn: 4,
+      maxIterations: 20,
+      staleMs: 60_000,
+      staleToolMs: 120_000,
+    },
+    cwd,
+  });
+
+  const open = async (profiles: AgentProfile[] = [], cwd?: string) => {
+    const { app, done } = await drive([], session(profiles, cwd));
+    app.input.write("/agents\r");
+    await tick(25);
+    return { app, done };
+  };
+
+  const leave = async (app: Harness, done: Promise<number>): Promise<void> => {
+    app.input.write("\u001b");
+    await tick(90);
+    app.input.write("\u0015/exit\r");
+    await done;
+  };
+
+  it("opens on the list, with a New row even when nothing is defined", async () => {
+    const { app, done } = await open();
+
+    const screen = app.lastFrame();
+    expect(screen).toContain("Subagents");
+    expect(screen).toContain("New agent");
+    expect(screen).toContain("No subagents yet");
+    await leave(app, done);
+  });
+
+  it("lists what is defined, with its permission level", async () => {
+    const { app, done } = await open([
+      profile({ name: "cody-git", permissions: "read" }),
+      profile({ name: "cody-frontend", permissions: "write" }),
+    ]);
+
+    const screen = app.lastFrame();
+    expect(screen).toContain("cody-git");
+    expect(screen).toContain("cody-frontend");
+    expect(screen).toContain("read only");
+    expect(screen).toContain("can edit");
+    await leave(app, done);
+  });
+
+  it("says where a project agent lives, so two of the same name are not confusing", async () => {
+    const { app, done } = await open([
+      profile({ name: "cody-git", scope: "global" }),
+      profile({ name: "cody-api", scope: "project" }),
+    ]);
+
+    expect(app.lastFrame()).toContain("All projects");
+    expect(app.lastFrame()).toContain("This project");
+    await leave(app, done);
+  });
+
+  /**
+   * A key that walks the form down to `field`.
+   *
+   * The fields in order: name, for, how it works, model, permissions, where,
+   * save, and delete on an agent that already exists. The editor opens with the
+   * cursor on the name, so a form this tall is navigated rather than read — and
+   * a test has to navigate it exactly as a person would.
+   */
+  const down = (field: number): string => "\u001b[B".repeat(field);
+
+  it("opens the editor on New, and it starts read-only", async () => {
+    // The grant is opt-in: an editor that opened on "yes" would make it the
+    // default by being the first thing anyone sees.
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B"); // down to New agent
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+
+    expect(app.lastFrame()).toContain("New subagent");
+
+    // Four fields down to the permission level.
+    app.input.write(down(4));
+    await tick(25);
+    expect(app.lastFrame()).toContain("[no] / yes");
+    expect(app.lastFrame()).toContain("Read-only");
+    await leave(app, done);
+  });
+
+  it("opens the editor on an existing agent with what is stored", async () => {
+    const { app, done } = await open([profile({ instructions: "Review branches and PRs." })]);
+
+    app.input.write("\r");
+    await tick(25);
+
+    expect(app.lastFrame()).toContain("Subagent · cody-git");
+    expect(app.lastFrame()).toContain("GitHub and git work");
+
+    // Delete is the last field, and only an existing agent has one.
+    app.input.write(down(7));
+    await tick(25);
+    expect(app.lastFrame()).toContain("Delete");
+    await leave(app, done);
+  });
+
+  it("flips a permission with enter, and says what the new level means", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write(down(4));
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+
+    expect(app.lastFrame()).toContain("no / [yes]");
+    // The warning travels with the grant: a child that can write has no undo.
+    expect(app.lastFrame()).toContain("no undo");
+    await leave(app, done);
+  });
+
+  it("cycles the scope between everywhere and here", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write(down(5));
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+
+    expect(app.lastFrame()).toContain("all projects / [this project]");
+    // The file it will be written to, because "this project" is a choice with
+    // a consequence and the consequence is a path.
+    expect(app.lastFrame()).toContain("Saved to");
+    await leave(app, done);
+  });
+
+  it("refuses to save a name it cannot use, and keeps the form open", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("cody git\r");
+    await tick(25);
+    app.input.write("\u001b"); // leave the field
+    await tick(90);
+    app.input.write(down(6));
+    await tick(20);
+    app.input.write("\r"); // down to Save
+    await tick(25);
+
+    // Still open, with the reason — closing here would throw away the name.
+    expect(app.lastFrame()).toContain("Cannot save");
+    expect(app.lastFrame()).toContain("Save");
+    await leave(app, done);
+  });
+
+  it("shows a name problem on the field itself, before a save is attempted", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("2fast");
+    await tick(20);
+    // A bare ESC is held for the decoder's grace window before it reads as
+    // Escape, so this needs the long wait or it arrives as part of a sequence.
+    app.input.write("\u001b");
+    await tick(90);
+
+    expect(app.lastFrame()).toContain("starting with a letter");
+    await leave(app, done);
+  });
+
+  it("names the keys it answers to", async () => {
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+
+    // A form whose footer promises nothing is a form the user has to guess at.
+    expect(app.lastFrame()).toContain("enter edit");
+    expect(app.lastFrame()).toContain("cancel");
+    await leave(app, done);
+  });
+
+  it("writes the agent where the scope says, and says what it saved", async () => {
+    // The whole point of the editor: an agent the model can then be told about.
+    // Written into a real KICODE_HOME so the test proves the file, not the note.
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-agents-"));
+    const previous = process.env.KICODE_HOME;
+    process.env.KICODE_HOME = own;
+    const { app, done } = await drive([], session([], own));
+    app.input.write("/agents\r");
+    await tick(25);
+    app.input.write("\u001b[B"); // New
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("cody-git");
+    await tick(20);
+    app.input.write("\u001b");
+    await tick(90);
+    // Down to Save, past For, How it works, Model, May edit, Where.
+    app.input.write(down(6));
+    await tick(25);
+    app.input.write("\r");
+    await tick(60);
+
+    const written = JSON.parse(
+      await readFile(path.join(own, "agents.json"), "utf8"),
+    ) as { agents: Record<string, { permissions: string }> };
+    expect(Object.keys(written.agents)).toEqual(["cody-git"]);
+    // Read-only by default, in the file as well as on screen.
+    expect(written.agents["cody-git"]?.permissions).toBe("read");
+    // The list it returns to now holds the agent — a save the user cannot see
+    // have worked is a save they have to go and check for.
+    expect(app.lastFrame()).toContain("cody-git");
+    expect(app.lastFrame()).toContain("read only");
+    await leave(app, done);
+    if (previous === undefined) delete process.env.KICODE_HOME;
+    else process.env.KICODE_HOME = previous;
+    await rm(own, { recursive: true, force: true });
+  });
+
+it("closes without saving when escape is pressed", async () => {
+    const { app, done } = await open([profile()]);
+
+    app.input.write("\r");
+    await tick(25);
+    expect(app.lastFrame()).toContain("Subagent · cody-git");
+
+    await leave(app, done);
+    // Back to the list, not the transcript.
+    expect(app.screen()).toContain("Subagents");
+  });
+
+  it("draws inside the terminal on a short screen", async () => {
+    const { app, done } = await open([profile()]);
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    for (const line of app.lastFrame().split(/\r?\n/)) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+    await leave(app, done);
   });
 });
 

@@ -2,7 +2,8 @@
 
 **Current Version:** 0.2.0  
 **Build Status:** Stable, All 1314 Tests Passing (56 test suites)  
-**Subagent delegation:** built (ADR-053) — one `delegate` tool, read-only children (`read`, `glob`, `grep`, `recall`), a live dock above the prompt plus `/agents` for the roster; one `delegation.model` pin, empty by default so a fresh install spends no second model's money. Verified end to end against the mock provider (`MOCK_TOOL=delegate`, `MOCK_LOG=1`). Known gap: a child's tokens are not charged to the parent's ledger, so `/usage` under-reports a delegated session  
+**Subagent delegation:** built (ADR-053) — one `delegate` tool, read-only children (`read`, `glob`, `grep`, `recall`), a live dock above the prompt plus `/agents running` for the roster; one `delegation.model` pin, empty by default so a fresh install spends no second model's money. Verified end to end against the mock provider (`MOCK_TOOL=delegate`, `MOCK_LOG=1`). Known gap: a child's tokens are not charged to the parent's ledger, so `/usage` under-reports a delegated session  
+**Named subagents:** built (ADR-054) — `/agents` lists them and opens a form to add one, edit one, or change what it may do; `delegate({ agent })` names one and the names sit in the tool description so the model can choose by name. Profiles live in `~/.kicode/agents.json` and `<cwd>/.kicode/agents.json`, the project's overriding by name. Read-only by default, edit opt-in per agent, and **`bash` is never grantable** — a child has no approval channel  
 **Release readiness:** see [`LAUNCH.md`](LAUNCH.md) — artifacts and paths verified end to end; publishing runs from CI with provenance, so the owner must first rotate the leaked keys, scrub history and make the repository public  
 **TypeScript Check:** Clean (`tsc --noEmit` exits with 0)  
 **Binary Distribution:** Built (`dist/cli.js`, ~300 KB **minified**, ADR-037) via `npm run build`  

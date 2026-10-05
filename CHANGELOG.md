@@ -8,6 +8,19 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Named subagents.** `/agents` lists them and opens a form to add one: a name,
+  a line describing it, the specialisation put in front of its prompt, its own
+  model if you want one, and whether it may edit files. `delegate` gains an
+  `agent` field, and the names go into the tool description so the model picks
+  one by name when a task fits. Defined in `~/.kicode/agents.json` for every
+  project or `<cwd>/.kicode/agents.json` for this one, the project's overriding
+  by name. `/agents running` is still the live roster.
+- **`bash` is not grantable**, at any permission level. Read and edit are the
+  file-shaped ones; a shell is arbitrary code and a child has no approval
+  channel to ask about it. Edit is per-agent, opt-in, and off by default.
+
+### Changed
+
 - **Subagent delegation.** A `delegate` tool hands a task — or a batch of
   independent tasks, run in parallel — to a child agent: a fresh context, a
   read-only toolset (`read`, `glob`, `grep`, `recall`), and its own model. Only

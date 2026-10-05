@@ -310,7 +310,8 @@ Command | Does
 `/settings` | The settings panel: a search field, grouped rows, `‹` `›` to change a value. `/settings thinking hide` sets one outright
 `/connect` | Add an endpoint KiCode can reach from a list of known services, and move the session onto it
 `/status` `/stats` `/debug` `/mcps` | What is in play, and what it has cost
-`/agents` | The child agents this session spawned: goal, model, elapsed, and each report in full
+`/agents` | Named subagents: add one, edit one, or change what it may do
+`/agents running` | The child agents this session spawned: goal, model, elapsed, and each report in full
 `/reload` | Re-read `kicode.json` without restarting
 
 ### Themes
@@ -873,6 +874,57 @@ what to do and cheap models doing it. `KICODE_DELEGATION=off`, or
 `"enabled": false`, removes the tool entirely rather than registering something
 the model can see and cannot use.
 
+### Named subagents
+
+Every child getting the same instructions is the right default and the wrong
+ceiling. **A subagent is a child with a name and a job.** `/agents` lists what
+you have defined and opens a form to add one:
+
+```
+  New subagent                                                    [×]
+
+    Name                          cody-git
+        What the model types to pick it, e.g. cody-git
+    For                           GitHub and git work
+    How it works                  Review branches, commits and PRs.
+    Model                         (empty)
+    May edit files                no / [yes]
+        It can write and edit. There is no undo for a confused child.
+    Where                         [all projects] / this project
+    ✔ Save
+
+  enter edit · ‹/› change · ↑↓ move · [×] cancel
+```
+
+`↑↓` moves, `enter` edits a text field or flips a toggle, `‹›` flips too, `esc`
+steps out of a field and then closes. Every row is clickable, and a click takes
+the same road as the key — so the mouse and the keyboard cannot disagree.
+
+Four things worth knowing:
+
+- **The name and the one-line description are what the model reads.** They go
+  into the `delegate` tool's own description, so a subagent you define is one
+  the model can actually choose. A task can name its own agent, so one batch can
+  send one task to `cody-git` and another to `cody-frontend`.
+- **Read-only is the default; edit is a per-agent choice.** Read and edit are
+  the file-shaped permissions. **`bash` is never grantable** — a shell is
+  arbitrary code and a child has no approval channel to ask about it, so a
+  grantable `bash` would mean a model you delegated to can run anything,
+  unsupervised, four at a time. Unlike a write, there is no diff to show you
+  first.
+- **Two files, one format.** `~/.kicode/agents.json` for everywhere,
+  `<project>/.kicode/agents.json` for one project. The project's overrides by
+  name, and replaces rather than merges — so a repo can ship a `cody-frontend`
+  and can also *narrow* a global agent's permissions. Deliberately not a block
+  in `kicode.json`: that file is committed, so a form editing it would be
+  rewriting a tracked file behind your back.
+- **An agent you did not define is refused, by name**, with the real ones listed.
+  Falling back to a general-purpose child would be a substitution the model never
+  asked for and would not know about.
+
+`/agents running` is the live roster — the children working right now, with each
+report in full.
+
 While children run, a dock above the prompt says who is working on what:
 
 ```
@@ -1364,6 +1416,7 @@ src/routes/probe.ts     asking a gateway what is left (OpenRouter /key), cached
 src/routes/health.ts    what each route did last time, kept in ~/.kicode/routes.json
 src/agent/loop.ts       the loop: stream -> tools -> feed back -> repeat
 src/agent/subagent.ts   the delegate tool, the child runner, and the live roster
+src/agents.ts           named subagents: the profiles, their permissions, the files
 src/agent/tools/        tool contract, registry, the six tools, diff, walker, glob matcher
 src/agent/compaction.ts summarise older turns when the context window fills
 src/agent/environment.ts which shell `bash` gets, and the prompt that names it

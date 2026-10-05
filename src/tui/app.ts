@@ -65,7 +65,16 @@ import {
   type Styles,
   type Theme,
 } from "./theme";
-import { type MenuPanel, type MenuRow, filterMenuRows, stepMenuRow } from "./menu";
+import {
+  type FormField,
+  type FormPanel,
+  type MenuPanel,
+  type MenuRow,
+  filterMenuRows,
+  stepFormField,
+  stepFormValue,
+  stepMenuRow,
+} from "./menu";
 import {
   SETTING_SHORTCUTS,
   type SettingDef,
@@ -112,6 +121,13 @@ import {
 } from "../agent/subagent";
 import type { SubagentView, Tool } from "../agent/tools/types";
 import type { AgentProfile } from "../agents";
+import {
+  agentNameProblem,
+  agentsFile,
+  readAgentProfiles,
+  removeAgentProfile,
+  saveAgentProfile,
+} from "../agents";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
 import { renderUsage, summarizeUsage, totalsLine, turnRecord, type UsageRecord } from "../usage";
@@ -996,6 +1012,33 @@ class TuiApp {
   private cleanup: () => void = () => {};
   /** The `delegate` tool for this session, when delegation is on. */
   private delegateTool: Tool | null = null;
+  /** `/agents`: the list of defined subagents, with a New row. */
+  private agentsMenu: { selected: number } | null = null;
+  /** The subagent editor, while it is open. */
+  private agentEditor: {
+    original: AgentProfile | null;
+    name: string;
+    description: string;
+    instructions: string;
+    model: string;
+    permissions: "no" | "yes";
+    scope: "all projects" | "this project";
+    selected: number;
+    /** True while the cursor is inside a text field rather than on the list. */
+    editing: boolean;
+    error: string | null;
+  } | null = null;
+
+  /**
+   * The subagents in play, as the menu and the tool agree they are.
+   *
+   * `reloadAgentProfiles` replaces the list on disk and rebuilds the tool
+   * around it; this reads the same place, so the two cannot disagree about which
+   * agents exist.
+   */
+  private agentProfiles(): AgentProfile[] {
+    return [...(this.options.delegation?.profiles ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+  }
 
   constructor(
     options: TuiOptions,
@@ -1348,6 +1391,16 @@ class TuiApp {
         continue;
       }
       if (this.askState && (await this.handleAskKey(key))) {
+        this.draw();
+        continue;
+      }
+      // The subagent editor claims the screen while it is open, except for the
+      // two keys that must always work — Ctrl+C and Ctrl+L.
+      if (this.agentEditor && (await this.handleAgentFormKey(key))) {
+        this.draw();
+        continue;
+      }
+      if (this.agentsMenu && (await this.handleAgentsMenuKey(key))) {
         this.draw();
         continue;
       }
@@ -1961,6 +2014,154 @@ class TuiApp {
   private askOptions(question: AskQuestion | undefined): AskOption[] {
     if (!question) return [];
     return [...question.options, { label: FREE_TEXT, description: "Write your own answer instead of choosing." }];
+  }
+
+  /**
+   * The `/agents` list: a menu of what is defined, plus a New row.
+   *
+   * Its own handler rather than the settings one because it holds no search
+   * field and no `‹/›` — every row here opens something, so the only question a
+   * key can answer is "which one".
+   */
+  private async handleAgentsMenuKey(key: Key): Promise<boolean> {
+    const menu = this.agentsMenu;
+    if (!menu) return false;
+    const rows = this.agentRows();
+    switch (key.type) {
+      case "up":
+      case "down": {
+        const last = Math.max(rows.length - 1, 0);
+        menu.selected = key.type === "up" ? (menu.selected <= 0 ? last : menu.selected - 1) : menu.selected >= last ? 0 : menu.selected + 1;
+        return true;
+      }
+      case "escape":
+        this.agentsMenu = null;
+        this.editor.clear();
+        return true;
+      case "enter":
+      case "text": {
+        // A digit jumps straight to a row, as it does in every other list here.
+        const digit = /^([1-9])$/.exec(key.type === "text" ? key.text.trim() : "");
+        const index = digit ? Number(digit[1]) - 1 : menu.selected;
+        const row = rows[index];
+        if (!row) return true;
+        this.openAgentEditor(row.value === "new" ? undefined : row.value);
+        return true;
+      }
+      default:
+        // Ctrl+C and Ctrl+L still work; nothing else is meaningful here.
+        return false;
+    }
+  }
+
+  /** The rows `/agents` shows, in one place so the keys and the panel agree. */
+  private agentRows(): { value: string; label: string; trailing: string; group: string }[] {
+    const agents = this.agentProfiles();
+    return [
+      ...agents.map((agent) => ({
+        value: agent.name,
+        label: agent.name,
+        trailing: `${agent.permissions === "write" ? "can edit" : "read only"} · ${agent.model || this.model}`,
+        group: agent.scope === "project" ? "This project" : "All projects",
+      })),
+      { value: "new", label: "＋ New agent", trailing: "→", group: "" },
+    ];
+  }
+
+  /**
+   * The subagent editor's keys.
+   *
+   * Two modes, and which one is running decides what every key means. Inside a
+   * text field the editor has the keyboard, because that is what the user is
+   * using it for; outside one, the keys act on the field the cursor is on.
+   *
+   * Escape never discards silently: inside a field it leaves the field, and from
+   * the list it closes the form — which is a cancellation, and the form is a
+   * scratch pad until Save, so there is nothing to lose.
+   */
+  private async handleAgentFormKey(key: Key): Promise<boolean> {
+    const form = this.agentEditor;
+    if (!form) return false;
+    const panel = this.agentForm();
+    const fields = panel?.fields ?? [];
+    const current = fields[Math.min(form.selected, Math.max(fields.length - 1, 0))];
+
+    if (form.editing) {
+      // Typing is ordinary typing; escape is the way out, and the editor takes
+      // every other key.
+      if (key.type === "escape") {
+        this.commitAgentField();
+        form.editing = false;
+        this.editor.clear();
+        return true;
+      }
+      return false;
+    }
+
+    switch (key.type) {
+      case "up":
+      case "down":
+        form.selected = stepFormField(fields, form.selected, key.type === "up" ? -1 : 1);
+        return true;
+      case "left":
+      case "right": {
+        const delta = key.type === "left" ? -1 : 1;
+        if (current?.kind === "toggle" || current?.kind === "choice") {
+          const next = stepFormValue(current, delta);
+          if (current.key === "permissions") form.permissions = next as "no" | "yes";
+          if (current.key === "scope") form.scope = next as "all projects" | "this project";
+          form.error = null;
+          return true;
+        }
+        return false;
+      }
+      case "escape":
+        this.agentEditor = null;
+        this.editor.clear();
+        return true;
+      case "enter":
+        switch (current?.kind) {
+          case "text":
+            // Enter opens the field rather than saving, so a value typed by
+            // mistake in the name field cannot be committed by one keypress.
+            this.editor.clear();
+            this.editor.insert(current.value ?? "");
+            form.editing = true;
+            return true;
+          case "toggle":
+          case "choice": {
+            const next = stepFormValue(current, 1);
+            if (current.key === "permissions") form.permissions = next as "no" | "yes";
+            if (current.key === "scope") form.scope = next as "all projects" | "this project";
+            form.error = null;
+            return true;
+          }
+          case "action":
+            if (current.key === "delete") await this.deleteAgentEditor();
+            else await this.saveAgentEditor();
+            return true;
+          default:
+            return true;
+        }
+      case "text": {
+        // Typing on the list jumps to the first field and starts editing it:
+        // the common case is "open the form and name the thing", and making
+        // that three keystrokes would be a tax on every new agent.
+        if (current?.kind === "text") {
+          this.editor.clear();
+          form.editing = true;
+          return false;
+        }
+        const digit = /^([1-9])$/.exec(key.text.trim());
+        if (digit) {
+          form.selected = Number(digit[1]) - 1;
+          return true;
+        }
+        return true;
+      }
+      default:
+        return false;
+    }
   }
 
   private async handleAskKey(key: Key): Promise<boolean> {
@@ -2588,7 +2789,12 @@ class TuiApp {
    */
   private coveredBy(): boolean {
     return (
-      this.picker !== null || this.settingsMenu !== null || this.connectMenu !== null || this.askState !== null
+      this.picker !== null ||
+      this.settingsMenu !== null ||
+      this.connectMenu !== null ||
+      this.askState !== null ||
+      this.agentsMenu !== null ||
+      this.agentEditor !== null
     );
   }
 
@@ -3107,13 +3313,20 @@ class TuiApp {
         this.notes(this.debugLines());
         break;
       case "agents":
-        // The roster, from the same state the dock is drawn from — so a number
-        // in the panel and a row in the list can never disagree.
-        if (this.subagents.snapshot().length === 0) {
-          this.note("no subagents yet — the delegate tool spawns them when a task is broad enough to hand off");
+        // `/agents` manages the definitions; `/agents running` watches the
+        // children. Two things, one command, and the argument says which —
+        // because the roster is worth watching and the editor is worth having,
+        // and neither is more important than the other.
+        if (argument.trim().toLowerCase() === "running") {
+          if (this.subagents.snapshot().length === 0) {
+            this.note("no subagents yet — the delegate tool spawns them when a task is broad enough to hand off");
+            break;
+          }
+          this.openSubagentRoster();
           break;
         }
-        this.openSubagentRoster();
+        this.agentsMenu = { selected: 0 };
+        this.editor.clear();
         break;
       case "settings":
         await this.showSettings(argument);
@@ -6587,7 +6800,12 @@ class TuiApp {
       // Only one of the two can be up, and both keep their cursor in `selected`.
       if (this.settingsMenu) this.settingsMenu.selected = hit.index;
       if (this.connectMenu) this.connectMenu.selected = hit.index;
+      if (this.agentsMenu) this.agentsMenu.selected = hit.index;
     }
+    // A click on a form field is a click on a field, and Enter is what a key would
+    // do next — so the mouse takes the same road as the cursor. A click on a text
+    // field opens it for typing; on a toggle, flips it; on Save, saves.
+    if (hit.kind === "form" && this.agentEditor) this.agentEditor.selected = hit.index;
     if (hit.kind === "ask" && this.askState) this.askState.selected = hit.index;
     if (hit.kind === "palette") this.paletteSelected = hit.index;
 
@@ -6953,7 +7171,103 @@ class TuiApp {
       };
     }
 
+    if (this.agentsMenu) {
+      const agents = this.agentProfiles();
+      // The rows come from the same place the keys read, so a row the cursor can
+      // land on and a row that is drawn cannot drift apart.
+      const rows: MenuRow[] = this.agentRows().map((row, index) => ({
+        label: row.label,
+        value: row.value,
+        trailing: row.trailing,
+        ...(row.group && row.group !== this.agentRows()[index - 1]?.group ? { group: row.group } : {}),
+      }));
+      return {
+        title: "Subagents",
+        rows,
+        selected: Math.min(Math.max(this.agentsMenu.selected, 0), Math.max(rows.length - 1, 0)),
+        query: "",
+        footer: "enter open · ↑↓ move · esc close",
+        description: agents.length
+          ? "A subagent is a child agent with a name, a job and its own permissions. The model picks one by name when a task fits."
+          : "No subagents yet. One is a child agent with a name and a job — the model picks it by name when a task fits.",
+      };
+    }
+
     return null;
+  }
+
+  /**
+   * The subagent editor, as the renderer draws it.
+   *
+   * The values live on the app rather than in the panel because they are being
+   * edited: the panel is what is drawn from them, never where they are kept.
+   */
+  private agentForm(): FormPanel | null {
+    const form = this.agentEditor;
+    if (!form) return null;
+    const fields: FormField[] = [
+      { key: "name", label: "Name", kind: "text", value: form.name, hint: "What the model types to pick it, e.g. cody-git" },
+      {
+        key: "description",
+        label: "For",
+        kind: "text",
+        value: form.description,
+        hint: "One line. This is what the model reads to decide whether it fits.",
+      },
+      {
+        key: "instructions",
+        label: "How it works",
+        kind: "text",
+        value: form.instructions,
+        hint: "Put in front of its prompt. Shift+Enter for a new line.",
+      },
+      {
+        key: "model",
+        label: "Model",
+        kind: "text",
+        value: form.model,
+        hint: `Empty uses this session's model (${this.model}).`,
+      },
+      {
+        key: "permissions",
+        label: "May edit files",
+        kind: "toggle",
+        value: form.permissions,
+        options: ["no", "yes"],
+        hint:
+          form.permissions === "yes"
+            ? "It can write and edit. There is no undo for a confused child."
+            : "Read-only: it inspects and reports, and never changes anything.",
+      },
+      {
+        key: "scope",
+        label: "Where",
+        kind: "toggle",
+        value: form.scope,
+        options: ["all projects", "this project"],
+        hint:
+          form.scope === "this project"
+            ? `Saved to ${agentsFile("project", this.cwd).replace(this.cwd, ".")} — offered only here.`
+            : "Saved to your user directory — offered everywhere.",
+      },
+      { key: "save", label: "✔ Save", kind: "action", value: "" },
+      ...(form.original
+        ? [{ key: "delete", label: "✕ Delete", kind: "action" as const, value: "", danger: true }]
+        : []),
+    ];
+    const nameProblem = agentNameProblem(form.name);
+    if (form.name && nameProblem) fields[0]!.problem = nameProblem;
+    return {
+      title: form.original ? `Subagent · ${form.original.name}` : "New subagent",
+      subtitle: form.original ? `Created in ${form.original.scope === "project" ? "this project" : "your user directory"}` : undefined,
+      fields,
+      selected: Math.min(Math.max(form.selected, 0), Math.max(fields.length - 1, 0)),
+      editing: form.editing,
+      error: form.error,
+      footer: form.editing
+        ? "enter next line · shift+enter line break · esc done"
+        : "enter edit · ‹/› change · ↑↓ move · esc cancel",
+    };
   }
 
   private state(): TuiState {
@@ -6982,6 +7296,7 @@ class TuiApp {
       notice: this.notice,
       modal: this.modal,
       menu: this.menuPanel(),
+      form: this.agentForm(),
       clipboardMenu: this.clipboardMenu,
       isPaused: this.isPaused,
       queuedCount: this.queuedPrompts.length,
@@ -7061,6 +7376,145 @@ class TuiApp {
    * Read straight off the registry — the same rows the dock draws — so a count
    * here and a row there cannot disagree.
    */
+  /**
+   * Opens the editor for a new subagent, or for one that already exists.
+   *
+   * Editing starts from what is stored rather than from what is on screen, so a
+   * half-finished edit escaped away leaves nothing behind and a second visit
+   * starts clean.
+   */
+  private openAgentEditor(name?: string): void {
+    const existing = name ? this.agentProfiles().find((agent) => agent.name === name) : undefined;
+    this.agentsMenu = null;
+    this.editor.clear();
+    this.agentEditor = {
+      original: existing ?? null,
+      name: existing?.name ?? "",
+      description: existing?.description ?? "",
+      instructions: existing?.instructions ?? "",
+      model: existing?.model ?? "",
+      // Read-only unless the stored agent says otherwise: the grant is opt-in,
+      // and an editor that opened on "yes" would quietly make it the default.
+      permissions: existing?.permissions === "write" ? "yes" : "no",
+      scope: existing?.scope === "project" ? "this project" : "all projects",
+      selected: 0,
+      editing: false,
+      error: null,
+    };
+  }
+
+  /** The field the cursor is on, by its key rather than by its position. */
+  private agentFieldKey(): string {
+    const form = this.agentEditor;
+    if (!form) return "";
+    return this.agentForm()?.fields[form.selected]?.key ?? "";
+  }
+
+  /** Writes the editor's shared buffer into the field it is on. */
+  private commitAgentField(): void {
+    const form = this.agentEditor;
+    if (!form) return;
+    const value = this.editor.value;
+    // Enter is a newline in this editor, because it is the prompt's editor — but
+    // a name, a description and a model id are one line each by definition. Left
+    // multi-line they would fail the name check with a message about characters,
+    // when the actual mistake was pressing Enter.
+    const oneLine = (text: string): string => text.split("\n")[0]?.trim() ?? "";
+    switch (this.agentFieldKey()) {
+      case "name":
+        form.name = oneLine(value);
+        break;
+      case "description":
+        form.description = oneLine(value);
+        break;
+      case "instructions":
+        // The one field that wants paragraphs, and the reason there is a form
+        // rather than a prompt line.
+        form.instructions = value.trim();
+        break;
+      case "model":
+        form.model = oneLine(value);
+        break;
+    }
+    form.error = null;
+  }
+
+  /**
+   * Saves the subagent, or explains why it cannot be saved yet.
+   *
+   * A refused save keeps the form open with its values, because closing it after
+   * saying the name is taken would throw away the name just typed along with
+   * everything else.
+   */
+  private async saveAgentEditor(): Promise<void> {
+    const form = this.agentEditor;
+    if (!form) return;
+    this.commitAgentField();
+    const name = form.name.trim();
+    const problem = agentNameProblem(name);
+    if (problem) {
+      form.error = `Cannot save: ${problem}.`;
+      return;
+    }
+    const scope = form.scope === "this project" ? "project" : "global";
+    const clash = this.agentProfiles().find((agent) => agent.name === name && agent.scope === scope);
+    if (clash) {
+      form.error = `"${name}" already exists in that scope. Pick another name.`;
+      return;
+    }
+    try {
+      await saveAgentProfile(
+        {
+          name,
+          description: form.description.trim(),
+          instructions: form.instructions.trim(),
+          model: form.model.trim(),
+          permissions: form.permissions === "yes" ? "write" : "read",
+        },
+        scope,
+        this.cwd,
+      );
+    } catch (error) {
+      // A failed write must not read as a saved agent: the form stays open with
+      // its values and says what went wrong.
+      form.error = `Could not save: ${(error as Error).message}`;
+      return;
+    }
+    await this.reloadAgentProfiles();
+    this.agentEditor = null;
+    this.editor.clear();
+    this.agentsMenu = { selected: 0 };
+    const saved = this.agentProfiles().find((agent) => agent.name === name);
+    this.note(
+      `Subagent ${name} · ${saved?.permissions === "write" ? "can edit files" : "read only"} — the model picks it by name.`,
+    );
+  }
+
+  private async deleteAgentEditor(): Promise<void> {
+    const original = this.agentEditor?.original;
+    if (!original) return;
+    await removeAgentProfile(original.name, original.scope, this.cwd).catch(() => false);
+    await this.reloadAgentProfiles();
+    this.agentEditor = null;
+    this.editor.clear();
+    this.agentsMenu = { selected: 0 };
+    this.note(`Subagent ${original.name} removed.`);
+  }
+
+  /**
+   * Re-reads the subagents and rebuilds the delegate tool around them.
+   *
+   * The tool's description names them, so a saved agent the tool did not know
+   * about would be one the model cannot choose — the definition would exist and
+   * be unreachable.
+   */
+  private async reloadAgentProfiles(): Promise<void> {
+    const { agents } = await readAgentProfiles(this.cwd);
+    const delegation = this.options.delegation;
+    if (delegation) this.options.delegation = { ...delegation, profiles: agents };
+    this.delegateTool = this.buildDelegateTool();
+  }
+
   private openSubagentRoster(): void {
     const children = this.subagents.snapshot();
     if (children.length === 0) {

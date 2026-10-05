@@ -19,7 +19,7 @@ import { COMMAND_WIDTH, isAvailable, type Command } from "./commands";
 import { type LineEditor, editorRows } from "./editor";
 import { LOGO_TEXT, logoRows } from "./logo";
 import type { PlanSnapshot, SubagentView } from "../agent/tools/types";
-import type { MenuPanel, MenuRow } from "./menu";
+import type { FormPanel, MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
 import { blend, type Styles, type Theme } from "./theme";
 import { type Entry, entrySpans, isResultClipped } from "./transcript";
@@ -252,6 +252,14 @@ export type TuiState = {
    * them are drawn as one filled surface rather than as a bordered list.
    */
   menu?: MenuPanel | null;
+  /**
+   * An editable form, as a card over the transcript.
+   *
+   * Separate from `menu` because it *edits* rather than chooses, and separate
+   * from `ask` because that one is the model's to raise and always offers a
+   * list. This one is the user's, and holds values.
+   */
+  form?: FormPanel | null;
   /** Set while the clipboard & attachment options menu is open in the chat input area. */
   clipboardMenu?: ClipboardMenuState | null;
   /** Whether execution is currently paused. */
@@ -402,6 +410,8 @@ export type Selection = { from: Cell; to: Cell };
 export type PanelKind =
   | "picker"
   | "menu"
+  /** One field of an editable form, by its place in `FormPanel.fields`. */
+  | "form"
   | "palette"
   | "ask"
   | "picker_tab"
@@ -525,7 +535,7 @@ export function renderFrame(state: TuiState, size: Size, styles: Styles, theme: 
   // not wipe the screen the user was reading. The page behind is drawn from the
   // same state with the panel taken out, and every row the card does not cover
   // is faded — the card is the only thing at full strength.
-  const overlay = Boolean(state.picker || state.menu);
+  const overlay = Boolean(state.picker || state.menu || state.form);
   const page = overlay ? renderBody({ ...state, picker: null, menu: null }, styles, theme, usable - margin, bodyRows, usable, margin) : null;
   const body = page ?? renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin);
   const card = overlay ? renderBody(state, styles, theme, usable - margin, bodyRows, usable, margin) : null;
@@ -884,6 +894,7 @@ function renderBody(
   }
   if (state.picker) return renderPicker(state.picker, styles, theme, height, margin, usable);
   if (state.menu) return renderMenu(state.menu, styles, theme, height, usable, margin);
+  if (state.form) return renderFormPanel(state.form, usable, height, margin, styles, theme);
   if (state.entries.length === 0) return { lines: plain(renderHome(state, styles, theme, height, usable, margin), theme.bg), hits: [] };
 
   const view = state.settings ?? defaultViewSettings();
@@ -1540,6 +1551,140 @@ function menuRow(row: MenuRow, isSelected: boolean, inner: number, styles: Style
 
   const gap = Math.max(inner - spansWidth(label) - textWidth(row.trailing) - 1, 1);
   return padSpans([...label, span(" ".repeat(gap), fill), span(row.trailing, isSelected ? styles.paletteSelected : styles.faint)], inner);
+}
+
+/**
+ * An editable form, as a card over the transcript.
+ *
+ * Built on the menu's geometry — same indent, same text column, same close chip
+ * and the same centring — so the editor does not arrive as a second visual
+ * language. It differs in what a row means: each field shows its label on the
+ * left and its value on the right, and the one the keys act on is filled.
+ *
+ * Returns the row each field landed on, so a click lands on the field the user
+ * aimed at rather than on whatever happens to be nearest.
+ */
+function renderFormPanel(
+  form: FormPanel,
+  usable: number,
+  height: number,
+  margin: number,
+  styles: Styles,
+  theme: Theme,
+): { lines: BodyLine[]; hits: Hit[] } {
+  const avail = Math.max(usable - 2 * margin - 2, 20);
+  // The widest thing the form can show decides the card, so it does not resize
+  // as the cursor moves between a short value and a long one.
+  const need =
+    Math.max(
+      textWidth(form.title) + 1 + textWidth(CLOSE_CHIP),
+      form.subtitle ? textWidth(form.subtitle) : 0,
+      ...form.fields.map((field) => 2 + textWidth(field.label) + 2 + textWidth(field.value || "—") + 2),
+      textWidth(form.footer),
+      textWidth(form.error ?? ""),
+      PANEL_MIN,
+    ) + 4;
+  const inner = Math.min(Math.max(need, PANEL_MIN), avail, MENU_CARD_MAX);
+  const indent = span(" ".repeat(margin + 2 + Math.max(Math.floor((avail - inner) / 2), 0)), bg(theme.bg));
+  const width = Math.max(inner - 4, 8);
+  const selected = clamp(form.selected, 0, Math.max(form.fields.length - 1, 0));
+  const cardRow = (spans: Span[]): Span[] => [indent, span("  "), ...padSpans(spans, width), span("  ")];
+  const blank = (): Span[] => [indent, span(" ".repeat(inner))];
+
+  // One line per field, plus a hint row for the field under the cursor. The
+  // card is allowed to scroll: a specialisation is a paragraph, and a form that
+  // cut it off would be hiding the thing the user came to write.
+  const rows: Span[][] = [];
+  const rowOfField: number[] = [];
+  let cursor = 0;
+  for (const [index, field] of form.fields.entries()) {
+    rowOfField.push(rows.length);
+    if (index === selected) cursor = rows.length;
+    const isSelected = index === selected;
+    const fill = isSelected ? styles.paletteSelected : "";
+    const labelStyle = isSelected ? styles.paletteSelected : styles.text;
+    const valueStyle = isSelected ? styles.paletteSelected : field.problem ? styles.warn : styles.accent;
+
+    if (field.kind === "action") {
+      // An action is a button, not a value: its label is what you press.
+      const label = field.danger ? styles.error : isSelected ? styles.paletteSelected : styles.dim;
+      rows.push(cardRow([span(`  ${field.label}`, label), span(" ".repeat(Math.max(width - 4 - textWidth(field.label), 1)), fill)]));
+      continue;
+    }
+
+    // A toggle shows both of its options with the live one bracketed, because the
+    // question is always "which of these two", and seeing only one of them makes
+    // the alternative a guess.
+    const shown =
+      field.kind === "toggle" && (field.options?.length ?? 0) > 0
+        ? (field.options ?? []).map((option) => (option === field.value ? `[${option}]` : option)).join(" / ")
+        : field.value === ""
+          ? field.options?.length && field.kind === "choice"
+            ? (field.options[0] ?? "")
+            : "(empty)"
+          : field.value;
+
+    const body = isSelected && form.editing && field.kind === "text" ? `${shown}▌` : shown;
+    const labelSpans: Span[] = [span("  ", fill || undefined), span(`${field.label}`, labelStyle)];
+    const gap = Math.max(width - spansWidth(labelSpans) - textWidth(body) - 2, 1);
+    rows.push(
+      cardRow([
+        ...labelSpans,
+        span(" ".repeat(gap), fill),
+        span(body, valueStyle),
+      ]),
+    );
+    const hint = isSelected ? field.problem ?? field.hint : undefined;
+    // Only the field under the cursor gets a line of its own. Every field
+    // carrying one would double the form's height, and a form that has to
+    // scroll to reach its own Save button is a worse form.
+    if (hint) rows.push(cardRow([span(`      ${hint}`, field.problem ? styles.warn : styles.faint)]));
+  }
+
+  const chrome = 5;
+  const room = Math.max(height - 2 - chrome, 1);
+  // Follow the cursor through the fields: an eight-field form does not fit a
+  // twenty-four-row terminal, and scrolling is the difference between a form you
+  // can fill in and one whose Save button is off the page.
+  const first = firstRowFor(rows.length, cursor, -1, Math.min(room, rows.length));
+  const visible = rows.slice(first, first + room);
+
+  const band: Span[][] = [];
+  band.push(blank());
+  band.push(cardRow(menuTitleRow(form.title, width, styles)));
+  if (form.subtitle) band.push(cardRow(truncateSpans([span(form.subtitle, styles.faint)], width)));
+  band.push(blank());
+  const bandTop = band.length;
+  const hits: Hit[] = [];
+  for (const [offset, row] of visible.entries()) {
+    band.push(row.length === 0 ? blank() : row);
+    const index = rowOfField[first + offset];
+    if (index !== undefined) {
+      const field = form.fields[index];
+      // A hint row is not its own target: the field above it already answers to
+      // the click, and a hit on the hint would select a row the user only read.
+      const hintRow = field?.hint || field?.problem;
+      if (!hintRow || rows[first + offset] !== rows[(first + offset) - 1]) {
+        hits.push({ kind: "form", row: bandTop + offset + 1, index });
+      }
+    }
+  }
+  band.push(blank());
+  if (form.error) band.push(cardRow(truncateSpans([span(form.error, styles.warn)], width)));
+  band.push(cardRow(hintLine(form.footer, styles)));
+  band.push(blank());
+
+  const padTop = Math.max(Math.floor((height - (band.length + 2)) / 2), 0);
+  for (const hit of hits) hit.row += padTop;
+  hits.push(...closeChipHits(padTop + 2, band[1] ?? [], 0));
+  hits.push(...closeChipHits(padTop + band.length - 1, band.at(-2) ?? [], 0));
+  const out: BodyLine[] = [];
+  for (let i = 0; i < padTop; i++) out.push({ spans: [], background: theme.bg });
+  out.push({ spans: [], background: theme.bg });
+  for (const spans of band) out.push({ spans, background: theme.panel });
+  out.push({ spans: [], background: theme.bg });
+  while (out.length < height) out.push({ spans: [], background: theme.bg });
+  return { lines: out.slice(0, height), hits };
 }
 
 /** How wide a card may get, and how narrow it may be before a flat list wins. */
@@ -2410,7 +2555,7 @@ function renderBottom(
   const isErrorModal = state.modal && (state.modal.tone === "error" || /failed|rate.?limit|error|denied|refused/i.test(state.modal.title));
   const stateRowBg = state.modal
     ? (isErrorModal ? blend(theme.panel, theme.error, 0.35) : theme.panel)
-    : !state.picker && !state.ask && !state.menu
+    : !state.picker && !state.ask && !state.menu && !state.form
       ? boxBg
       : theme.bg;
   // The tracked-work chip rides the state row's right end: it says how much of
@@ -2781,6 +2926,8 @@ function footerHints(styles: Styles, state: TuiState): Span[] {
   // A menu names its own keys on its own last row, where they are true — the
   // session's footer is a row about the session, and the panel's keys are not.
   if (state.menu) return [];
+  // Same for a form, which is a menu that also edits.
+  if (state.form) return [];
   return [];
 }
 

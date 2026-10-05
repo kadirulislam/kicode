@@ -25,7 +25,7 @@ export type Command = {
 };
 
 export const COMMANDS: readonly Command[] = [
-  { name: "agents", description: "Watch the child agents working" },
+  { name: "agents", description: "Define subagents, or watch the running ones", usage: "[running]" },
   { name: "btw", description: "One-shot answer from the session's context, not added to it", usage: "<question>" },
   { name: "budget", description: "Show or set the session token budget", usage: "[tokens]" },
   { name: "cd", description: "Change working directory", usage: "<directory>" },
