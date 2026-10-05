@@ -307,7 +307,7 @@ Command | Does
 `/review [ref]` | Send `git diff` to the model and ask for a review
 `/editor` | Hand the prompt to `$EDITOR` (leaves the alternate screen first)
 `/init` | Write `./kicode.json` and a starter `AGENTS.md`
-`/settings` | The settings panel: a search field, grouped rows, `‹` `›` to change a value. `/settings thinking hide` sets one outright
+`/settings` | The settings panel: a search field, grouped rows, `‹` `›` to change a value. `/settings thinking hide` sets one outright. Its `Shortcuts` group opens the screens a session actually reaches for — Connect/Provider, Models, Sessions, Compact, Skills, Tools, MCP, Subagents
 `/connect` | Add an endpoint KiCode can reach from a list of known services, and move the session onto it
 `/status` `/stats` `/debug` `/mcps` | What is in play, and what it has cost
 `/agents` | Named subagents: add one, edit one, or change what it may do
@@ -883,22 +883,24 @@ you have defined and opens a form to add one:
 ```
   New subagent                                                    [×]
 
-    Name                          cody-git
-        What the model types to pick it, e.g. cody-git
+    Name                          cody-git▌
     For                           GitHub and git work
     How it works                  Review branches, commits and PRs.
     Model                         (empty)
-    May edit files                no / [yes]
+    May edit files                [no] / yes
         It can write and edit. There is no undo for a confused child.
     Where                         [all projects] / this project
     ✔ Save
 
-  enter edit · ‹/› change · ↑↓ move · [×] cancel
+  enter next · [×] done
 ```
 
-`↑↓` moves, `enter` edits a text field or flips a toggle, `‹›` flips too, `esc`
-steps out of a field and then closes. Every row is clickable, and a click takes
-the same road as the key — so the mouse and the keyboard cannot disagree.
+**`enter` is the key.** It ends the field, keeps what you typed, and steps to the
+next one already open for typing — so filling the form is *type, enter, type*.
+`↑↓` move between fields when you are outside one, `‹›` or space change a
+toggle, and `esc` steps out of a field and then closes. Inside `How it works`,
+**shift+enter** is a line break; every other field is one line. Every row is
+clickable, and a click takes the same road as the key.
 
 You can also just start typing: the field under the cursor takes what you write
 and the row shows it as you go, caret and all.

@@ -163,7 +163,7 @@ describe("settings from a config file", () => {
 });
 
 describe("the settings shortcuts", () => {
-  it("lists the seven doors in panel order, each explained", () => {
+  it("lists the eight doors in panel order, each explained", () => {
     expect(SETTING_SHORTCUTS.map((shortcut) => shortcut.id)).toEqual([
       "shortcut:connect",
       "shortcut:models",
@@ -172,6 +172,7 @@ describe("the settings shortcuts", () => {
       "shortcut:skills",
       "shortcut:tools",
       "shortcut:mcp",
+      "shortcut:agents",
     ]);
     for (const shortcut of SETTING_SHORTCUTS) {
       expect(shortcut.label.length).toBeGreaterThan(0);

@@ -19,7 +19,7 @@ import { COMMAND_WIDTH, isAvailable, type Command } from "./commands";
 import { type LineEditor, editorRows } from "./editor";
 import { LOGO_TEXT, logoRows } from "./logo";
 import type { PlanSnapshot, SubagentView } from "../agent/tools/types";
-import type { FormPanel, MenuPanel, MenuRow } from "./menu";
+import type { FormField, FormPanel, MenuPanel, MenuRow } from "./menu";
 import { type ViewSettings, defaultViewSettings } from "./settings";
 import { blend, type Styles, type Theme } from "./theme";
 import { type Entry, entrySpans, isResultClipped } from "./transcript";
@@ -1564,6 +1564,32 @@ function menuRow(row: MenuRow, isSelected: boolean, inner: number, styles: Style
  * Returns the row each field landed on, so a click lands on the field the user
  * aimed at rather than on whatever happens to be nearest.
  */
+/**
+ * What a form row shows in its value column.
+ *
+ * One function for both the card's width and the row itself, because they must
+ * not disagree: a toggle renders both of its options, so sizing the card from
+ * `field.value` alone gives it room for "all projects" and not for
+ * "[all projects] / this project", and the row spills past the card's edge.
+ *
+ * The caret is counted as one cell, so a value being typed into still sizes the
+ * card for itself.
+ */
+function formValueText(field: FormField): string {
+  if (field.kind === "toggle" && (field.options?.length ?? 0) > 0) {
+    return (field.options ?? []).map((option) => (option === field.value ? `[${option}]` : option)).join(" / ");
+  }
+  if (field.value === "") {
+    // An empty row being typed into shows the caret alone; `(empty)` beside it
+    // would read as a value rather than as a hint.
+    if (field.caret !== undefined) return "";
+    return field.options?.length && field.kind === "choice" ? (field.options[0] ?? "") : "(empty)";
+  }
+  // No caret here: the row places it, and a value that already carried one would
+  // be drawn with two. The card's slack covers the cell it takes.
+  return field.value;
+}
+
 function renderFormPanel(
   form: FormPanel,
   usable: number,
@@ -1575,11 +1601,16 @@ function renderFormPanel(
   const avail = Math.max(usable - 2 * margin - 2, 20);
   // The widest thing the form can show decides the card, so it does not resize
   // as the cursor moves between a short value and a long one.
+  //
+  // Measured from what a row *renders*, not from `field.value`: a toggle draws
+  // both of its options, so `Where` needs room for "[all projects] / this
+  // project" while its value is only "all projects". Sizing from the value gave
+  // a card too narrow for its own row, and the row spilled past the card's edge.
   const need =
     Math.max(
       textWidth(form.title) + 1 + textWidth(CLOSE_CHIP),
       form.subtitle ? textWidth(form.subtitle) : 0,
-      ...form.fields.map((field) => 2 + textWidth(field.label) + 2 + textWidth(field.value || "—") + 2),
+      ...form.fields.map((field) => 2 + textWidth(field.label) + 2 + textWidth(formValueText(field)) + 2),
       textWidth(form.footer),
       textWidth(form.error ?? ""),
       PANEL_MIN,
@@ -1615,25 +1646,18 @@ function renderFormPanel(
     // A toggle shows both of its options with the live one bracketed, because the
     // question is always "which of these two", and seeing only one of them makes
     // the alternative a guess.
-    const shown =
-      field.kind === "toggle" && (field.options?.length ?? 0) > 0
-        ? (field.options ?? []).map((option) => (option === field.value ? `[${option}]` : option)).join(" / ")
-        : field.value === ""
-          ? field.caret !== undefined
-            ? ""
-            : field.options?.length && field.kind === "choice"
-              ? (field.options[0] ?? "")
-              : "(empty)"
-          : field.value;
+    const shown = formValueText(field);
 
     // The caret sits where the cursor is, not at the end of the row: a caret
     // pinned to the end of a value being edited in the middle would put it in the
     // wrong place for every character after the edit point.
     const body =
-      field.caret === undefined
+      field.caret === undefined || field.kind === "toggle"
         ? shown
         : `${shown.slice(0, field.caret)}▌${shown.slice(field.caret)}`;
     const labelSpans: Span[] = [span("  ", fill || undefined), span(`${field.label}`, labelStyle)];
+    // One cell of slack, so a value that exactly fills the measured width cannot
+    // push the row one cell past the card's inner edge.
     const gap = Math.max(width - spansWidth(labelSpans) - textWidth(body) - 2, 1);
     rows.push(
       cardRow([

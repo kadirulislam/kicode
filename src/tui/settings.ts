@@ -181,6 +181,11 @@ export const SETTING_SHORTCUTS: readonly SettingShortcut[] = [
     label: "MCP",
     description: "Which MCP servers are connected for this project.",
   },
+  {
+    id: "shortcut:agents",
+    label: "Subagents",
+    description: "Named child agents: add one, edit one, or change what it may do.",
+  },
 ];
 
 /** Shortcut rows matching what has been typed, in panel order. */

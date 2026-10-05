@@ -8,6 +8,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`Subagents` in the settings panel's `Shortcuts` group**, opening the same
+  screen `/agents` does.
+- `enter` now ends a field and steps to the next one, already open for typing, so
+  filling the subagent form is type, Enter, type. `‹›` or space change a toggle;
+  shift+enter is a line break inside `How it works`.
+
 - **Named subagents.** `/agents` lists them and opens a form to add one: a name,
   a line describing it, the specialisation put in front of its prompt, its own
   model if you want one, and whether it may edit files. `delegate` gains an
@@ -45,6 +51,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- The subagent form's card was sized from each field's raw value while a toggle
+  draws both of its options, so `Where` overflowed the card's right edge and the
+  highlight ran off into the page.
+- A field being typed into showed two carets — one drawn for the width
+  measurement and one by the row.
 - The subagent editor ignored typing. The row was drawn from the saved value
   while the keys went into the editor, so the text was there and the screen was
   not — which reads as a dead keyboard. It now shows what you are typing, with

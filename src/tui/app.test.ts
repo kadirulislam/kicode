@@ -2111,6 +2111,11 @@ describe("the subagent editor", () => {
   };
 
   const leave = async (app: Harness, done: Promise<number>): Promise<void> => {
+    // Two escapes: one steps out of a field being typed into, the next closes the
+    // form. Harmless when nothing is open, which is why it is unconditional
+    // rather than something each test has to remember.
+    app.input.write("\u001b");
+    await tick(90);
     app.input.write("\u001b");
     await tick(90);
     app.input.write("\u0015/exit\r");
@@ -2198,7 +2203,7 @@ describe("the subagent editor", () => {
     await leave(app, done);
   });
 
-  it("flips a permission with enter, and says what the new level means", async () => {
+  it("flips a permission with the arrows, and says what the new level means", async () => {
     const { app, done } = await open();
 
     app.input.write("\u001b[B");
@@ -2207,12 +2212,34 @@ describe("the subagent editor", () => {
     await tick(25);
     app.input.write(down(4));
     await tick(20);
-    app.input.write("\r");
+    app.input.write("\u001b[C"); // right
     await tick(25);
 
     expect(app.lastFrame()).toContain("no / [yes]");
     // The warning travels with the grant: a child that can write has no undo.
     expect(app.lastFrame()).toContain("no undo");
+    await leave(app, done);
+  });
+
+  it("steps past a toggle with enter rather than changing it", async () => {
+    // Enter means "next field" on every kind of field. If it flipped a toggle and
+    // moved on a text one, the same key would do two different things depending
+    // on where the cursor was — and `Where` would silently change scope.
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write(down(4));
+    await tick(20);
+    app.input.write("\r"); // on May edit files
+    await tick(25);
+
+    // Unchanged…
+    expect(app.lastFrame()).toContain("[no] / yes");
+    // …and now on the field after it.
+    expect(app.lastFrame()).toContain("enter next/edit");
     await leave(app, done);
   });
 
@@ -2225,7 +2252,7 @@ describe("the subagent editor", () => {
     await tick(25);
     app.input.write(down(5));
     await tick(20);
-    app.input.write("\r");
+    app.input.write("\u001b[C"); // right
     await tick(25);
 
     expect(app.lastFrame()).toContain("all projects / [this project]");
@@ -2242,14 +2269,23 @@ describe("the subagent editor", () => {
     await tick(20);
     app.input.write("\r");
     await tick(25);
-    app.input.write("cody git\r");
+    app.input.write("cody git");
     await tick(25);
-    app.input.write("\u001b"); // leave the field
-    await tick(90);
-    app.input.write(down(6));
+    // Enter ends the field and steps on, carrying the value with it. Four Enters
+    // reach a toggle, and a toggle does not open for typing — so from there the
+    // arrow keys move again.
+    app.input.write("\r");
     await tick(20);
-    app.input.write("\r"); // down to Save
-    await tick(25);
+    app.input.write("\r");
+    await tick(20);
+    app.input.write("\r");
+    await tick(20);
+    app.input.write("\r");
+    await tick(20);
+    app.input.write(down(2)); // → Save
+    await tick(20);
+    app.input.write("\r"); // press Save
+    await tick(40);
 
     // Still open, with the reason — closing here would throw away the name.
     expect(app.lastFrame()).toContain("Cannot save");
@@ -2284,7 +2320,8 @@ describe("the subagent editor", () => {
     await tick(25);
 
     // A form whose footer promises nothing is a form the user has to guess at.
-    expect(app.lastFrame()).toContain("enter edit");
+    expect(app.lastFrame()).toContain("enter next/edit");
+    expect(app.lastFrame()).toContain("‹/› change");
     expect(app.lastFrame()).toContain("cancel");
     await leave(app, done);
   });
@@ -2304,10 +2341,18 @@ describe("the subagent editor", () => {
     await tick(25);
     app.input.write("cody-git");
     await tick(20);
-    app.input.write("\u001b");
-    await tick(90);
-    // Down to Save, past For, How it works, Model, May edit, Where.
-    app.input.write(down(6));
+    // Enter ends the name and steps on to For, already open for typing.
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("\r"); // For → How it works
+    await tick(25);
+    app.input.write("\r"); // How it works → Model
+    await tick(25);
+    app.input.write("\r"); // Model → May edit files
+    await tick(25);
+    app.input.write("\r"); // → Where
+    await tick(25);
+    app.input.write("\r"); // → Save
     await tick(25);
     app.input.write("\r");
     await tick(60);
@@ -2345,6 +2390,9 @@ it("shows what you type while you are typing it", async () => {
     expect(screen).toContain("cody-git");
     // And the caret, after what has been typed rather than at the row's end.
     expect(screen).toContain("cody-git▌");
+    // One caret, not two: the width measurement must not draw the caret the row
+    // already places, or every field being typed into grows a second block.
+    expect(screen).not.toContain("▌▌");
     await leave(app, done);
   });
 
@@ -2387,14 +2435,26 @@ it("shows what you type while you are typing it", async () => {
 
     app.input.write("\u001b[B");
     await tick(20);
-    app.input.write("\r");
+    app.input.write("\r"); // open the form on Name
     await tick(25);
-    app.input.write("down\nup\u001b[B");
+    app.input.write("one"); // Name → For, open for typing
+    await tick(20);
+    app.input.write("\r");
+    await tick(20);
+    app.input.write("\r"); // For → How it works, open for typing
+    await tick(20);
+    // Shift+Enter is the line break; Enter ends the field and steps on.
+    app.input.write("AAA");
+    await tick(20);
+    app.input.write("\u001b[13;2u");
+    await tick(25);
+    app.input.write("BBB");
     await tick(30);
 
-    // Three lines typed; the row shows the one the caret is on.
-    expect(app.lastFrame()).toContain("up▌");
-    expect(app.lastFrame()).not.toContain("down");
+    // Two lines in the buffer; the row shows the one the caret is on, and the
+    // line above it is nowhere on screen.
+    expect(app.lastFrame()).toContain("BBB▌");
+    expect(app.lastFrame()).not.toContain("AAA");
     for (const line of app.lastFrame().split(/\r?\n/)) expect(line.length).toBeLessThanOrEqual(80);
     await leave(app, done);
   });
@@ -2422,6 +2482,112 @@ it("shows what you type while you are typing it", async () => {
     // Still alive, still the same form, and the name survived the round trip.
     expect(app.lastFrame()).toContain("New subagent");
     expect(app.lastFrame()).toContain("cody-git");
+    await leave(app, done);
+  });
+
+it("ends the field and steps to the next one on enter", async () => {
+    // Filling a form should be typing, Enter, typing, Enter. Making the user
+    // stop and press Escape between every field turns a five-field form into
+    // twenty keystrokes of ceremony.
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r"); // open the form on Name
+    await tick(25);
+    app.input.write("cody-git");
+    await tick(25);
+    app.input.write("\r"); // end Name
+    await tick(25);
+
+    // The value is kept and the cursor is on the next field, editing.
+    expect(app.lastFrame()).toContain("cody-git");
+    expect(app.lastFrame()).toContain("enter next");
+
+    app.input.write("GitHub work");
+    await tick(25);
+    app.input.write("\r"); // end For, on to How it works
+    await tick(25);
+    app.input.write("Branches and PRs.");
+    await tick(25);
+    app.input.write("\r");
+    await tick(25);
+
+    // Three fields filled by typing and Enter alone.
+    expect(app.lastFrame()).toContain("GitHub work");
+    expect(app.lastFrame()).toContain("Branches and PRs.");
+    await leave(app, done);
+  });
+
+  it("carries every field's value through to the save", async () => {
+    const own = await mkdtemp(path.join(tmpdir(), "kicode-agents-"));
+    const previous = process.env.KICODE_HOME;
+    process.env.KICODE_HOME = own;
+    const { app, done } = await drive([], session([], own));
+
+    app.input.write("/agents\r");
+    await tick(25);
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+    app.input.write("cody-git");
+    await tick(20);
+    app.input.write("\r"); // → For
+    await tick(20);
+    app.input.write("GitHub and git work");
+    await tick(20);
+    app.input.write("\r"); // → How it works
+    await tick(20);
+    app.input.write("Review branches and PRs.");
+    await tick(20);
+    app.input.write("\r"); // → Model
+    await tick(20);
+    app.input.write("\r"); // → May edit files
+    await tick(20);
+    app.input.write("\u001b[C"); // flip the permission to yes
+    await tick(20);
+    app.input.write("\r"); // → Where
+    await tick(20);
+    app.input.write("\r"); // → Save
+    await tick(20);
+    app.input.write("\r");
+    await tick(60);
+
+    const written = JSON.parse(await readFile(path.join(own, "agents.json"), "utf8")) as {
+      agents: Record<string, { description: string; instructions: string; permissions: string }>;
+    };
+    // Every field arrived, and the grant flipped on the way past.
+    expect(written.agents["cody-git"]?.description).toBe("GitHub and git work");
+    expect(written.agents["cody-git"]?.instructions).toBe("Review branches and PRs.");
+    expect(written.agents["cody-git"]?.permissions).toBe("write");
+
+    await leave(app, done);
+    if (previous === undefined) delete process.env.KICODE_HOME;
+    else process.env.KICODE_HOME = previous;
+    await rm(own, { recursive: true, force: true });
+  });
+
+  it("keeps every row inside the card, toggle options included", async () => {
+    // The bug: the card was sized from each field's *value*, but a toggle draws
+    // both of its options. `Where` is worth "all projects" and renders
+    // "[all projects] / this project", so the row spilled past the card's right
+    // edge and the highlight ran off into the page.
+    const { app, done } = await open();
+
+    app.input.write("\u001b[B");
+    await tick(20);
+    app.input.write("\r");
+    await tick(25);
+
+    const lines = app.lastFrame().split(/\r?\n/);
+    // The card's rows are the ones carrying its fill; find its left and right
+    // edges from a row that is definitely inside it.
+    const cardRows = lines.filter((line) => line.includes("May edit files") || line.includes("Where"));
+    expect(cardRows.length).toBe(2);
+    // The widest toggle renders in full, and nothing is longer than a terminal.
+    expect(app.lastFrame()).toContain("[all projects] / this project");
+    for (const line of lines) expect(line.length).toBeLessThanOrEqual(80);
     await leave(app, done);
   });
 
@@ -4711,25 +4877,37 @@ describe("/settings", () => {
     expect(screen).toContain("Settings");
     // The doors ride first, in panel order, ahead of every value.
     expect(screen).toContain("Shortcuts");
-    for (const label of ["Connect / Provider", "Models", "Sessions", "Compact", "Skills", "Tools", "MCP"]) {
+    for (const label of [
+      "Connect / Provider",
+      "Models",
+      "Sessions",
+      "Compact",
+      "Skills",
+      "Tools",
+      "MCP",
+      "Subagents",
+    ]) {
       expect(screen).toContain(label);
     }
     const shortcutsAt = screen.indexOf("Shortcuts");
     expect(shortcutsAt).toBeGreaterThanOrEqual(0);
     expect(shortcutsAt).toBeLessThan(screen.indexOf("Appearance"));
     expect(screen).toContain("Session");
-    expect(screen).toContain("Theme");
+    // On a twenty-four-row terminal the eight doors fill the card, so the first
+    // values start below the fold. The panel scrolls with the cursor, which is
+    // what the next step checks.
+    expect(app.lastFrame()).not.toContain("Theme");
     // The value in effect, on the row — not a copy that can drift from it.
     expect(screen).toContain("kicode");
-    expect(screen).toContain("verbosity".slice(0, 0)); // no-op, keeps the shape
     // On a shortcut row the footer names opening, not changing.
     expect(app.lastFrame()).toContain("enter open");
 
-    // Down past the shortcuts, Theme is still there with its value, and the
-    // footer names changing again.
-    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    // Down past the shortcuts, the values scroll into view — the first one is
+    // Theme — and the footer names changing again.
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
     await tick(30);
     expect(app.lastFrame()).toContain("‹/› change");
+    expect(app.lastFrame()).toContain("Theme");
 
     await finish(app, done);
   });
@@ -4737,9 +4915,9 @@ describe("/settings", () => {
   it("changes a value with the arrows, and writes it down", async () => {
     const { app, done } = await open("/settings");
 
-    // Down past the seven shortcut rows: the first value is the theme, and a
+    // Down past the eight shortcut rows: the first value is the theme, and a
     // dark theme steps to the next dark one.
-    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
     await tick(30);
     app.input.write(RIGHT);
     await tick(30);
@@ -4762,7 +4940,7 @@ describe("/settings", () => {
     // it. Sized by the longest, it fits in full and the card never moves.
     const { app, done } = await open("/settings");
 
-    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
     await tick(30);
     expect(app.screen()).toContain("Auto shows it once a second session exists.");
 
@@ -4786,7 +4964,7 @@ describe("/settings", () => {
     await tick(30);
 
     // Down past the shortcuts: the first value is the theme.
-    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
     await tick(30);
     app.input.write(RIGHT);
     await tick(30);
@@ -4804,12 +4982,30 @@ describe("/settings", () => {
     const { app, done } = await open("/settings");
 
     // Down past the shortcuts to `Color mode`: Enter flips it, and the theme moves with it.
-    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}\r`);
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}\r`);
     await tick(40);
 
     const saved = app.viewSaves.at(-1) ?? {};
     expect(saved.colorMode).toBe("light");
     expect(saved.theme).toBe("light");
+
+    await finish(app, done);
+  });
+
+  it("opens the subagent list from the Subagents door", async () => {
+    // A door that is a row rather than a value has to run the same call its
+    // slash command runs, or the two ways in can drift apart.
+    const { app, done } = await open("/settings");
+
+    app.input.write("subagents");
+    await tick(30);
+    expect(app.lastFrame()).toContain("Subagents");
+
+    app.input.write("\r");
+    await tick(30);
+    // Settings is gone and the subagent list is up.
+    expect(app.lastFrame()).toContain("New agent");
+    expect(app.lastFrame()).not.toContain("Appearance");
 
     await finish(app, done);
   });
@@ -5186,7 +5382,7 @@ describe("clicking a row", () => {
 
     // Down to `Thinking` first: the shortcuts pushed it below the panel's
     // visible window, and a click can only land on a row that is drawn.
-    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
+    app.input.write(`${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}${DOWN}`);
     await tick(30);
     app.input.write(clickAt(rowOf(app.lastFrame(), "Thinking")));
     await tick(40);

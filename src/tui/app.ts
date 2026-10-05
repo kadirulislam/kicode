@@ -2107,11 +2107,23 @@ class TuiApp {
 
     if (form.editing) {
       // Typing is ordinary typing; escape is the way out, and the editor takes
-      // every other key.
+      // every other key — except Enter, which ends the field.
       if (key.type === "escape") {
         this.commitAgentField();
         form.editing = false;
         this.editor.clear();
+        return true;
+      }
+      // Enter means "I am done here", so it commits and moves on — onto the next
+      // field, already open for typing, so filling a form is type, Enter, type.
+      // A line break is the other key: Shift+Enter arrives as `newline` and falls
+      // through to the editor, which is why the instructions field can hold a
+      // paragraph and this one cannot.
+      if (key.type === "enter") {
+        this.commitAgentField();
+        form.editing = false;
+        this.editor.clear();
+        this.stepAgentField(1);
         return true;
       }
       return false;
@@ -2142,19 +2154,19 @@ class TuiApp {
         switch (current?.kind) {
           case "text":
             // Enter opens the field rather than saving, so a value typed by
-            // mistake in the name field cannot be committed by one keypress.
+            // mistake in the name field cannot be committed by one keypress — and
+            // a second Enter then steps to the next field rather than needing a
+            // trip through Escape.
             this.editor.clear();
             this.editor.insert(current.value ?? "");
             form.editing = true;
             return true;
           case "toggle":
-          case "choice": {
-            const next = stepFormValue(current, 1);
-            if (current.key === "permissions") form.permissions = next as "no" | "yes";
-            if (current.key === "scope") form.scope = next as "all projects" | "this project";
-            form.error = null;
+          case "choice":
+            // Enter is "next field" on every kind, so it cannot mean two things.
+            // `‹›` and space change a toggle's value; the footer says so.
+            this.stepAgentField(1);
             return true;
-          }
           case "action":
             if (current.key === "delete") await this.deleteAgentEditor();
             else await this.saveAgentEditor();
@@ -2174,6 +2186,15 @@ class TuiApp {
         const digit = /^([1-9])$/.exec(key.text.trim());
         if (digit) {
           form.selected = Number(digit[1]) - 1;
+          return true;
+        }
+        // Space is the second route to a toggle's value, for a hand that would
+        // rather not hold an arrow. `‹›` is the one the footer names.
+        if (key.text === " " && (current?.kind === "toggle" || current?.kind === "choice")) {
+          const next = stepFormValue(current, 1);
+          if (current.key === "permissions") form.permissions = next as "no" | "yes";
+          if (current.key === "scope") form.scope = next as "all projects" | "this project";
+          form.error = null;
           return true;
         }
         return true;
@@ -3809,6 +3830,11 @@ class TuiApp {
     switch (id) {
       case "shortcut:connect":
         await this.command("/connect");
+        break;
+      case "shortcut:agents":
+        // The same call `/agents` makes, so the row, the key and the command can
+        // never disagree about what "Subagents" opens.
+        await this.command("/agents");
         break;
       case "shortcut:models":
         await this.command("/models");
@@ -7297,14 +7323,14 @@ class TuiApp {
       selected: Math.min(Math.max(form.selected, 0), Math.max(fields.length - 1, 0)),
       editing: form.editing,
       error: form.error,
-      // Named per field, because they differ: `How it works` takes paragraphs and
-      // Enter is a new line there, while every other field is one line and
-      // promising Enter would do something is offering a key that lies.
+      // Named per field, because they differ: Enter always ends a field and steps
+      // to the next, so the only thing a line break needs is Shift+Enter — and on
+      // a one-line field even that is noise.
       footer: form.editing
         ? this.agentFieldKey() === "instructions"
-          ? "enter new line · esc done"
-          : "esc done"
-        : "enter edit · ‹/› change · ↑↓ move · esc cancel",
+          ? "enter next · shift+enter line break · esc done"
+          : "enter next · esc done"
+        : "enter next/edit · ‹/› change · ↑↓ move · esc cancel",
     };
   }
 
@@ -7449,6 +7475,24 @@ class TuiApp {
     // Read from the list, never from the panel: the panel asks for this.
     const keys = form.original ? [...AGENT_FIELD_KEYS, "delete"] : AGENT_FIELD_KEYS;
     return keys[Math.min(Math.max(form.selected, 0), keys.length - 1)] ?? "";
+  }
+
+  /**
+   * Moves the cursor `delta` fields and opens a text one for typing.
+   *
+   * Opening it is what makes Enter worth pressing: type, Enter, type. Stopping on
+   * the next field with the cursor somewhere else would mean a second keystroke
+   * per field, which is the ceremony this key exists to remove.
+   */
+private stepAgentField(delta: number): void {
+    const form = this.agentEditor;
+    if (!form) return;
+    form.selected = stepFormField(this.agentForm()?.fields ?? [], form.selected, delta);
+    const landed = this.agentForm()?.fields[form.selected];
+    if (landed?.kind !== "text") return;
+    this.editor.clear();
+    this.editor.insert(landed.value ?? "");
+    form.editing = true;
   }
 
   /**

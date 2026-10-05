@@ -11,7 +11,8 @@ KiCode is a terminal-based AI coding assistant with multi-provider routing, MCP 
    - `src/tui/`: TUI renderer, frame layout (`frame.ts`), LineEditor, ANSI styling, and main event loop (`app.ts`).
    - `src/providers/`: OpenAI-compatible client (`openai.ts`), fallback router (`fallback.ts`), and services catalogue (`services.ts`).
    - `src/agent/`: The agent loop, tool registry, and **subagent delegation** (`subagent.ts`: the `delegate` tool, the child runner, the live roster).
-   - `src/agents.ts`: **Named subagents** — profiles, permissions, and the two `agents.json` files. `/agents` manages them; `/agents running` watches the children.
+   - `src/agents.ts`: **Named subagents** — profiles, permissions, and the two `agents.json` files. `/agents` manages them, `/agents running` watches the children, and the settings panel's `Subagents` door opens the same list.
+   - The editor is a form (`FormPanel` in `menu.ts`, drawn by `renderFormPanel`). **`enter` is "next field" on every kind** — toggles change with `‹›` or space, and shift+enter is a line break. Never give `enter` two meanings.
    - `src/config.ts` & `src/settings-file.ts`: Multi-level configuration resolution (CLI > Project > Global > Env).
    - `src/settings-write.ts`: Atomic persistence to `~/.kicode.json`.
 3. **Subagents** (`src/agent/subagent.ts`, ADR-053; `src/agents.ts`, ADR-054):
