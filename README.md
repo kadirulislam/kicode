@@ -1028,9 +1028,34 @@ While children run, a dock above the prompt says who is working on what:
     +2 more · /agents for the roster
 ```
 
-And on the state row below the chat, an `[AGENTS n/m]` chip — running against
-total, so a batch in flight is legible at a glance. Click it and you are in the
-same roster `/agents running` opens; one definition, so the two cannot disagree.
+And on the state row below the chat, an `[AGENTS n/m]` chip — **done** against
+total, so what is left is legible at a glance: `[1/1]` when a task has settled,
+`[1/2]` when another is still owed. Only a *completed* child counts as done; a
+failed or interrupted one is work that still has to happen. Click it and you are
+in the same roster `/agents running` opens; one definition, so the two cannot
+disagree.
+
+#### What a child can and cannot do
+
+No child can run a command. That is not a detail the model can be expected to
+know, so the roster states it — and states what to do instead:
+
+```
+- cody-git — Anything about GitHub or git — PRs, issues, branches, CI, releases
+    can: read files, search them, and edit files. cannot: run commands.
+    skills: ci-triage (find the first real error in a red build); pr-review (…)
+```
+
+The rule that follows is written into the prompt: **if a task needs `gh`, or
+`git status`, or a build, then either the task is not file-reading work, or you
+run the command yourself and hand the child the output.** Auditing a GitHub
+account is the worked example — one `gh` call by an agent that can make it, and
+the reading handed off.
+
+A child handed a task it structurally cannot do used to come back with nothing at
+all, which left the parent with no result and no idea why. It now reports, in
+words, that it ran and produced no report — and names the likely reason. Silence
+is the one answer a parent cannot act on.
 
 Three things worth knowing:
 

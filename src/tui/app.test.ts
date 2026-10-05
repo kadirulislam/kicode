@@ -2113,6 +2113,22 @@ describe("delegation", () => {
       (goal: string): AsyncGenerator<AgentEvent> =>
         answering(typeof report === "function" ? report(goal) : report)();
 
+    /**
+     * A child that is still working and never will be on its own.
+     *
+     * Waits on nothing rather than on a release latch: the run is ended by closing
+     * the app, so a test that spawned one does not have to remember to fire it.
+     */
+    const hanging =
+      (): AsyncGenerator<AgentEvent> =>
+      (async function* (): AsyncGenerator<AgentEvent> {
+        yield { type: "tool-start", id: "t0", name: "read", args: {} };
+        yield { type: "tool-result", id: "t0", name: "read", content: "x", isError: false };
+        await new Promise<void>(() => {});
+        yield { type: "text", delta: "never" };
+        yield { type: "done", reason: "complete" };
+      })();
+
     it("is absent when no child has run, because a count of nothing is noise", async () => {
       const { app, done } = await drive([]);
 
@@ -2172,23 +2188,49 @@ describe("delegation", () => {
       await finish(app, done);
     });
 
-    it("counts running against total, so a batch is legible at a glance", async () => {
+    it("counts done against total, so what is left is legible at a glance", async () => {
       const { app, done } = await drive([], withChild(reporting("ok"), { maxConcurrent: 1 }));
-      // Two done, one still on: `1/3` says a batch is in flight, which a plain
-      // "AGENTS" would not.
-      await (await tool(app)).run(
-        {
-          tasks: [
-            { goal: "one" },
-            { goal: "two" },
-            { goal: "three" },
-          ],
-        },
-        { cwd: "C:\\dev" },
-      );
+      await (await tool(app)).run({ goal: "one" }, { cwd: "C:\\dev" });
       await tick(40);
 
-      expect(app.lastFrame()).toMatch(/\[AGENTS \d+\/\d+\]/);
+      // The reported bug: a finished task showed [0/1], as though nothing had
+      // been done. A running count goes back to zero the moment the work lands,
+      // which reads as though the work had been undone.
+      expect(app.lastFrame()).toContain("[AGENTS 1/1]");
+
+      // And a second task moves it on: two settled, two owed.
+      await (await tool(app)).run({ goal: "two" }, { cwd: "C:\\dev" });
+      await tick(40);
+      expect(app.lastFrame()).toContain("[AGENTS 2/2]");
+      await finish(app, done);
+    });
+
+    it("shows zero done while a child is still running", async () => {
+      const { app, done } = await drive([], withChild(hanging));
+      void (await tool(app)).run({ goal: "slow one" }, { cwd: "C:\\dev" });
+      await tick(40);
+
+      // `[0/1]` while it works is correct, and is not the same as `[1/1]`. The
+      // bug was the settled state reporting the running number.
+      expect(app.lastFrame()).toContain("[AGENTS 0/1]");
+      await finish(app, done);
+    });
+
+    it("does not count a failed child as done", async () => {
+      // Counting it would claim progress nobody got.
+      const { app, done } = await drive(
+        [],
+        withChild(() =>
+          (async function* (): AsyncGenerator<AgentEvent> {
+            yield { type: "done", reason: "cancelled" as never };
+          })(),
+        ),
+      );
+      await (await tool(app)).run({ goal: "doomed" }, { cwd: "C:\\dev" });
+      await tick(40);
+
+      // A batch whose only child failed is `[0/1]`, not `[1/1]`.
+      expect(app.lastFrame()).toContain("[AGENTS 0/1]");
       await finish(app, done);
     });
   });

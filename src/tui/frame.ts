@@ -2637,18 +2637,28 @@ function renderBottom(
   }
   // The agents chip sits beside usage because it answers the same kind of
   // question — what is this session doing right now — and because a delegated
-  // task is invisible from the transcript until it reports. The counts are
-  // running/total so a batch is legible at a glance: `2/5` says two are on and
-  // three are queued or done, which a list of names alone would not.
+  // task is invisible from the transcript until it reports.
+  //
+  // The count is **done/total**, not running/total. A number that only says "how
+  // many are on" goes back to zero the moment they finish, which reads as though
+  // the work was undone. Done against total is the one that answers "what is
+  // still left": `[1/2]` means one is settled and one is still owed, whether
+  // that second one is running, queued, or was never started.
   if (boxShown && (state.subagents?.length ?? 0) > 0) {
     const live = state.subagents!;
+    // Only `completed` counts as done. A failed, stalled or interrupted child is
+    // work that still has to happen, so counting it would claim progress nobody
+    // got.
+    const done = live.filter((child) => child.status === "completed").length;
     const running = live.filter((child) => child.status === "running").length;
+    // Accent while there is something to wait for, plain once the batch is done —
+    // so the chip goes quiet on its own when there is nothing left to watch.
     chips.push({
       kind: "agents_button",
       spans: [
         span("[", styles.pillBorder),
-        span("AGENTS", running > 0 ? styles.accent : styles.hintKey),
-        span(` ${running}/${live.length}`, styles.hint),
+        span("AGENTS", running > 0 || done < live.length ? styles.accent : styles.hintKey),
+        span(` ${done}/${live.length}`, styles.hint),
         span("]", styles.pillBorder),
       ],
     });

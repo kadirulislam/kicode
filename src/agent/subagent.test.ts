@@ -792,8 +792,21 @@ describe("the roster in the system prompt", () => {
       profile({ name: "cody-ui", description: "The renderer", permissions: "read" }),
     ]);
 
-    expect(prompt).toContain("cody-git — GitHub work (may edit files)");
-    expect(prompt).toContain("cody-ui — The renderer (read only)");
+    expect(prompt).toContain("cody-git — GitHub work");
+    expect(prompt).toContain("cody-ui — The renderer");
+    expect(prompt).toContain("can: read files, search them, and edit files");
+    expect(prompt).toContain("can: read files, search them (cannot edit)");
+  });
+
+  it("says a child cannot run commands, because the model cannot know that", () => {
+    // The observed failure: `cody-git` was handed "audit this GitHub account",
+    // which needs `gh`. No child has a shell, so it had nothing to work with and
+    // came back empty. A limit the parent cannot see is a trap, not a policy.
+    const prompt = namedSubagentPrompt([profile()]);
+
+    expect(prompt).toContain("cannot: run commands");
+    expect(prompt).toContain("cannot run commands");
+    expect(prompt).toMatch(/needs one.*run the command yourself/s);
   });
 
   it("tells the model not to go looking for one", () => {
@@ -861,6 +874,71 @@ describe("the roster in the system prompt", () => {
     // an agent that has none.
     expect(namedSubagentPrompt([profile()])).not.toContain("skills:");
     expect(namedSubagentPrompt([profile({ skills: [] })])).not.toContain("skills:");
+  });
+});
+
+describe("a child that reports nothing", () => {
+  /** A child that finishes saying whatever it was scripted to say. */
+  const saying =
+    (...lines: string[]) =>
+    (): Agent =>
+      ({
+        async *send(): AsyncGenerator<AgentEvent> {
+          for (const line of lines) yield { type: "text", delta: line };
+          yield { type: "done", reason: "complete" };
+        },
+      }) as unknown as Agent;
+
+  const runChild = async (create: () => Agent): Promise<SubagentResult> => {
+    const run = childRunner({
+      create,
+      registry: new SubagentRegistry(),
+      model: "m",
+      maxIterations: 4,
+      limits: { staleMs: 60_000, staleToolMs: 120_000 },
+    });
+    return run({
+      id: "s1",
+      goal: "audit the account",
+      model: "",
+      tools: [],
+      instructions: "",
+      signal: new AbortController().signal,
+    });
+  };
+
+  it("says it ran and found nothing, rather than returning silence", async () => {
+    // The observed failure, verbatim from the transcript: [(it reported nothing)].
+    // An empty string is indistinguishable from a child that died mid-turn or one
+    // still working, so the parent had no result *and* no idea why.
+    const result = await runChild(saying());
+
+    expect(result.summary).not.toBe("");
+    // And it names the reason that actually bit: no child can run a command.
+    expect(result.summary).toMatch(/no child can run one/i);
+  });
+
+  it("still reports what the child did say", async () => {
+    // The fallback is for silence only — a real report must survive untouched, or
+    // the safety net would overwrite the answer.
+    const result = await runChild(saying("Found three repos with unpushed branches."));
+
+    expect(result.summary).toBe("Found three repos with unpushed branches.");
+  });
+
+  it("still says so when the child stopped without reporting", async () => {
+    // The failure text is what the panel shows; the summary is what the model
+    // reads. A child that stopped without saying anything must still say something.
+    const result = await runChild(
+      () =>
+        ({
+          async *send(): AsyncGenerator<AgentEvent> {
+            yield { type: "done", reason: "cancelled" as never };
+          },
+        }) as unknown as Agent,
+    );
+
+    expect(result.summary).not.toBe("");
   });
 });
 

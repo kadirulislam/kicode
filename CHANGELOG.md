@@ -6,6 +6,23 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`[AGENTS 0/1]` on a finished task.** The chip counted *running*, so it went
+  back to zero the moment the work landed — which reads as though the work had
+  been undone. It now counts **done/total**: `[1/1]` when a task is settled,
+  `[1/2]` when another is owed. A failed, stalled or interrupted child does not
+  count as done, because that is work that still has to happen.
+- **A repaint after a child settles.** Nothing asked the screen to redraw once a
+  child was recorded as finished, so the `[AGENTS n/m]` chip sat on its last
+  *running* frame until something unrelated happened to draw.
+- **A child that reported nothing.** The transcript read `[(it reported nothing)]`
+  and the parent had no result and no idea why. Silence is indistinguishable from
+  a child that died mid-turn. A child that ran and produced no prose now says so,
+  and names the likely reason — no child can run a command. A child that *failed*
+  reports why in the summary too, rather than leaving an empty string beside the
+  error.
+
 ### Added
 
 - **A folder per subagent, for its skills.** `~/.kicode/agents/<name>/SKILL.md` is
@@ -15,6 +32,12 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   against, since "GitHub work" gives a model one sentence to judge with — and the
   child is handed the paths and told to read the one covering its task. Only the
   paths, never the bodies. Same two scopes as `agents.json`, project overriding.
+- **The roster states each agent's limits, not just its subject.** Every entry now
+  reads `can: read files, search them, and edit files. cannot: run commands.`
+  Observed failure: `cody-git` was handed "audit this GitHub account", which needs
+  `gh`. No child has a shell, so it had nothing to work with. A limit the parent
+  cannot see is a trap, not a policy — and the prompt now says what to do instead:
+  run the command yourself and re-delegate with the output.
 - **The `[AGENTS n/m]` chip** on the state row, beside `[TODO]` and `[USAGE]`:
   running against total, so a batch in flight is legible at a glance. Clicking it
   opens the same roster `/agents running` does.

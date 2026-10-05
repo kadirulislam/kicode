@@ -1135,6 +1135,11 @@ class TuiApp {
         maxPerTurn: Math.max(1, delegation.maxPerTurn),
       },
       spawnCount: () => this.subagentsSpawned,
+      // After a child is recorded as settled, not while it is still running. The
+      // `[AGENTS n/m]` chip counts work *done*, and the runner's own `onProgress`
+      // only ever fires on the `running` state — so without this the last frame
+      // drawn for a finished batch was the one showing it unfinished.
+      onSettled: () => this.draw(),
       spawn: (request) => {
         this.subagentsSpawned += 1;
         return this.runChild(request);

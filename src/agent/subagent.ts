@@ -34,6 +34,20 @@ import type { SubagentView, Tool } from "./tools/types";
 export type SubagentState = SubagentView;
 
 /**
+ * What a child says when it ran but produced no prose.
+ *
+ * Not a scolding and not an excuse. The parent needs to know the child *ran* and
+ * found nothing reportable, which is a real answer, and it needs it in words: an
+ * empty string is indistinguishable from a child that died mid-turn, or from one
+ * still working. The observed case was a child handed a task that needed a command
+ * it cannot run — it reported nothing, and the parent had neither a result nor a
+ * reason.
+ */
+const EMPTY_REPORT =
+  "It completed without writing a report. If the task needed a command, note that no " +
+  "child can run one — run it yourself and re-delegate with the output.";
+
+/**
  * The parent session's instructions about its named subagents.
  *
  * In the **system prompt**, not only in the tool description, because a tool
@@ -54,10 +68,17 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
       // made against them. An agent described as "git things" and equipped with
       // "pr-review, branch-audit, ci-triage" is a different offer from the first
       // one alone, and the second is what tells the model this task is not its own.
+      //
+      // The **limits** matter as much as the skills, and they are stated here
+      // rather than left to the child: a child given a task it structurally
+      // cannot do has nothing useful to come back with. The observed failure was
+      // `cody-git` asked to audit a GitHub account — which needs `gh` — coming
+      // back with nothing, because no child can run a command.
       const lines = [
-        `- ${profile.name} — ${profile.description || "no description"} (${
-          profile.permissions === "write" ? "may edit files" : "read only"
-        })`,
+        `- ${profile.name} — ${profile.description || "no description"}`,
+        `    can: read files, search them${
+          profile.permissions === "write" ? ", and edit files" : " (cannot edit)"
+        }. cannot: run commands.`,
       ];
       if (skills.length > 0) {
         lines.push(
@@ -76,6 +97,9 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
     "",
     list,
     "",
+    "- A child cannot run commands. If the task needs one — `gh`, `git status`, a build, a test —",
+    "  then either the task is not file-reading work, or you run the command yourself and hand the",
+    "  child the output. Do not delegate a command and expect a report: the child has no way to run it.",
     "- When the user names one of these, delegate to it by name. Do that without checking whether it",
     "  exists and without asking whether to: they are already available to you, and looking for them",
     "  on disk is a wasted turn that answers a question you should already know the answer to.",
@@ -326,7 +350,13 @@ export function childRunner(options: ChildRunnerOptions): (request: SubagentRequ
       goal: request.goal,
       ...(request.agent ? { agent: request.agent.name } : {}),
       status,
-      summary: summary.trim(),
+      // A child that says nothing is the one failure the parent cannot act on.
+      // Silence is indistinguishable from "still working" from "found nothing",
+      // and the observed case was a child handed a task needing a command it
+      // cannot run: it reported nothing, and the parent had nothing to work with
+      // and no idea why. An explicit statement of what it could not do is worth
+      // more than an empty string, so that is what comes back.
+      summary: summary.trim() || EMPTY_REPORT,
       requests,
       ...(tokens > 0 ? { tokens } : {}),
       ...(error ? { error } : {}),
@@ -532,6 +562,16 @@ export type DelegateToolOptions = {
    * parameter with no names beside it is an invitation to guess.
    */
   profiles?: readonly AgentProfile[];
+  /**
+   * Called once a child has been **recorded as settled** — not merely finished.
+   *
+   * Separate from the runner's own `onProgress` because that fires while the
+   * child is still `running`, which is the state it was already showing. The
+   * `[AGENTS n/m]` chip counts work *done*, so without a repaint after the settle
+   * a finished batch sits on screen reading `[0/1]` until something unrelated
+   * happened to redraw.
+   */
+  onSettled?: () => void;
 };
 
 /**
@@ -606,13 +646,26 @@ export function delegateTool(options: DelegateToolOptions): Tool {
         ms: Date.now() - startedAt,
         ...(result.error ? { error: result.error } : {}),
       });
+      // After the record is written, so the repaint shows the settled child rather
+      // than the one still running.
+      options.onSettled?.();
       return { ...result, id, summary, ...(agent ? { agent: agent.name } : {}) };
     } catch (error) {
       const message = (error as Error).message;
       registry.finish(id, { status: "failed", error: message, ms: Date.now() - startedAt });
+      options.onSettled?.();
       // A child that dies is never silent: the parent is told what failed and
-      // why, and the rest of the batch still reports.
-      return { id, goal: task.goal, status: "failed", summary: "", requests: 0, error: message };
+      // why, and the rest of the batch still reports. The summary carries the
+      // reason too — an empty one here left the parent with a failure and nothing
+      // to act on.
+      return {
+        id,
+        goal: task.goal,
+        status: "failed",
+        summary: `It could not run: ${message}`,
+        requests: 0,
+        error: message,
+      };
     }
   };
 
