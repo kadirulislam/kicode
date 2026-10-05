@@ -8,6 +8,7 @@ import { Agent, DEFAULT_SYSTEM_PROMPT, type AgentEvent, type ApproveFn } from ".
 import type { AskAnswer, AskFn } from "../agent/ask";
 import { allowPredicate } from "../agent/allow";
 import { createDefaultTools, SUBAGENT_TOOLS } from "../agent/tools";
+import { readAgentProfiles } from "../agents";
 import { SUBAGENT_SYSTEM_PROMPT, SubagentRegistry, childRunner, delegateTool } from "../agent/subagent";
 import type { Tool } from "../agent/tools/types";
 import { apiKeyEnvFor, loadConfig, validateConfig, type Config, type FallbackRoute } from "../config";
@@ -313,7 +314,14 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
 
   const configFiles = await readConfigFiles(io.cwd);
   const fileSettings = fileSettingsFromEntries(configFiles.entries);
-  for (const warning of [...configFiles.warnings, ...fileSettings.warnings]) io.writeError(warning);
+  // The named subagents, read once here so the tool description, the roster and
+  // the editor all see the same list. A file that could not be read is a warning
+  // rather than a failure — a typo in one agent must not stop the session.
+  const profiles = await readAgentProfiles(io.cwd);
+  const agentProfiles = profiles.agents;
+  for (const warning of [...configFiles.warnings, ...fileSettings.warnings, ...profiles.warnings]) {
+    io.writeError(warning);
+  }
 
   // Keys a previous `/key` (or `/connect` with a pasted key) kept in
   // `~/.kicode/keys.json` rejoin the environment here, before anything reads
@@ -700,19 +708,24 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
    * Shared by both doors — the TUI and the one-shot path — so a child is the
    * same thing whichever way the work arrived.
    */
-  const buildChild = ({ goal, model, maxTurns, signal }: {
+  const buildChild = ({ goal, model, maxTurns, tools, instructions, signal }: {
     goal: string;
     context: string;
     model: string;
     maxTurns: number;
+    tools: readonly string[];
+    instructions: string;
     signal: AbortSignal;
   }): Agent =>
     createAgent(undefined, {
       model: model || config.delegation.model || config.model,
       baseUrl: config.delegation.baseUrl || undefined,
       cwd: io.cwd,
-      systemPrompt: SUBAGENT_SYSTEM_PROMPT,
-      tools: SUBAGENT_TOOLS,
+      // The profile's specialisation plus the standing rules, assembled once by
+      // the delegate tool. Re-derived here it would be a second place for the
+      // grant to be re-read.
+      systemPrompt: instructions || SUBAGENT_SYSTEM_PROMPT,
+      tools: tools.length > 0 ? tools : SUBAGENT_TOOLS,
       maxTurns,
       signal,
       // A distinct session id per child: a gateway that routes per conversation
@@ -751,6 +764,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         maxConcurrent: Math.max(1, config.delegation.maxConcurrent),
         maxPerTurn: Math.max(1, config.delegation.maxPerTurn),
       },
+      profiles: agentProfiles,
       spawnCount: () => spawned,
       spawn: (request) => {
         spawned += 1;
@@ -1055,6 +1069,7 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
         delegation: {
           enabled: config.delegation.enabled,
           model: config.delegation.model,
+          profiles: agentProfiles,
           maxConcurrent: config.delegation.maxConcurrent,
           maxPerTurn: config.delegation.maxPerTurn,
           maxIterations: config.delegation.maxIterations,

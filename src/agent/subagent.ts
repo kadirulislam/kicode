@@ -18,6 +18,8 @@
  */
 
 import type { Agent } from "./loop";
+import type { AgentProfile } from "../agents";
+import { childPrompt, toolsFor } from "../agents";
 import type { DelegationSettings } from "../config";
 import type { SubagentView, Tool } from "./tools/types";
 
@@ -35,6 +37,8 @@ export type SubagentState = SubagentView;
 export type SubagentResult = {
   id: string;
   goal: string;
+  /** The named agent that ran it, when the model chose one. */
+  agent?: string;
   status: SubagentState["status"];
   summary: string;
   /** How many requests it spent, so a batch can be judged for its cost. */
@@ -64,6 +68,8 @@ export type SubagentTask = {
    * file paths, error text, and the constraint that matters all go here.
    */
   context?: string;
+  /** The named agent to run this as, when the batch is not homogeneous. */
+  agent?: string;
 };
 
 export type SubagentRequest = {
@@ -73,6 +79,21 @@ export type SubagentRequest = {
   context?: string;
   /** Stops the child with the turn it belongs to. */
   signal: AbortSignal;
+  /**
+   * The profile named for this child, when the model chose one.
+   *
+   * Carried whole rather than as its parts, because the parts that matter —
+   * which prompt, which tools, which model — are resolved *once*, here, into the
+   * fields below. A builder on the other side that re-derived any of them would
+   * be a second place for the permission grant to be re-read.
+   */
+  agent?: AgentProfile;
+  /** Already resolved: the profile's pin, else the session's delegation pin. */
+  model: string;
+  /** Already resolved from the profile's permissions. */
+  tools: readonly string[];
+  /** Already assembled: the profile's specialisation plus the standing rules. */
+  instructions: string;
 };
 
 /** Builds and runs one child to completion. */
@@ -88,12 +109,21 @@ export type SubagentSpawner = (request: SubagentRequest) => Promise<SubagentResu
  * losing the staleness cut-off.
  */
 export type ChildRunnerOptions = {
-  /** Builds a child: read-only tools, no approval, no question channel. */
+  /**
+   * Builds a child from values the delegate tool has already resolved.
+   *
+   * Everything that decides what a child may do arrives as an argument —
+   * `tools`, `instructions`, `model` — rather than being re-derived here. The
+   * permission grant in particular is read exactly once, in the tool that holds
+   * the profile, so there is no second place for it to be misread.
+   */
   create: (input: {
     goal: string;
     context: string;
     model: string;
     maxTurns: number;
+    tools: readonly string[];
+    instructions: string;
     signal: AbortSignal;
   }) => Agent;
   /** Where the child's progress is recorded for the panel and `/agents`. */
@@ -122,7 +152,7 @@ export type ChildRunnerOptions = {
  * child's own signal, so Ctrl+C still reaches everything.
  */
 export function childRunner(options: ChildRunnerOptions): (request: SubagentRequest) => Promise<SubagentResult> {
-  const { create, registry, limits } = options;
+  const { registry, limits } = options;
 
   return async (request: SubagentRequest): Promise<SubagentResult> => {
     const startedAt = Date.now();
@@ -137,11 +167,13 @@ export function childRunner(options: ChildRunnerOptions): (request: SubagentRequ
     if (request.signal.aborted) stop.abort();
     else request.signal.addEventListener("abort", relaying, { once: true });
 
-    const child = create({
+    const child = options.create({
       goal: request.goal,
       context: request.context ?? "",
-      model: options.model,
+      model: request.model || options.model,
       maxTurns: options.maxIterations,
+      tools: request.tools.length > 0 ? request.tools : toolsFor("read"),
+      instructions: request.instructions || childPrompt(""),
       signal: stop.signal,
     });
 
@@ -212,6 +244,7 @@ export function childRunner(options: ChildRunnerOptions): (request: SubagentRequ
     return {
       id: request.id,
       goal: request.goal,
+      ...(request.agent ? { agent: request.agent.name } : {}),
       status,
       summary: summary.trim(),
       requests,
@@ -325,8 +358,16 @@ export class SubagentRegistry {
     });
   }
 
-  start(id: string, goal: string, model: string): void {
-    this.live.set(id, { id, goal: shortGoal(goal), model, status: "running", ms: 0, toolCalls: 0 });
+  start(id: string, goal: string, model: string, agent?: string): void {
+    this.live.set(id, {
+      id,
+      goal: shortGoal(goal),
+      model,
+      status: "running",
+      ms: 0,
+      toolCalls: 0,
+      ...(agent ? { agent } : {}),
+    });
     this.evict();
   }
 
@@ -374,6 +415,14 @@ export type DelegateToolOptions = {
   settings: DelegateSettings;
   /** Charged against the parent's own turn so a runaway batch is refused early. */
   spawnCount: () => number;
+  /**
+   * The named agents this session may choose from.
+   *
+   * Read at tool-build time and written into the description, because the tool
+   * description is the only place a model learns what `cody-git` is. An `agent`
+   * parameter with no names beside it is an invitation to guess.
+   */
+  profiles?: readonly AgentProfile[];
 };
 
 /**
@@ -386,17 +435,47 @@ export type DelegateToolOptions = {
  */
 export function delegateTool(options: DelegateToolOptions): Tool {
   const { spawn, registry, settings, spawnCount } = options;
+  const profiles = options.profiles ?? [];
+  const byName = new Map(profiles.map((profile) => [profile.name, profile]));
 
   // The children of the call in flight, in the order the model asked for them.
   // The loop reads this after the call returns, so the transcript can count one
   // delegation's children rather than every child this session has ever spawned.
   let batch: string[] = [];
 
-  const runOne = async (task: SubagentTask, signal: AbortSignal, into: string[]): Promise<SubagentResult> => {
+  /**
+   * What a named agent turns into, with every choice already made.
+   *
+   * Refusing an unknown name rather than falling back to the generic child is
+   * deliberate: a model that asked for `cody-gitt` and got a general-purpose
+   * child back would not know it had been substituted, and would report the
+   * result as the specialised thing it never ran.
+   */
+  const resolve = (name: unknown): AgentProfile | string => {
+    if (name === undefined || name === null || name === "") return null as unknown as AgentProfile;
+    if (typeof name !== "string") return "`agent` must be a name, not a value.";
+    const wanted = name.trim();
+    if (!wanted) return null as unknown as AgentProfile;
+    const found = byName.get(wanted) ?? byName.get(wanted.toLowerCase());
+    if (found) return found;
+    const names = [...byName.keys()];
+    return names.length
+      ? `There is no agent named "${wanted}". The available agents are: ${names.join(", ")}.`
+      : `There is no agent named "${wanted}", and no agents are defined — omit \`agent\` for a general-purpose one.`;
+  };
+
+  const runOne = async (
+    task: SubagentTask,
+    signal: AbortSignal,
+    into: string[],
+    agent: AgentProfile | null,
+  ): Promise<SubagentResult> => {
     const id = nextId();
     into.push(id);
-    const model = settings.model;
-    registry.start(id, task.goal, model);
+    // The profile's own pin wins; otherwise the session's delegation pin; and
+    // empty there means the parent's model, which the caller resolves.
+    const model = agent?.model || settings.model;
+    registry.start(id, task.goal, model, agent?.name);
     const startedAt = Date.now();
     try {
       const result = await spawn({
@@ -404,6 +483,10 @@ export function delegateTool(options: DelegateToolOptions): Tool {
         goal: task.goal,
         ...(task.context ? { context: task.context } : {}),
         signal,
+        model,
+        tools: toolsFor(agent?.permissions ?? "read"),
+        instructions: childPrompt(agent?.instructions ?? ""),
+        ...(agent ? { agent } : {}),
       });
       const summary = clampSummary(result.summary);
       registry.finish(id, {
@@ -412,7 +495,7 @@ export function delegateTool(options: DelegateToolOptions): Tool {
         ms: Date.now() - startedAt,
         ...(result.error ? { error: result.error } : {}),
       });
-      return { ...result, id, summary };
+      return { ...result, id, summary, ...(agent ? { agent: agent.name } : {}) };
     } catch (error) {
       const message = (error as Error).message;
       registry.finish(id, { status: "failed", error: message, ms: Date.now() - startedAt });
@@ -425,7 +508,7 @@ export function delegateTool(options: DelegateToolOptions): Tool {
   return {
     name: "delegate",
     description: [
-      "Delegate a task to a child agent: a fresh context, a read-only toolset, and its own model.",
+      "Delegate a task to a child agent: a fresh context, its own toolset, and its own model.",
       "Use it when the work is broad (many files or locations), exploratory (where is X handled),",
       "or splittable into independent parts worth doing at once — a batch of tasks runs in parallel",
       "and only their reports come back.",
@@ -434,6 +517,17 @@ export function delegateTool(options: DelegateToolOptions): Tool {
       "looking at\" delegates nothing.",
       "Do not delegate a single file lookup, a decision, or anything that depends on something the",
       "user said earlier in this conversation — a child cannot see it and cannot ask them.",
+      // The names are here because this string is the only place a model learns
+      // what `cody-git` is. An `agent` parameter with nothing beside it is an
+      // invitation to guess.
+      ...(profiles.length
+        ? [
+            `Set \`agent\` when one of these fits the task: ${profiles
+              .map((profile) => `${profile.name} (${profile.description || "no description"})`)
+              .join("; ")}.`,
+            "Omit `agent` for a general-purpose child that only reads.",
+          ]
+        : []),
     ].join(" "),
     parameters: {
       type: "object",
@@ -443,14 +537,24 @@ export function delegateTool(options: DelegateToolOptions): Tool {
           type: "string",
           description: "Everything the child needs: paths, errors, constraints, the test command.",
         },
+        ...(profiles.length
+          ? {
+              agent: {
+                type: "string",
+                enum: profiles.map((profile) => profile.name),
+                description: "A named agent to run this as. Omit for a general-purpose one.",
+              },
+            }
+          : {}),
         tasks: {
           type: "array",
-          description: "Independent tasks to run in parallel. Each is { goal, context }.",
+          description: "Independent tasks to run in parallel. Each is { goal, context, agent }.",
           items: {
             type: "object",
             properties: {
               goal: { type: "string" },
               context: { type: "string" },
+              ...(profiles.length ? { agent: { type: "string", enum: profiles.map((profile) => profile.name) } } : {}),
             },
             required: ["goal"],
           },
@@ -463,12 +567,31 @@ export function delegateTool(options: DelegateToolOptions): Tool {
         : [];
       const single: SubagentTask | null =
         typeof args.goal === "string" && args.goal.trim() !== ""
-          ? { goal: args.goal, ...(typeof args.context === "string" ? { context: args.context } : {}) }
+          ? {
+              goal: args.goal,
+              ...(typeof args.context === "string" ? { context: args.context } : {}),
+              // Carried through as-is rather than only when it is a string: an
+              // `agent` of the wrong *type* has to be refused by `resolve`, not
+              // quietly dropped into a general-purpose child.
+              ...(args.agent !== undefined ? { agent: args.agent as string } : {}),
+            }
           : null;
 
       const wanted = tasks.length > 0 ? tasks : single ? [single] : [];
       if (wanted.length === 0) {
         return { content: 'Error: delegate needs a `goal`, or a `tasks` array of { goal, context }.', isError: true };
+      }
+
+      // Every named agent is resolved before anything spawns, so a batch naming
+      // one that does not exist is refused in full rather than half-run with a
+      // substitute the model never asked for.
+      const chosen = new Map<SubagentTask, AgentProfile | null>();
+      for (const task of wanted) {
+        const found = resolve(task.agent);
+        if (typeof found === "string") {
+          return { content: `Error: ${found}`, isError: true };
+        }
+        chosen.set(task, found);
       }
 
       // The cap is refused, never silently applied: a batch quietly cut to four
@@ -496,7 +619,7 @@ export function delegateTool(options: DelegateToolOptions): Tool {
       const thisCall = batch;
       for (let at = 0; at < wanted.length; at += width) {
         const slice = wanted.slice(at, at + width);
-        const settled = await Promise.all(slice.map((task) => runOne(task, signal, thisCall)));
+        const settled = await Promise.all(slice.map((task) => runOne(task, signal, thisCall, chosen.get(task) ?? null)));
         // In input order, not completion order: the model wrote them that way and
         // reads them that way.
         results.push(...settled);
@@ -517,7 +640,10 @@ export function delegateTool(options: DelegateToolOptions): Tool {
 function renderReport(results: readonly SubagentResult[]): string {
   return results
     .map((result, index) => {
-      const label = `TASK ${index + 1}/${results.length}: ${result.goal}`;
+      // The agent's name is in the label, so a report from four specialists is
+      // attributable without the parent having to remember which was which.
+      const who = result.agent ? ` [${result.agent}]` : "";
+      const label = `TASK ${index + 1}/${results.length}${who}: ${result.goal}`;
       if (result.status === "failed" || result.status === "interrupted" || result.status === "stalled") {
         return `${label}\n— ${result.status}: ${result.error ?? "no reason given"}`;
       }

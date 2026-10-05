@@ -14,6 +14,8 @@ export type SubagentView = {
   goal: string;
   /** Which model it is actually on — the parent's, or the delegated pin. */
   model: string;
+  /** The named agent running it, when the model chose one. */
+  agent?: string;
   status: "running" | "completed" | "failed" | "interrupted" | "stalled";
   /** How long it has run, or took. */
   ms: number;

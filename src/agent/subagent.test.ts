@@ -11,6 +11,7 @@ import {
 } from "./subagent";
 import { SUBAGENT_TOOLS, createDefaultTools } from "./tools";
 import { ToolRegistry } from "./tools/types";
+import type { AgentProfile } from "../agents";
 import type { Agent, AgentEvent } from "./loop";
 
 const settings = (over: Partial<DelegateSettings> = {}): DelegateSettings => ({
@@ -423,12 +424,26 @@ describe("the runner", () => {
     ...over,
   });
 
-  const request = { id: "sa-1", goal: "find it", signal: new AbortController().signal };
+  /**
+ * A request with nothing named and nothing resolved, which is the generic case:
+ * the tool fills these in from the session's own delegation pin.
+ */
+const request = (
+  over: Partial<SubagentRequest> = {},
+): SubagentRequest => ({
+  id: "sa-1",
+  goal: "find it",
+  signal: new AbortController().signal,
+  model: "child-model",
+  tools: ["read"],
+  instructions: "",
+  ...over,
+});
 
   it("runs without a screen, which is what the one-shot path gives it", async () => {
     // `kicode -p "…"` has no panel to repaint. The runner must not require an
     // `onProgress` hook or the one-shot path would need a fake one to exist.
-    const result = await childRunner(options())(request);
+    const result = await childRunner(options())(request());
 
     expect(result).toMatchObject({ goal: "find it", status: "completed", summary: "the answer" });
   });
@@ -445,7 +460,7 @@ describe("the runner", () => {
           { type: "done", reason: "complete" },
         ]),
       }),
-    )(request);
+    )(request());
 
     expect(result.requests).toBe(2);
   });
@@ -458,7 +473,7 @@ describe("the runner", () => {
           { type: "done", reason: "complete", promptTokens: 1_200, completionTokens: 300 },
         ]),
       }),
-    )(request);
+    )(request());
 
     expect(result.tokens).toBe(1_500);
   });
@@ -466,7 +481,7 @@ describe("the runner", () => {
   it("leaves the token count off rather than claiming zero was spent", async () => {
     // A gateway that reports no usage is not the same as a child that spent
     // nothing, and `0` would read as the second.
-    const result = await childRunner(options())(request);
+    const result = await childRunner(options())(request());
 
     expect(result).not.toHaveProperty("tokens");
   });
@@ -488,7 +503,7 @@ describe("the runner", () => {
           { type: "done", reason: "complete" },
         ]),
       }),
-    )(request);
+    )(request());
 
     // The hook fires on movement, not on text — the panel shows neither the text
     // nor a number that did not change.
@@ -506,7 +521,7 @@ describe("the runner", () => {
           return scripted([{ type: "text", delta: "x" }, { type: "done", reason: "complete" }])();
         },
       }),
-    )({ id: "sa-1", goal: "g", signal: caller.signal });
+    )({ id: "sa-1", goal: "g", signal: caller.signal, model: "", tools: [], instructions: "" });
 
     // Separate, or a child abandoned for going quiet would take the whole turn
     // with it — and one that outlives its staleness limit could never be stopped
@@ -528,9 +543,173 @@ describe("the runner", () => {
           return scripted([{ type: "text", delta: "x" }, { type: "done", reason: "complete" }])();
         },
       }),
-    )({ id: "sa-1", goal: "g", signal: caller.signal });
+    )({ id: "sa-1", goal: "g", signal: caller.signal, model: "", tools: [], instructions: "" });
 
     expect(childSignal!.aborted).toBe(true);
+  });
+});
+
+describe("named agents", () => {
+  const profile = (over: Partial<AgentProfile> = {}): AgentProfile => ({
+    name: "cody-git",
+    description: "GitHub and git work",
+    instructions: "Focus on branches, commits and PRs.",
+    model: "",
+    permissions: "read",
+    scope: "global",
+    file: "agents.json",
+    ...over,
+  });
+
+  const tool = (profiles: AgentProfile[], seen: SubagentRequest[] = []) =>
+    delegateTool({
+      spawn: spawner((request) => ok(request.goal), seen),
+      registry: new SubagentRegistry(),
+      settings: settings(),
+      spawnCount: () => 0,
+      profiles,
+    });
+
+  it("tells the model what the named agents are for", () => {
+    // The description is the only place a model learns `cody-git` exists.
+    const described = tool([profile()]).description;
+
+    expect(described).toContain("cody-git");
+    expect(described).toContain("GitHub and git work");
+  });
+
+  it("offers the names as an enum, so a model cannot invent one", () => {
+    const parameters = tool([profile(), profile({ name: "cody-frontend" })]).parameters as {
+      properties: { agent?: { enum: string[] } };
+    };
+
+    expect(parameters.properties.agent?.enum).toEqual(["cody-git", "cody-frontend"]);
+  });
+
+  it("says nothing about `agent` when there are none", () => {
+    const parameters = tool([]).parameters as { properties: Record<string, unknown> };
+
+    expect(parameters.properties).not.toHaveProperty("agent");
+    expect(tool([]).description).not.toContain("Set `agent`");
+  });
+
+  it("runs a child under the profile it was given", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile()], seen).run({ goal: "check the branch", agent: "cody-git" }, context());
+
+    console.log("RESULT:", JSON.stringify(await tool([profile()], seen).run({ goal: "x", agent: "cody-git" }, context()), null, 1), "SEEN:", seen.length);
+    expect(seen[0]?.instructions).toContain("branches, commits and PRs");
+  });
+
+  it("names the agent in the report, so a batch is attributable", async () => {
+    const result = await tool([profile()]).run({ goal: "check the branch", agent: "cody-git" }, context());
+
+    expect(result.content).toContain("TASK 1/1 [cody-git]: check the branch");
+  });
+
+  it("refuses an agent that does not exist, and lists the ones that do", async () => {
+    const seen: SubagentRequest[] = [];
+
+    // Falling back to a general-purpose child would be a substitution the model
+    // never asked for and would not know about — so it would report a
+    // general-purpose result as the specialist it never ran.
+    const result = await tool([profile()], seen).run({ goal: "check", agent: "cody-gitt" }, context());
+
+    expect(result.isError).toBe(true);
+    expect(result.content).toContain('no agent named "cody-gitt"');
+    expect(result.content).toContain("cody-git");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("refuses the whole batch when one task names an agent that does not exist", async () => {
+    const seen: SubagentRequest[] = [];
+
+    const result = await tool([profile()], seen).run(
+      { tasks: [{ goal: "ok", agent: "cody-git" }, { goal: "typo", agent: "nope" }] },
+      context(),
+    );
+
+    // Half a batch, where the other half silently lost its specialisation, is
+    // worse than none.
+    expect(result.isError).toBe(true);
+    expect(seen).toHaveLength(0);
+  });
+
+  it("says there are none when none are defined, rather than only the error", async () => {
+    const result = await tool([]).run({ goal: "check", agent: "cody-git" }, context());
+
+    expect(result.content).toContain("no agents are defined");
+  });
+
+  it("lets a batch use a different agent per task", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile(), profile({ name: "cody-frontend" })], seen).run(
+      { tasks: [{ goal: "a", agent: "cody-git" }, { goal: "b", agent: "cody-frontend" }] },
+      context(),
+    );
+
+    expect(seen.map((request) => request.agent?.name)).toEqual(["cody-git", "cody-frontend"]);
+  });
+
+  it("gives a read-only agent no way to write", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile()], seen).run({ goal: "audit", agent: "cody-git" }, context());
+
+    expect(seen[0]?.tools).toEqual(["read", "glob", "grep", "recall"]);
+  });
+
+  it("gives a write agent edit, and never a shell", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile({ permissions: "write" })], seen).run({ goal: "fix", agent: "cody-git" }, context());
+
+    expect(seen[0]?.tools).toContain("write");
+    expect(seen[0]?.tools).toContain("edit");
+    // A child has no approval channel, so a shell would mean arbitrary code
+    // running unsupervised — which is why it is not grantable at any level.
+    expect(seen[0]?.tools).not.toContain("bash");
+  });
+
+  it("uses the profile's own model over the session's pin", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile({ model: "flash" })], seen).run({ goal: "a", agent: "cody-git" }, context());
+
+    expect(seen[0]?.model).toBe("flash");
+  });
+
+  it("falls back to the session's pin when the profile names no model", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile({ model: "" })], seen).run({ goal: "a", agent: "cody-git" }, context());
+
+    expect(seen[0]?.model).toBe("child-model");
+  });
+
+  it("accepts the name whatever case the model used", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile()], seen).run({ goal: "a", agent: "Cody-Git" }, context());
+
+    expect(seen[0]?.agent?.name).toBe("cody-git");
+  });
+
+  it("runs the general-purpose child when no agent is named", async () => {
+    const seen: SubagentRequest[] = [];
+
+    await tool([profile()], seen).run({ goal: "just look" }, context());
+
+    expect(seen[0]?.agent).toBeUndefined();
+    expect(seen[0]?.tools).toEqual(["read", "glob", "grep", "recall"]);
+  });
+
+  it("refuses an `agent` that is not a name at all", async () => {
+    const result = await tool([profile()]).run({ goal: "a", agent: 7 as unknown as string }, context());
+
+    expect(result.isError).toBe(true);
   });
 });
 

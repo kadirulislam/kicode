@@ -111,6 +111,7 @@ import {
   type SubagentState,
 } from "../agent/subagent";
 import type { SubagentView, Tool } from "../agent/tools/types";
+import type { AgentProfile } from "../agents";
 import type { PlanSnapshot } from "../agent/tools/types";
 import type { RouteHealthLine } from "../routes/health";
 import { renderUsage, summarizeUsage, totalsLine, turnRecord, type UsageRecord } from "../usage";
@@ -463,6 +464,11 @@ export type TuiOptions = {
     enabled: boolean;
     /** Model every child runs on. Empty means the parent's own. */
     model: string;
+    /**
+     * The named subagents this session may choose from, for the tool description
+     * and the `/agents` editor. Read once at startup.
+     */
+    profiles?: AgentProfile[];
     maxConcurrent: number;
     maxPerTurn: number;
     maxIterations: number;
@@ -483,6 +489,10 @@ export type TuiOptions = {
     context: string;
     model: string;
     maxTurns: number;
+    /** Already resolved from the chosen profile's permissions. */
+    tools: readonly string[];
+    /** Already assembled: the profile's specialisation plus the standing rules. */
+    instructions: string;
     signal: AbortSignal;
   }) => Agent;
   streams?: { input: NodeJS.ReadStream; output: NodeJS.WriteStream };
@@ -1030,6 +1040,9 @@ class TuiApp {
     const pin = delegation.model.trim();
     return delegateTool({
       registry: this.subagents,
+      // The names go into the tool description, which is the only place the model
+      // learns they exist — so a profile the user defined is actually usable.
+      profiles: delegation.profiles ?? [],
       settings: {
         model: pin || this.model,
         maxConcurrent: Math.max(1, delegation.maxConcurrent),
