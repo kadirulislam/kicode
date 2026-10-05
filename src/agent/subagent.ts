@@ -78,6 +78,10 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
         `- ${profile.name} — ${profile.description || "no description"}`,
         `    can: read files, search them${
           profile.permissions === "write" ? ", and edit files" : " (cannot edit)"
+        }${
+          // The one capability that is not file-shaped, and the whole reason the
+          // profile asked for it: this is how the agent reaches GitHub at all.
+          profile.github === true ? ", and read the GitHub API with the `github` tool" : ""
         }. cannot: run commands.`,
       ];
       if (skills.length > 0) {
@@ -97,9 +101,21 @@ export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string |
     "",
     list,
     "",
-    "- A child cannot run commands. If the task needs one — `gh`, `git status`, a build, a test —",
+    "- A child cannot run commands. If the task needs one — `git status`, a build, a test —",
     "  then either the task is not file-reading work, or you run the command yourself and hand the",
     "  child the output. Do not delegate a command and expect a report: the child has no way to run it.",
+    // Only when some agent actually has it. Telling a session about a capability
+    // nothing has is the same noise as telling it about subagents it does not
+    // have, and it costs the same kind of confusion.
+    ...(profiles.some((profile) => profile.github === true)
+      ? [
+          "- An agent listed as able to read the GitHub API has a `github` tool for it, which reads",
+          "  api.github.com with your credentials and cannot write anything. Use it for anything about",
+          "  GitHub that the files on disk cannot answer — the signed-in user, their repositories, org",
+          "  memberships, issues, pull requests, workflow runs — and prefer it over reading files, because",
+          "  the answer is current rather than whatever the last session left on disk.",
+        ]
+      : []),
     "- When the user names one of these, delegate to it by name. Do that without checking whether it",
     "  exists and without asking whether to: they are already available to you, and looking for them",
     "  on disk is a wasted turn that answers a question you should already know the answer to.",
@@ -633,9 +649,10 @@ export function delegateTool(options: DelegateToolOptions): Tool {
         ...(task.context ? { context: task.context } : {}),
         signal,
         model,
-        tools: toolsFor(agent?.permissions ?? "read"),
+        tools: toolsFor(agent?.permissions ?? "read", agent?.github === true),
         instructions: childPrompt(
           [agent?.instructions ?? "", skillReminder(agent)].filter(Boolean).join("\n\n"),
+          agent?.github === true,
         ),
         ...(agent ? { agent } : {}),
       });

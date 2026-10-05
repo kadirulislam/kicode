@@ -753,6 +753,7 @@ const AGENT_FIELD_KEYS = [
   "instructions",
   "model",
   "permissions",
+  "github",
   "scope",
   "save",
 ] as const;
@@ -1065,6 +1066,8 @@ class TuiApp {
     instructions: string;
     model: string;
     permissions: "no" | "yes";
+    /** Whether this agent may read the GitHub API. Off unless granted. */
+    github: "no" | "yes";
     scope: "all projects" | "this project";
     selected: number;
     /** True while the cursor is inside a text field rather than on the list. */
@@ -2169,6 +2172,7 @@ class TuiApp {
         if (current?.kind === "toggle" || current?.kind === "choice") {
           const next = stepFormValue(current, delta);
           if (current.key === "permissions") form.permissions = next as "no" | "yes";
+          if (current.key === "github") form.github = next as "no" | "yes";
           if (current.key === "scope") form.scope = next as "all projects" | "this project";
           form.error = null;
           return true;
@@ -2222,6 +2226,7 @@ class TuiApp {
         if (key.text === " " && (current?.kind === "toggle" || current?.kind === "choice")) {
           const next = stepFormValue(current, 1);
           if (current.key === "permissions") form.permissions = next as "no" | "yes";
+          if (current.key === "github") form.github = next as "no" | "yes";
           if (current.key === "scope") form.scope = next as "all projects" | "this project";
           form.error = null;
           return true;
@@ -7401,6 +7406,17 @@ class TuiApp {
             : "Read-only: it inspects and reports, and never changes anything.",
       },
       {
+        key: "github",
+        label: "GitHub access",
+        kind: "toggle",
+        value: form.github,
+        options: ["no", "yes"],
+        hint:
+          form.github === "yes"
+            ? "It can read api.github.com with your credentials — repos, issues, PRs. Still cannot write, and still cannot run commands."
+            : "Off. Without this it cannot answer anything about GitHub that the files on disk do not already say.",
+      },
+      {
         key: "scope",
         label: "Where",
         kind: "toggle",
@@ -7573,6 +7589,10 @@ class TuiApp {
       // Read-only unless the stored agent says otherwise: the grant is opt-in,
       // and an editor that opened on "yes" would quietly make it the default.
       permissions: existing?.permissions === "write" ? "yes" : "no",
+      // Same rule as the edit grant, for the same reason: this hands the child the
+      // user's GitHub token, so an editor that opened on "yes" would be making the
+      // decision for the person filling it in.
+      github: existing?.github === true ? "yes" : "no",
       scope: existing?.scope === "project" ? "this project" : "all projects",
       selected: 0,
       editing: false,
@@ -7684,6 +7704,9 @@ private stepAgentField(delta: number): void {
           instructions: form.instructions.trim(),
           model: form.model.trim(),
           permissions: form.permissions === "yes" ? "write" : "read",
+          // Only carried when granted, so an agent saved here does not acquire a
+          // `github: false` line that the file did not have.
+          ...(form.github === "yes" ? { github: true } : {}),
         },
         scope,
         this.cwd,

@@ -1261,8 +1261,10 @@ describe("several tool calls in one turn", () => {
 
   it("marks only the tools that change nothing", () => {
     // The marker is what makes the overlap safe, so it is pinned per tool: a tool
-    // that can write and claims otherwise would overlap with another write.
-    const expected = new Set(["read", "glob", "grep", "recall"]);
+    // that can write and claims otherwise would overlap with another write. The
+    // list is enumerated rather than derived, because "which tools are safe" is
+    // the claim being made and a computed one would agree with itself.
+    const expected = new Set(["read", "glob", "grep", "recall", "github"]);
     for (const tool of createDefaultTools().list()) {
       expect(tool.concurrencySafe === true, tool.name).toBe(expected.has(tool.name));
     }

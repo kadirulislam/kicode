@@ -598,6 +598,29 @@ describe("named agents", () => {
     expect(described).toContain("Review a pull request diff");
   });
 
+  it("hands a granted agent the github tool, and an ungranted one nothing", async () => {
+    const granted: SubagentRequest[] = [];
+    await tool([profile({ github: true })], granted).run(
+      { goal: "audit my repos", agent: "cody-git" },
+      { signal: new AbortController().signal } as never,
+    );
+
+    const plain: SubagentRequest[] = [];
+    await tool([profile()], plain).run(
+      { goal: "audit my repos", agent: "cody-git" },
+      { signal: new AbortController().signal } as never,
+    );
+
+    // Resolved once, here, and handed to the builder — the grant is read in exactly
+    // one place, so there is no second reading that could disagree.
+    expect(granted[0]?.tools).toContain("github");
+    expect(plain[0]?.tools).not.toContain("github");
+    // And never a shell, either way.
+    for (const request of [...granted, ...plain]) {
+      expect(request.tools).not.toContain("bash");
+    }
+  });
+
   it("points the child at its own skill files, by path", async () => {
     const seen: SubagentRequest[] = [];
     const runner = tool([profile({ skills: [{ name: "pr-review", description: "", file: "/s/pr-review.md" }] })], seen);
@@ -867,6 +890,19 @@ describe("the roster in the system prompt", () => {
     // failure, since the wrong subagent costs more than none.
     expect(prompt).toContain("Read each agent's skills before deciding");
     expect(prompt).toContain("do the work yourself");
+  });
+
+  it("says so when an agent can reach GitHub, because that is what it is for", () => {
+    const prompt = namedSubagentPrompt([profile({ github: true })]);
+
+    // The point of the grant: the model has to know this agent can answer
+    // GitHub questions, or it will do the work itself and read the wrong files.
+    expect(prompt).toContain("read the GitHub API with the `github` tool");
+    expect(prompt).toContain("Use it for anything about");
+  });
+
+  it("says nothing about GitHub for an agent that was not granted it", () => {
+    expect(namedSubagentPrompt([profile()])).not.toContain("github");
   });
 
   it("leaves the skills line out for an agent that has none", async () => {

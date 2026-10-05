@@ -2,6 +2,7 @@ import { askTool } from "./ask";
 import { bashTool } from "./bash";
 import { editTool } from "./edit";
 import { globTool } from "./glob";
+import { githubTool } from "./github";
 import { grepTool } from "./grep";
 import { createPlanTools } from "./plan";
 import { readTool } from "./read";
@@ -46,6 +47,7 @@ export function createDefaultTools(extra: Tool[] = [], options: { ask?: boolean 
     bashTool,
     rememberTool,
     recallTool,
+    githubTool,
     ...createPlanTools(),
   ];
   if (options.ask) tools.push(askTool);

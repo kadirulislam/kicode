@@ -2628,7 +2628,7 @@ describe("the subagent editor", () => {
     await tick(20);
     app.input.write("\r");
     await tick(25);
-    app.input.write(down(5));
+    app.input.write(down(6));
     await tick(20);
     app.input.write("\u001b[C"); // right
     await tick(25);
@@ -2660,7 +2660,7 @@ describe("the subagent editor", () => {
     await tick(20);
     app.input.write("\r");
     await tick(20);
-    app.input.write(down(2)); // → Save
+    app.input.write(down(3)); // -> Save
     await tick(20);
     app.input.write("\r"); // press Save
     await tick(40);
@@ -2728,6 +2728,8 @@ describe("the subagent editor", () => {
     await tick(25);
     app.input.write("\r"); // Model → May edit files
     await tick(25);
+    app.input.write("\r"); // → GitHub access
+    await tick(25);
     app.input.write("\r"); // → Where
     await tick(25);
     app.input.write("\r"); // → Save
@@ -2737,10 +2739,14 @@ describe("the subagent editor", () => {
 
     const written = JSON.parse(
       await readFile(path.join(own, "agents.json"), "utf8"),
-    ) as { agents: Record<string, { permissions: string }> };
+    ) as { agents: Record<string, { permissions: string; github?: boolean }> };
     expect(Object.keys(written.agents)).toEqual(["cody-git"]);
     // Read-only by default, in the file as well as on screen.
     expect(written.agents["cody-git"]?.permissions).toBe("read");
+    // And absent rather than `false`, because absence is the default and should
+    // stay legible as absence — a file that gains `github: false` on every agent
+    // is one nobody can read the grants out of.
+    expect("github" in (written.agents["cody-git"] ?? {})).toBe(false);
     // The list it returns to now holds the agent — a save the user cannot see
     // have worked is a save they have to go and check for.
     expect(app.lastFrame()).toContain("cody-git");
@@ -2925,6 +2931,10 @@ it("ends the field and steps to the next one on enter", async () => {
     await tick(20);
     app.input.write("\u001b[C"); // flip the permission to yes
     await tick(20);
+    app.input.write("\r"); // → GitHub access
+    await tick(20);
+    app.input.write("\u001b[C"); // flip GitHub access to yes
+    await tick(20);
     app.input.write("\r"); // → Where
     await tick(20);
     app.input.write("\r"); // → Save
@@ -2933,12 +2943,15 @@ it("ends the field and steps to the next one on enter", async () => {
     await tick(60);
 
     const written = JSON.parse(await readFile(path.join(own, "agents.json"), "utf8")) as {
-      agents: Record<string, { description: string; instructions: string; permissions: string }>;
+      agents: Record<string, { description: string; instructions: string; permissions: string; github?: boolean }>;
     };
-    // Every field arrived, and the grant flipped on the way past.
+    // Every field arrived, and both grants flipped on the way past. The GitHub one
+    // is the interesting half: it is the field a form can silently fail to carry,
+    // and it would look like it worked while quietly reverting next session.
     expect(written.agents["cody-git"]?.description).toBe("GitHub and git work");
     expect(written.agents["cody-git"]?.instructions).toBe("Review branches and PRs.");
     expect(written.agents["cody-git"]?.permissions).toBe("write");
+    expect(written.agents["cody-git"]?.github).toBe(true);
 
     await leave(app, done);
     if (previous === undefined) delete process.env.KICODE_HOME;

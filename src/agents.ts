@@ -44,6 +44,19 @@ export type AgentSkill = {
   file: string;
 };
 
+/**
+ * Whether an agent may use the `github` tool.
+ *
+ * Opt-in per agent, and off by default, because the tool carries the *user's*
+ * GitHub token: `/user/repos` returns private repositories, and `read` already
+ * reaches files but not the process environment. Adding it to every child would
+ * hand every child the user's private repository list without anyone deciding
+ * that — which is the difference between a capability a profile declares and one
+ * the child set happens to have.
+ *
+ * Separate from `permissions`, which is about *changing* things. This one reads
+ * somebody else's server.
+ */
 export type AgentProfile = {
   /** How the main agent names it in `delegate({ agent: … })`. */
   name: string;
@@ -54,6 +67,13 @@ export type AgentProfile = {
   /** Empty means the parent's own model. */
   model: string;
   permissions: AgentPermissions;
+  /**
+   * May use the `github` tool, which reads the API with the user's token.
+   *
+   * Absent means no. See `AgentProfile` for why this is not folded into
+   * `permissions`.
+   */
+  github?: boolean;
   scope: "global" | "project";
   /** The file it came from, so an edit writes back where it was read from. */
   file: string;
@@ -284,6 +304,9 @@ export async function readAgentsFile(
       // Read-only unless the file says otherwise: an agent that could write has
       // to have been granted it deliberately.
       permissions: entry.permissions === "write" ? "write" : "read",
+      // Same reasoning, and the same default: the GitHub tool speaks with the
+      // user's token, so it is off until a profile asks for it by name.
+      ...(entry.github === true ? { github: true } : {}),
       scope,
       file,
     });
@@ -359,6 +382,10 @@ async function writeAgentsFile(file: string, agents: readonly AgentProfile[]): P
       instructions: agent.instructions,
       model: agent.model,
       permissions: agent.permissions,
+      // Written only when granted, so a file saved by this version does not gain
+      // a `github: false` on every agent — the absence is the default and should
+      // stay legible as absence.
+      ...(agent.github === true ? { github: true } : {}),
     };
   }
   const temporary = `${file}.tmp`;
@@ -407,35 +434,77 @@ export async function removeAgentProfile(
  * A named list rather than a count, because the whole claim "a child cannot
  * change anything" is this list — and a test reads it.
  */
-export function toolsFor(permissions: AgentPermissions): readonly string[] {
-  return permissions === "write" ? ["read", "glob", "grep", "recall", "write", "edit"] : ["read", "glob", "grep", "recall"];
+export function toolsFor(permissions: AgentPermissions, github = false): readonly string[] {
+  const base = permissions === "write" ? ["read", "glob", "grep", "recall", "write", "edit"] : ["read", "glob", "grep", "recall"];
+  // Appended last so the grant reads as the addition it is, and so `bash` — which
+  // is not in either list and cannot be granted by any profile at any level —
+  // stays absent by construction rather than by filtering.
+  return github ? [...base, "github"] : base;
 }
 
 /**
- * The child's prompt: the standing rules, then what this agent is for.
+ * The child's prompt: what this agent is for, then the standing rules.
  *
- * The specialisation comes last on purpose — it is the part that differs, and
- * the part most likely to be overridden by a later line.
+ * The specialisation comes **first** on purpose. It used to come last, on the
+ * reasoning that a later line overrides an earlier one — but the standing rules
+ * are invariants and the specialisation is not, so the wrong order is the one
+ * that reads as authoritative. `cody-git`'s own brief says what to do with
+ * GitHub, and the rules below said it could not touch GitHub; with the rules
+ * last, the impossibility read as the policy.
+ *
+ * `github` says whether this child holds the `github` tool. It has to, because
+ * the rules below otherwise tell the child it cannot reach GitHub while it is
+ * holding a tool that does exactly that — and a prompt that contradicts its own
+ * toolset is worse than either version alone.
  */
-export function childPrompt(instructions: string): string {
+export function childPrompt(instructions: string, github = false): string {
   const extra = instructions.trim();
-  return extra ? `${extra}\n\n${SUBAGENT_RULES}` : SUBAGENT_RULES;
+  const rules = github ? SUBAGENT_RULES_GITHUB : SUBAGENT_RULES;
+  return extra ? `${extra}\n\n${rules}` : rules;
 }
 
-const SUBAGENT_RULES = [
-  "You are a subagent working inside KiCode, on one delegated task.",
-  "",
-  "Rules:",
-  "- You start with no memory of the conversation that sent you. Everything you need is in the task.",
+/** The parts that do not vary, so the two rule sets cannot drift apart. */
+const SUBAGENT_SHARED = [
   "- Inspect the real files before you conclude anything. Never guess at file contents.",
-  "- You cannot run commands. There is no `bash`, no `gh`, no `git` — nothing that executes.",
-  "  If the task as given cannot be done by reading files, say so in your first line and report",
-  "  what you could determine from the files, plus exactly which command would answer the rest.",
-  "  Do not quietly return nothing: an empty report leaves the agent that sent you with no result",
-  "  and no idea why.",
   "- Answer with a report, not a conversation: what you found, where (file paths and line numbers), and anything you could not determine.",
   "- Answer in prose, always. A report that is a file listing or a diff with no explanation does not",
   "  tell the reader what you concluded, and they are the one who has to act on it.",
   "- If the task is ambiguous or you hit something only the user can decide, say so in a line under open questions rather than guessing.",
   "- Be brief. Your report is read by another agent with a full task of its own; detail you do not need is cost paid twice.",
+];
+
+/** For a child with no `github` tool: it cannot reach GitHub at all. */
+const SUBAGENT_RULES = [
+  "You are a subagent working inside KiCode, on one delegated task.",
+  "",
+  "Rules:",
+  "- You start with no memory of the conversation that sent you. Everything you need is in the task.",
+  ...SUBAGENT_SHARED.slice(0, 1),
+  "- You cannot run commands. There is no `bash`, no `gh`, no `git` — nothing that executes.",
+  "  If the task as given cannot be done by reading files, say so in your first line and report",
+  "  what you could determine from the files, plus exactly which command would answer the rest.",
+  "  Do not quietly return nothing: an empty report leaves the agent that sent you with no result",
+  "  and no idea why.",
+  ...SUBAGENT_SHARED.slice(1),
+].join("\n");
+
+/** For a child that was granted `github`: it can read the API, and still cannot run anything. */
+const SUBAGENT_RULES_GITHUB = [
+  "You are a subagent working inside KiCode, on one delegated task.",
+  "",
+  "Rules:",
+  "- You start with no memory of the conversation that sent you. Everything you need is in the task.",
+  ...SUBAGENT_SHARED.slice(0, 1),
+  "- You have a `github` tool that reads the GitHub API through the authenticated `gh` CLI, using the",
+  "  user's own credentials. Use it for anything about GitHub that the files on disk cannot answer:",
+  "  the signed-in user, repositories, org memberships, issues, pull requests, workflow runs. Prefer it",
+  "  over reading files — it is current, where a file is whatever the last session left behind.",
+  "  Give it a path beginning with `/`, such as `/user` or `/user/repos`, and add a `jq` filter to keep",
+  "  the payload small. It reads only: there is no way to write, comment or merge through it.",
+  "- Apart from that tool you still cannot run commands. There is no `bash` and no `git`, so `git status`,",
+  "  a build and a test are all things you must ask for. If the task needs one, say so in your first",
+  "  line, report what you could determine, and name exactly which command would answer the rest.",
+  "  Do not quietly return nothing: an empty report leaves the agent that sent you with no result and",
+  "  no idea why.",
+  ...SUBAGENT_SHARED.slice(1),
 ].join("\n");

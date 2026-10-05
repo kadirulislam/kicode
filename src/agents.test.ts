@@ -394,6 +394,81 @@ describe("saving", () => {
   });
 });
 
+describe("the github grant on a profile", () => {
+  it("does not tell a granted child it has no way to reach GitHub", () => {
+    // The contradiction this exists to catch: the standing rules said "no gh, no
+    // git, nothing that executes" while the child was holding a tool that is
+    // exactly that. A prompt that contradicts its own toolset is worse than
+    // either version alone — the model cannot tell which one is true.
+    const granted = childPrompt("You handle GitHub.", true);
+
+    expect(granted).toContain("`github` tool");
+    expect(granted).not.toContain("no `gh`");
+  });
+
+  it("still tells a granted child it cannot run a shell", () => {
+    // The grant is a read on somebody else's server. It is not a shell.
+    const granted = childPrompt("", true);
+
+    expect(granted).toContain("no `bash`");
+    expect(granted).toContain("It reads only");
+  });
+
+  it("tells an ungranted child exactly what it had before", () => {
+    expect(childPrompt("", false)).toContain("no `gh`");
+    expect(childPrompt("", false)).not.toContain("`github` tool");
+  });
+
+  it("puts the specialisation before the rules, so the rules cannot override it", () => {
+    // The wrong order is the one that reads as authoritative, because the rules
+    // are invariants and the specialisation is not. It used to be last.
+    const prompt = childPrompt("SPECIALISATION LINE", true);
+
+    expect(prompt.indexOf("SPECIALISATION LINE")).toBeLessThan(prompt.indexOf("You are a subagent"));
+  });
+
+  it("is read back from the file when it was written", async () => {
+    await write("global", { agents: { "cody-git": profile({ github: true }) } });
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    expect(agents[0]?.github).toBe(true);
+  });
+
+  it("is absent — not false — when the file does not grant it", async () => {
+    await write("global", { agents: { "cody-git": profile() } });
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    // Absence is the default and should stay legible as absence, so a hand-written
+    // file and a saved one look the same.
+    expect(agents[0]?.github).toBeUndefined();
+  });
+
+  it("survives a save and reload, so the editor does not lose the grant", async () => {
+    await saveAgentProfile(
+      { ...profile(), github: true },
+      "global",
+      project,
+      env(),
+    );
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    // Without this the toggle would look like it worked and quietly revert on the
+    // next session — the editor saving a field the file could not hold.
+    expect(agents[0]?.github).toBe(true);
+  });
+
+  it("does not add a github line to an agent that was not granted it", async () => {
+    await saveAgentProfile({ ...profile() }, "global", project, env());
+
+    const { agents } = await readAgentProfiles(project, env());
+
+    expect(agents[0]?.github).toBeUndefined();
+  });
+});
+
 describe("what a profile gives a child", () => {
   it("is read-only by default and adds edit when asked", () => {
     expect(toolsFor("read")).toEqual(["read", "glob", "grep", "recall"]);
@@ -405,7 +480,33 @@ describe("what a profile gives a child", () => {
     // delegated model can run anything unsupervised, several at a time.
     for (const level of ["read", "write"] as const) {
       expect(toolsFor(level)).not.toContain("bash");
+      // Granting GitHub must not become a back door to the same thing: the
+      // argument vector is the guarantee, and it does not depend on the toolset.
+      expect(toolsFor(level, true)).not.toContain("bash");
     }
+  });
+
+  describe("the GitHub grant", () => {
+    it("is off unless a profile asks for it", () => {
+      // It speaks with the user's token, so `/user/repos` answers with private
+      // repositories. Adding it to every child would hand every child the user's
+      // private repo list without anyone deciding that.
+      expect(toolsFor("read")).not.toContain("github");
+      expect(toolsFor("write")).not.toContain("github");
+    });
+
+    it("is added when granted, at either permission level", () => {
+      expect(toolsFor("read", true)).toEqual(["read", "glob", "grep", "recall", "github"]);
+      expect(toolsFor("write", true)).toContain("github");
+    });
+
+    it("is a read, so it never comes with edit", () => {
+      // The whole design is that there is no way to write. A read-only profile
+      // holding `github` still cannot change anything on GitHub.
+      const granted = toolsFor("read", true);
+      expect(granted).not.toContain("write");
+      expect(granted).not.toContain("edit");
+    });
   });
 
   it("never grants a child to delegate further, so the tree stays flat", () => {

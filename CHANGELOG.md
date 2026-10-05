@@ -6,6 +6,31 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A `github` tool that reads the GitHub API through `gh` — with no shell at
+  all.** A child cannot run `bash` (ADR-053), which left `cody-git` unable to do
+  the one thing it exists for. `gh` is executed directly with an argument vector,
+  so there is no command line for a second command to hide in; full URLs, `@`
+  file-upload shorthand, and `$ENV` in a `jq` filter are all refused with the
+  reason before anything runs. Reads only, at either permission level. It is
+  **opt-in per subagent** (`GitHub access` in `/agents`), off by default, because
+  it speaks with the user's token and `/user/repos` answers with private
+  repositories — a thing `read` cannot reach, since a token is not a file.
+
+  Verified against the real CLI: profile, `jq` filtering, pagination, and a 404
+  reported as an API error rather than an exit code. Two things found by running
+  it rather than reading it — `--slurp` is **rejected** alongside `--jq`, so
+  pairing them unconditionally broke every paginated filtered query; and an
+  unfiltered paginated call on a 56-repo account is 309KB, so it truncates with a
+  note instead of pretending to be the whole answer.
+
+  The subagent prompt now states what the tool *can* do when it is granted it. It
+  previously told every child "no `gh`, no `git`, nothing that executes" — which
+  contradicted its own toolset, and a prompt that disagrees with the tools is
+  worse than either version alone. The specialisation also moved **above** the
+  standing rules, so an invariant cannot read as overriding it.
+
 ### Changed
 
 - **Independent tool calls in one turn now overlap.** A model exploring a codebase

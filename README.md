@@ -815,6 +815,7 @@ child really was handed a read-only toolset:
 | `edit` | **yes** | Replace an exact string; refuses an ambiguous match |
 | `bash` | **yes** | Run a shell command in the working directory |
 | `ask` | — | Put a choice to you as labelled options; only offered when somebody can answer |
+| `github` | — | Read the GitHub REST API through the authenticated `gh` CLI; reads only |
 | `delegate` | — | Hand a task, or a batch of them, to child agents; off with `delegation.enabled: false` |
 
 `glob` and `grep` are pure Node — no `ripgrep` binary to install. Both match
@@ -851,6 +852,50 @@ naming the platform, the shell and the commands that shell has and has not — s
 recognized as an internal or external command`. `KICODE_SHELL` overrides the
 choice, and `KICODE_SHELL=cmd.exe` keeps the Windows commands for someone who
 wants them. WSL's `bash.exe` is never picked: its paths are Linux paths.
+
+### GitHub, without a shell
+
+`github` reads the GitHub REST API through the `gh` CLI using your own
+credentials — the signed-in user, repositories, org memberships, issues, pull
+requests, workflow runs, search. It needs `gh` installed and signed in
+(`gh auth login`); without it the tool says so and tells the model to work from
+the repository files instead.
+
+```
+github({ path: "/user/repos", jq: ".[] | {name, private, pushed_at}", paginate: true })
+```
+
+**There is no shell anywhere in it.** `gh` is executed directly with an argument
+vector, so there is no command line for a second command to hide in:
+`path: "/user/repos; rm -rf ~"` is not a shell, it is a request for a repository
+that does not exist. That is safety by construction rather than by inspection —
+and it is the reason this is a tool instead of a restricted `bash`. A read-only
+verdict about a *shell command* is a denylist trying to parse a language it does
+not own, which is a much weaker guarantee for a child with nobody watching than
+it is for you, with a diff in front of you.
+
+Consequences worth knowing:
+
+- **The leading `/` is required**, and that is not a quirk. Git Bash rewrites an
+  argument beginning with `/` into a Windows path, so `gh api /user/repos` under
+  Git Bash asks for `C:\Program Files\Git\user\repos`. That rewrite belongs to a
+  shell reading its arguments; there is no shell here, so the canonical form is
+  simply correct.
+- **No full URLs, and no `@`.** The token goes to whatever host a URL names, and
+  `gh api @file` would read a local file and send its contents. Both are refused
+  with the reason, before anything runs.
+- **`$ENV` is refused in `jq`.** It is the one thing a jq program can reach that
+  the tool otherwise cannot — `gh` holds your token in the process environment,
+  and `read` cannot see it, so allowing it would be a way *around* a child's
+  isolation.
+- **`paginate` pairs with `--slurp` only when there is no filter**, because `gh`
+  rejects the two together. With a `jq` filter, `gh` merges the pages itself.
+- **Output over 256KB is truncated, with a note.** Add a `jq` filter — it is much
+  cheaper than reading the whole payload, and on a large account it is the
+  difference between an answer and a cut-off one.
+
+It reads only. There is no way to write, comment or merge through it, at either
+permission level.
 
 ## Subagents
 
@@ -912,6 +957,9 @@ you have defined and opens a form to add one:
     Model                         (empty)
     May edit files                [no] / yes
         It can write and edit. There is no undo for a confused child.
+    GitHub access                 [no] / yes
+        Off. Without this it cannot answer anything about GitHub that the
+        files on disk do not already say.
     Where                         [all projects] / this project
     ✔ Save
 
@@ -946,6 +994,13 @@ Four things worth knowing:
   grantable `bash` would mean a model you delegated to can run anything,
   unsupervised, four at a time. Unlike a write, there is no diff to show you
   first.
+- **GitHub access is a separate, per-agent switch**, off unless granted. The
+  `github` tool speaks with *your* token, so `/user/repos` answers with your
+  private repositories — a child with it can read things `read` cannot reach,
+  because a token is not a file. Separate from the edit permission on purpose:
+  that one is about changing things, this one is about somebody else's server.
+  A granted agent is listed in the system prompt as able to read the API, so the
+  model routes GitHub questions to it instead of doing the work itself.
 - **Two files, one format.** `~/.kicode/agents.json` for everywhere,
   `<project>/.kicode/agents.json` for one project. The project's overrides by
   name, and replaces rather than merges — so a repo can ship a `cody-frontend`
@@ -1644,12 +1699,9 @@ around a failure — a rejected key, a cancellation, and an answer already begun
    own report but not on the parent's ledger, so `/context` and `/usage`
    under-report a session that delegated. The fix is an `Agent.absorb(other)` the
    loop calls for each settled child on the `subagents` event.
-2. **A structured `github` tool, so `cody-git` can do GitHub work.** It cannot
-   run commands (ADR-053), so `gh` is out of reach and the agent has to have the
-   command run for it. The safe shape is a purpose-built tool with typed arguments
-   — `github(op: "api", path: "/user/repos")` — not a gated shell: a shell string
-   parsed by a denylist is a weaker guarantee for a child with nobody watching
-   than it is for a parent with a human and a diff.
+2. **A structured `github` tool, so `cody-git` can do GitHub work.** *(Built —
+   see above. ADR-064. What it deliberately cannot do: GraphQL, and therefore
+   mutations, because "read-only" was worth more than query flexibility.)*
 3. **MCP resources and prompts** — the client speaks the `tools/*` surface only;
    `resources/*` and `prompts/*` are the next slice of the protocol.
 4. **Write-capable children.** Read-only is a deliberate v1 limit: a child that
