@@ -236,6 +236,46 @@ describe("Agent.send", () => {
     expect(second?.messages[1]).toEqual({ role: "user", content: "read a.txt" });
   });
 
+  it("names the session's subagents in the system prompt", async () => {
+    // Not only in the tool description. A capability is not a policy: a model
+    // that knows `agent` takes a name but is not told when to use one will do
+    // the work itself — which is exactly what was reported.
+    const provider = new FakeProvider([answerTurn("hi")]);
+    const agent = new Agent({
+      provider,
+      tools: new ToolRegistry([echoTool]),
+      model: "m",
+      cwd: process.cwd(),
+      namedSubagents: [
+        {
+          name: "cody-git",
+          description: "GitHub and git work",
+          instructions: "",
+          model: "",
+          permissions: "read",
+          scope: "global",
+          file: "",
+        },
+      ],
+    });
+
+    await collect(agent, "check the repos");
+
+    const system = String(provider.requests[0]?.messages[0]?.content ?? "");
+    expect(system).toContain("cody-git — GitHub and git work");
+    expect(system).toContain("Subagents:");
+  });
+
+  it("says nothing about subagents when there are none", async () => {
+    const provider = new FakeProvider([answerTurn("hi")]);
+    const agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });
+
+    await collect(agent, "check the repos");
+
+    const system = String(provider.requests[0]?.messages[0]?.content ?? "");
+    expect(system).not.toContain("Subagents:");
+  });
+
   it("sends the tool specs on every request", async () => {
     const provider = new FakeProvider([answerTurn("hi")]);
     const agent = new Agent({ provider, tools: new ToolRegistry([echoTool]), model: "m", cwd: process.cwd() });

@@ -8,6 +8,14 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- The named subagents are now listed in the **system prompt**, with when to use
+  each one. They were only in the `delegate` tool's description, so a session
+  told a GitHub question did the work itself and then went looking for
+  `cody-git` on disk to check that it existed.
+- `MOCK_LOG=2` on the mock provider prints the system prompt of every request —
+  the only way to see from outside whether something the model is supposed to
+  know actually reached it.
+
 - **`Subagents` in the settings panel's `Shortcuts` group**, opening the same
   screen `/agents` does.
 - `enter` now ends a field and steps to the next one, already open for typing, so

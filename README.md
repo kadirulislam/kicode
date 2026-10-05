@@ -908,9 +908,15 @@ and the row shows it as you go, caret and all.
 Four things worth knowing:
 
 - **The name and the one-line description are what the model reads.** They go
-  into the `delegate` tool's own description, so a subagent you define is one
-  the model can actually choose. A task can name its own agent, so one batch can
-  send one task to `cody-git` and another to `cody-frontend`.
+  into the system prompt *and* into the `delegate` tool's own description, so a
+  subagent you define is one the model can actually choose — and is told when to
+  reach for. A task can name its own agent, so one batch can send one task to
+  `cody-git` and another to `cody-frontend`.
+
+  Write the description as the *trigger*, not the summary. `GitHub and git work`
+  tells the model what the agent is; `anything about GitHub, PRs or branches`
+  tells it when to reach. That is the difference between a subagent that gets
+  used and one that never does.
 - **Read-only is the default; edit is a per-agent choice.** Read and edit are
   the file-shaped permissions. **`bash` is never grantable** — a shell is
   arbitrary code and a child has no approval channel to ask about it, so a

@@ -33,6 +33,48 @@ import type { SubagentView, Tool } from "./tools/types";
  */
 export type SubagentState = SubagentView;
 
+/**
+ * The parent session's instructions about its named subagents.
+ *
+ * In the **system prompt**, not only in the tool description, because a tool
+ * parameter is a capability and a system prompt is a policy. A model told only
+ * that `agent` accepts a name will treat the name as a thing to verify — the
+ * observed failure was a session asked about GitHub work that went looking for
+ * `cody-git` on disk with `grep` before it would use one.
+ *
+ * `null` when there are none: a session with no subagents should not be told
+ * about the possibility.
+ */
+export function namedSubagentPrompt(profiles: readonly AgentProfile[]): string | null {
+  if (profiles.length === 0) return null;
+  const list = profiles
+    .map(
+      (profile) =>
+        `- ${profile.name} — ${profile.description || "no description"} (${
+          profile.permissions === "write" ? "may edit files" : "read only"
+        })`,
+    )
+    .join("\n");
+  return [
+    "Subagents:",
+    "This session has named subagents. Each is a child agent with its own focus and its own",
+    "permissions, and you reach one through the delegate tool's `agent` field.",
+    "",
+    list,
+    "",
+    "- When the user names one of these, delegate to it by name. Do that without checking whether it",
+    "  exists and without asking whether to: they are already available to you, and looking for them",
+    "  on disk is a wasted turn that answers a question you should already know the answer to.",
+    "- When a task is broad, exploratory, or spans many files, and one of these fits it, delegate to",
+    "  that one rather than reading everything yourself. That is what they are for, and their report",
+    "  comes back to you.",
+    "- If none of them fit the task, do the work yourself. Delegating to the wrong one is worse than",
+    "  not delegating.",
+    "- A subagent has no memory of this conversation. Put everything it needs in `context`: paths,",
+    "  error text, and the constraint that matters.",
+  ].join("\n");
+}
+
 /** What a finished child hands back to its parent. */
 export type SubagentResult = {
   id: string;
@@ -522,9 +564,15 @@ export function delegateTool(options: DelegateToolOptions): Tool {
       // invitation to guess.
       ...(profiles.length
         ? [
-            `Set \`agent\` when one of these fits the task: ${profiles
-              .map((profile) => `${profile.name} (${profile.description || "no description"})`)
+            `Set \`agent\` when one of these fits the task — prefer one over doing the work yourself: ${profiles
+              .map(
+                (profile) =>
+                  `${profile.name} (${profile.description || "no description"}, ${
+                    profile.permissions === "write" ? "may edit files" : "read only"
+                  })`,
+              )
               .join("; ")}.`,
+            "When the user names one of them, use that one. Do not check whether it exists and do not ask whether to.",
             "Omit `agent` for a general-purpose child that only reads.",
           ]
         : []),

@@ -146,6 +146,12 @@ const server = createServer((req, res) => {
         `[mock] ${child ? "child" : "parent"} · ${messages.length} messages · tools: ${offered.join(", ") || "(none)"}`,
       );
     }
+    // `2` also prints the system prompt, which is the only way to see from
+    // outside whether the subagent roster actually reached the model.
+    if (process.env.MOCK_LOG === "2") {
+      const system = messages.find((message) => message.role === "system");
+      console.log(`[mock] system prompt:\n${String(system?.content ?? "(none)")}`);
+    }
     /** What this reply said, so the usage frame can be about it. */
     let spoken = "";
 

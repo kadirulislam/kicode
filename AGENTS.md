@@ -13,6 +13,8 @@ KiCode is a terminal-based AI coding assistant with multi-provider routing, MCP 
    - `src/agent/`: The agent loop, tool registry, and **subagent delegation** (`subagent.ts`: the `delegate` tool, the child runner, the live roster).
    - `src/agents.ts`: **Named subagents** — profiles, permissions, and the two `agents.json` files. `/agents` manages them, `/agents running` watches the children, and the settings panel's `Subagents` door opens the same list.
    - The editor is a form (`FormPanel` in `menu.ts`, drawn by `renderFormPanel`). **`enter` is "next field" on every kind** — toggles change with `‹›` or space, and shift+enter is a line break. Never give `enter` two meanings.
+   - **The roster belongs in the system prompt** (ADR-057), not only in the tool description. A capability is not a policy: without the prompt the model treats a subagent name as a claim to verify and greps for it on disk. `MOCK_LOG=2` prints the system prompt so this can be checked from outside.
+   - A subagent's `description` is its **trigger**, not its summary — that text is how the model decides when to reach for it.
    - `src/config.ts` & `src/settings-file.ts`: Multi-level configuration resolution (CLI > Project > Global > Env).
    - `src/settings-write.ts`: Atomic persistence to `~/.kicode.json`.
 3. **Subagents** (`src/agent/subagent.ts`, ADR-053; `src/agents.ts`, ADR-054):

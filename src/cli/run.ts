@@ -668,6 +668,10 @@ export async function runCli(argv: string[], io: Io): Promise<number> {
       tools: settings.tools
         ? createDefaultTools(mcp?.tools ?? []).subset(settings.tools)
         : createDefaultTools([...(mcp?.tools ?? []), ...(settings.extraTools ?? [])], { ask: canAsk }),
+      // The roster names the subagents this agent may reach, so it knows when to
+      // reach for one. A child is built with `tools`, and gets no roster: the tree
+      // stays flat, and a child must never be told it can delegate further.
+      ...(settings.tools || agentProfiles.length === 0 ? {} : { namedSubagents: agentProfiles }),
       model,
       cwd,
       // A child carries its own, smaller ceiling: a delegated task should be

@@ -4,6 +4,7 @@ import {
   SubagentRegistry,
   childRunner,
   delegateTool,
+  namedSubagentPrompt,
   type ChildRunnerOptions,
   type DelegateSettings,
   type SubagentRequest,
@@ -571,11 +572,25 @@ describe("named agents", () => {
     });
 
   it("tells the model what the named agents are for", () => {
-    // The description is the only place a model learns `cody-git` exists.
+    // The description is the only place a model learns `cody-git` exists — the
+    // system prompt says it too, but a model that never reads the roster still
+    // has to find the names here.
     const described = tool([profile()]).description;
 
     expect(described).toContain("cody-git");
     expect(described).toContain("GitHub and git work");
+  });
+
+  it("says to prefer a named agent over doing the work itself", () => {
+    // A list of names with no steering is a menu the model may never order from.
+    expect(tool([profile()]).description).toContain("prefer one over doing the work yourself");
+  });
+
+  it("says not to check whether one exists, or to ask whether to", () => {
+    const described = tool([profile()]).description;
+
+    expect(described).toContain("Do not check whether it exists");
+    expect(described).toContain("do not ask whether to");
   });
 
   it("offers the names as an enum, so a model cannot invent one", () => {
@@ -710,6 +725,64 @@ describe("named agents", () => {
     const result = await tool([profile()]).run({ goal: "a", agent: 7 as unknown as string }, context());
 
     expect(result.isError).toBe(true);
+  });
+});
+
+describe("the roster in the system prompt", () => {
+  const profile = (over: Partial<AgentProfile> = {}): AgentProfile => ({
+    name: "cody-git",
+    description: "GitHub and git work",
+    instructions: "",
+    model: "",
+    permissions: "read",
+    scope: "global",
+    file: "",
+    ...over,
+  });
+
+  it("says nothing at all when there are none", () => {
+    // A session with no subagents should not be told the possibility exists.
+    expect(namedSubagentPrompt([])).toBeNull();
+  });
+
+  it("names each one with what it is for and what it may do", () => {
+    const prompt = namedSubagentPrompt([
+      profile({ name: "cody-git", description: "GitHub work", permissions: "write" }),
+      profile({ name: "cody-ui", description: "The renderer", permissions: "read" }),
+    ]);
+
+    expect(prompt).toContain("cody-git — GitHub work (may edit files)");
+    expect(prompt).toContain("cody-ui — The renderer (read only)");
+  });
+
+  it("tells the model not to go looking for one", () => {
+    // The failure this exists to stop: asked about GitHub work, a session that
+    // knew `agent` accepted a name went and grepped the filesystem for
+    // `cody-git` before it would use one.
+    const prompt = namedSubagentPrompt([profile()]);
+
+    expect(prompt).toContain("without checking whether it");
+    expect(prompt).toContain("on disk is a wasted turn");
+  });
+
+  it("says to do the work itself when none of them fit", () => {
+    // Without this the roster reads as "always delegate", which is its own
+    // failure: the wrong subagent costs more than none.
+    expect(namedSubagentPrompt([profile()])).toContain("do the work yourself");
+  });
+
+  it("reminds the model a child starts with no memory of the conversation", () => {
+    const prompt = namedSubagentPrompt([profile()]);
+
+    expect(prompt).toContain("no memory of this conversation");
+    expect(prompt).toContain("context");
+  });
+
+  it("does not promise a command a child was never given", () => {
+    // The same trap the child's own prompt fell into once, in the other
+    // direction: telling the parent to expect a bash-capable child would have it
+    // ask for work the child cannot do.
+    expect(namedSubagentPrompt([profile()])).not.toMatch(/you can run commands/i);
   });
 });
 

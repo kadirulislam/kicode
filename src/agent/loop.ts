@@ -6,6 +6,8 @@ import type { QuotaReading } from "../routes/quota";
 import { compactMessages, estimateTokens, shouldCompact, type CompactionOptions } from "./compaction";
 import { learnFromSession, type LearnResult } from "./learn";
 import type { PlanSnapshot, SubagentView, ToolContext, ToolRegistry } from "./tools/types";
+import type { AgentProfile } from "../agents";
+import { namedSubagentPrompt } from "./subagent";
 
 /**
  * A user turn's content: the words, and any pasted images beside them.
@@ -139,6 +141,13 @@ export type AgentOptions = {
   history?: readonly ChatMessage[];
   /** Summarise older turns when the context window fills up. Off when omitted. */
   compaction?: CompactionOptions;
+  /**
+   * The named subagents this session may reach, named in the system prompt.
+   *
+   * The parent's only. A child is built without them, so the tree stays flat and a
+   * child cannot delegate further — which is also why the prompt never reaches one.
+   */
+  namedSubagents?: readonly AgentProfile[];
 };
 
 export const DEFAULT_SYSTEM_PROMPT = [
@@ -291,6 +300,11 @@ export class Agent {
     // so a directory's AGENTS.md adds to the picture rather than replacing it —
     // and the model always knows which shell `bash` will use.
     const system = [options.systemPrompt ?? DEFAULT_SYSTEM_PROMPT, environmentPrompt()];
+    // The named subagents go in the prompt, not only in the tool's description: a
+    // capability is not a policy, and a model that knows the names exist but is
+    // not told when to reach for them will do the work itself.
+    const roster = options.namedSubagents ? namedSubagentPrompt(options.namedSubagents) : null;
+    if (roster) system.push(roster);
     if (this.readOnly) system.push(PLAN_MODE_PROMPT);
     this.messages.push({ role: "system", content: system.join("\n\n") });
     if (options.history) this.messages.push(...options.history);
