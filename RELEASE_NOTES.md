@@ -87,8 +87,7 @@ See [CHANGELOG.md](./CHANGELOG.md) for the complete list.
 
 ## Notes
 
-- **Licence: `UNLICENSED`.** This is a proprietary package. Publishing it puts
-  the built bundle in the registry — it does not put it in the public domain.
+- **Licence: `MIT`.** Open source under the MIT License.
 - **The tarball ships built output only**: a minified `dist/cli.js`, the README,
   the changelog and the licence. No source, no tests, no history.
 - **Git installs are not a supported path.** npm blocks `prepare` scripts by

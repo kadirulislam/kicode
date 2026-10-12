@@ -187,11 +187,14 @@ export const PLAN_MODE_PROMPT = [
  * How many requests one turn may make before it stops of its own accord.
  *
  * A request is one model turn, and a task needs several: look, read, change,
- * verify. Twelve was the old bound and ordinary work reached it — the task was
- * not done, the model had not said it was, and the run simply ended. Forty is
- * still a bound, but it is one a real task does not hit by accident.
+ * verify. Twelve was the old bound and ordinary work reached it; forty was
+ * raised to a hundred, which real sessions then reached too — measured turns of
+ * 70 and 88 requests on a broad refactor, both cut off at the ceiling rather
+ * than by anything being wrong. Three hundred keeps it a bound (a model that
+ * never stops still stops) while moving the ceiling off the size of a real task.
+ * It stays settable: `kicode.json` `maxTurns`, then `KICODE_MAX_TURNS`.
  */
-export const DEFAULT_MAX_TURNS = 100;
+export const DEFAULT_MAX_TURNS = 300;
 
 /**
  * How many times one turn may re-ask a reply that was not an answer.

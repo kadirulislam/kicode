@@ -1795,6 +1795,29 @@ describe("the plan button and its panel", () => {
       },
     };
     expect(draw({ plan: withGoal }).plain.join("\n")).toContain("[TODO 1/2]");
+    });
+
+    it("hands the headline back to the checklist once the goal is over", () => {
+      // A finished goal is the bug this pins: its subtask count used to hold the
+      // chip for the rest of the session, frozen and hiding every checklist
+      // started afterwards. The two counts are deliberately different, so a chip
+      // reading either source is distinguishable rather than accidentally equal.
+      const finishedGoal: PlanSnapshot = {
+        todos: [
+          { text: "first", done: true },
+          { text: "second", done: false },
+          { text: "third", done: false },
+        ],
+        goal: {
+          title: "already shipped",
+          status: "completed",
+          tasks: [{ id: "t1", title: "build", status: "done" }],
+        },
+      };
+
+      // The checklist's 1/3, not the goal's 1/1.
+      expect(draw({ plan: finishedGoal }).plain.join("\n")).toContain("[TODO 1/3]");
+      expect(draw({ plan: finishedGoal }).plain.join("\n")).not.toContain("[TODO 1/1]");
   });
 
   it("draws the checklist and the goal in a panel, right-aligned above the box", () => {

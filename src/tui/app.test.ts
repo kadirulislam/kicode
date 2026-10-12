@@ -4541,6 +4541,80 @@ describe("the slash commands", () => {
     expect(app.screen()).toContain("session session-1 · 2 messages");
   });
 
+  it("takes the tracked work back on /undo, rather than leaving a stale chip", async () => {
+    // The inverse of the restored-session case above, and the same disagreement:
+    // `undo` rewound the agent and rebuilt the transcript but never recomputed
+    // `plan`, so undoing the turn that added a checklist left `[TODO 1/2]`
+    // advertising work the model no longer held. The chip reads the replay, so
+    // undoing the turn that carried the todo calls has to clear it.
+
+    // The checklist lives in the turn *after* the last user message, so undoing
+    // that request removes the todo calls too — the case where a chip that is
+    // never recomputed keeps advertising work the model has been rewound past.
+    // `undo` cuts at the last `user` message, so nothing user-shaped may follow.
+    const undone: ChatMessage[] = [
+      { role: "user", content: "tidy the repo" },
+      { role: "assistant", content: "noted" },
+      { role: "user", content: "now track the steps" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_1",
+            type: "function",
+            function: {
+              name: "todo",
+              arguments: JSON.stringify({ action: "add", items: ["read the config", "rename the flag"] }),
+            },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_1", content: "1. read the config\n2. rename the flag" },
+      {
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: "call_2",
+            type: "function",
+            function: { name: "todo", arguments: JSON.stringify({ action: "done", ids: [1] }) },
+          },
+        ],
+      },
+      { role: "tool", tool_call_id: "call_2", content: "1. [x] read the config\n2. [ ] rename the flag" },
+    ];
+
+    const app = harness({
+      listSessions: async () => [
+      { id: "session-1", title: "empty" },
+      { id: "session-2", title: "tracked" },
+    ],
+      loadSession: async (id) => (id === "session-2" ? undone : null),
+    });
+
+    const done = runTui(app.options);
+    await tick(15);
+    // The open session tracks nothing, so there is no button yet.
+    expect(app.lastFrame()).not.toContain("[TODO");
+
+    // Switch to the session that carries the checklist, exactly as the restored
+    // session case does.
+    app.input.write("\u001b[<0;20;1M");
+    await tick(30);
+    expect(app.lastFrame()).toContain("[TODO 1/2]");
+
+    app.input.write("/undo\r");
+    await tick(30);
+    expect(app.screen()).toContain("undid the last request");
+    // The turn that added the checklist is gone, so the chip is gone with it —
+    // not frozen advertising work the model has just been rewound past.
+    expect(app.lastFrame()).not.toContain("[TODO");
+
+    app.input.write("\u0015/exit\r");
+    await done;
+  });
+
   it("copies the conversation into a new session on /fork", async () => {
     const { app, done } = await drive(["hello", "/fork"]);
     await finish(app, done);

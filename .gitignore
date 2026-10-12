@@ -12,3 +12,15 @@ coverage/
 .env.*
 !.env.example
 *.local
+
+# Internal developer workflow and local state tracking
+AGENTS.md
+PROJECT_STATUS.md
+TODO.md
+DECISIONS.md
+LAUNCH.md
+free-route-retention.md
+kicode-vision-spec.md
+quota-route-health-design.md
+route-consent-design.md
+v1-milestones.md

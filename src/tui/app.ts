@@ -4470,6 +4470,7 @@ class TuiApp {
     const kept = turns.slice(0, cut);
     this.agent.rewind(kept);
     this.entries = entriesFromHistory(kept);
+    this.plan = planFromHistory(kept, this.cwd);
     this.anchor = null;
     this.scroll = 0;
     this.note(`undid the last request · ${kept.length} messages left`);

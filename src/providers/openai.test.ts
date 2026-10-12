@@ -192,7 +192,7 @@ describe("OpenAIProvider.stream", () => {
       new Response(JSON.stringify({ type: "error", error: { type: "AuthError", message: "Invalid API key." } }), {
         status: 401,
       })) as unknown as typeof fetch;
-    const provider = new OpenAIProvider({ apiKey: "sk-opencode-real", baseUrl: "https://opencode.ai/zen/v1", fetchImpl });
+    const provider = new OpenAIProvider({ apiKey: "test-mock-api-key", baseUrl: "https://opencode.ai/zen/v1", fetchImpl });
 
     await expect(collect(provider)).rejects.toThrow(/either the key or the client gate/);
     await expect(collect(provider)).rejects.toThrow(/--probe --model/);
@@ -205,7 +205,7 @@ describe("OpenAIProvider.stream", () => {
     // is fine.
     const fetchImpl = (async () =>
       new Response(JSON.stringify({ error: { message: "Forbidden" } }), { status: 403 })) as unknown as typeof fetch;
-    const provider = new OpenAIProvider({ apiKey: "sk-opencode-real", baseUrl: "https://opencode.ai/zen/v1", fetchImpl });
+    const provider = new OpenAIProvider({ apiKey: "test-mock-api-key", baseUrl: "https://opencode.ai/zen/v1", fetchImpl });
 
     await expect(collect(provider)).rejects.toThrow(/restricted to the OpenCode client/);
   });

@@ -150,15 +150,14 @@ describe("RouteHealth store", () => {
         // A key shape inside a gateway message, which is the input the redaction
         // this file tests has to survive.
         reason:
-          "Provider rejected the API key: Authorization: Bearer thk_live_Xa7UA9mQ2secretvalue (sk-proj-abcdefghijklmnop1234)\nsecond line", // kicode-secret-ok
+          "Provider rejected the API key: Authorization: Bearer thk_live_mockredacted012345 (sk-proj-mockredacted012345)\nsecond line", // kicode-secret-ok
         at: NOW,
       },
     );
     await store.flush();
 
     const raw = await readFile(routesFile({ KICODE_HOME: dir }), "utf8");
-    expect(raw).not.toContain("Xa7UA9mQ2secretvalue");
-    expect(raw).not.toContain("abcdefghijklmnop1234");
+    expect(raw).not.toContain("mockredacted012345");
     expect(raw).not.toContain("Bearer thk_live");
     expect(raw).toContain("bearer ***");
     // One line, because it is drawn as one.

@@ -12,7 +12,7 @@ npm install -g @kadirulislam/kicode
 kicode --version
 ```
 
-That is the whole install:KiCode has no runtime dependencies and no account, and the `bin` entry resolves to a single bundled file. It is licensed as a commercial/proprietary product — see the [license](#license). To run it without
+That is the whole install: KiCode has no runtime dependencies and no account, and the `bin` entry resolves to a single bundled file. It is open source — see the [license](#license). To run it without
 installing globally, `npx @kadirulislam/kicode "…"` works the same way.
 
 ### Connect an endpoint, then set its key
@@ -1364,7 +1364,7 @@ Each attempt carries a dim note — `the reply was cut off — asking it to carr
 on`, `the model answered with nothing — asking again` — so what you are watching
 is the endpoint's cap or a hiccup, not the model deciding it was done.
 
-One request budget bounds the whole thing: 40 model turns per request of yours
+One request budget bounds the whole thing: 300 model turns per request of yours
 (the old 12 was reached by ordinary work — look, read, edit, verify — before
 anything had gone wrong). A turn that does run out says so — `turn budget
 reached — send anything to carry on` — instead of the transcript just stopping.
@@ -1746,7 +1746,7 @@ asked for tools, or one that said something and was allowed to finish. A reply
 the endpoint cut off at its output cap and a reply with neither words nor a tool
 call are not answers, so the turn asks again — a few times, and never at the
 cost of an unbounded loop. Malformed tool arguments and unknown tools are
-reported back to the model rather than crashing the run, and `maxTurns` (40)
+reported back to the model rather than crashing the run, and `maxTurns` (300)
 bounds a model that never stops.
 
 ### The one genuinely tricky part
@@ -1816,7 +1816,4 @@ Adding a tool is a single file plus one line in `createDefaultTools()`. Set
 
 ## License
 
-KiCode is **commercial software**. See [`LICENSE`](LICENSE) (a proprietary/
-commercial license) for the exact terms. Installing it for your own personal or
-internal business purposes is permitted; copying, redistributing,
-sublicensing, selling, or reverse engineering it is not.
+KiCode is open-source software licensed under the [MIT License](LICENSE).

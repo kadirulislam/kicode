@@ -9,10 +9,7 @@ const pkg = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), 
  * esbuild preserves the hashbang in `src/cli.ts`, so no `banner` here — adding
  * one too would emit a duplicated shebang.
  *
- * The published artifact is minified with comments stripped: the package is
- * distributed under a proprietary license, so the shipped bundle should not
- * read as the source it was built from. Minification raises that bar; it is not
- * a secret, and the license is what actually prohibits copying.
+ * The published artifact is bundled with comments stripped for clean distribution.
  */
 export default defineConfig({
   entry: ["src/cli.ts"],

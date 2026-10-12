@@ -63,7 +63,7 @@ describe("probeEndpoint", () => {
 
   it("names both suspects from the gateway's own error", async () => {
     const result = await probeEndpoint({
-      apiKey: "sk-opencode-real",
+      apiKey: "test-mock-api-key",
       baseUrl: "https://opencode.ai/zen/v1",
       fetchImpl: fetchFor(
         chatError(401, { type: "error", error: { type: "AuthError", message: "Invalid API key." } }),

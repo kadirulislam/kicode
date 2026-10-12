@@ -2810,15 +2810,23 @@ function modeSpans(state: TuiState, styles: Styles, width: number, indent: strin
  * The tracked-work chip for the state row, or null when nothing is tracked.
  *
  * A goal is the headline while it runs — the checklist beside it is a means to
- * it — so the chip shows the goal's own subtask progress when one is active,
- * and the checklist's otherwise. Nothing tracked means no chip at all: a
+ * it — so the chip shows the goal's own subtask progress when one is running,
+ * and the checklist's otherwise. "Running" is the condition, and not merely "there
+ * is a goal": a finished goal hands the headline back rather than freezing a count
+ * that can never move again. Nothing tracked means no chip at all: a
  * `TODO [0/0]` on every quiet session is a button for nothing.
  */
 function planChip(plan: PlanSnapshot, styles: Styles): Span[] | null {
-  const goalTasks = plan.goal?.tasks ?? [];
+  // `running`, and not merely "there is a goal". A finished goal is over: it
+  // keeps its subtask history in the panel, but the headline belongs to the
+  // checklist again — otherwise the session sits frozen at a `[TODO n/n]` that
+  // can never move again, and hides every checklist started after it, which is
+  // the same "the tracked work is not showing" as having no chip at all.
+  const running = plan.goal?.status === "running" ? plan.goal : null;
+   const goalTasks = running?.tasks ?? [];
   let done: number;
   let total: number;
-  if (plan.goal && goalTasks.length > 0) {
+  if (running && goalTasks.length > 0) {
     done = goalTasks.filter((task) => task.status === "done").length;
     total = goalTasks.length;
   } else {
